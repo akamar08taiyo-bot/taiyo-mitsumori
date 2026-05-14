@@ -44,6 +44,7 @@ const STORAGE_KEYS = {
   FAVORITES: 'taiyo_favorites_v1',
   OFFICE_INFO: 'taiyo_office_info_v1',
   DRAFT: 'taiyo_draft_v1',
+  LOGIN: 'taiyo_login_v1',
 };
 
 const OFFICE_MASTER = [
@@ -157,7 +158,50 @@ const parseNumberInput = (raw) => {
   return String(raw).replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)).replace(/[,，\s]/g, '');
 };
 
+function LoginScreen({ onLogin }) {
+  const [office, setOffice] = useState('');
+  const [userName, setUserName] = useState('');
+  const [error, setError] = useState('');
+  const submit = (e) => {
+    e?.preventDefault();
+    if (!office) { setError('営業所を選択してください'); return; }
+    if (!userName.trim()) { setError('ログイン名（担当者名）を入力してください'); return; }
+    onLogin({ office, userName: userName.trim(), loggedInAt: Date.now() });
+  };
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-800 via-slate-900 to-blue-950 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden">
+        <div className="bg-gradient-to-r from-blue-700 to-blue-900 text-white p-6 text-center">
+          <FileText className="w-12 h-12 mx-auto mb-2 text-amber-400" />
+          <h1 className="text-xl font-bold">太陽シルバーサービス㈱</h1>
+          <p className="text-sm text-blue-100 mt-1">見積書・提案書作成システム</p>
+        </div>
+        <form onSubmit={submit} className="p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-bold text-slate-700 mb-1.5">営業所を選択 <span className="text-red-500">*</span></label>
+            <select value={office} onChange={e => { setOffice(e.target.value); setError(''); }} className="w-full p-2.5 border-2 border-slate-300 rounded-lg outline-none focus:border-blue-500 bg-white text-sm font-medium" autoFocus>
+              <option value="">▼ 営業所を選んでください</option>
+              {OFFICE_MASTER.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-bold text-slate-700 mb-1.5">ログイン名（担当者名） <span className="text-red-500">*</span></label>
+            <input type="text" value={userName} onChange={e => { setUserName(e.target.value); setError(''); }} placeholder="例: 山田 太郎" className="w-full p-2.5 border-2 border-slate-300 rounded-lg outline-none focus:border-blue-500 text-sm" />
+            <p className="text-[11px] text-slate-500 mt-1">※ 入力した名前は見積書の担当者欄に自動セットされます</p>
+          </div>
+          {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm font-bold p-2.5 rounded">{error}</div>}
+          <button type="submit" className="w-full bg-blue-700 hover:bg-blue-800 text-white font-bold py-3 rounded-lg transition shadow-lg">ログインしてはじめる →</button>
+        </form>
+        <div className="bg-slate-50 border-t border-slate-200 px-6 py-3 text-center text-[11px] text-slate-500">
+          ログイン情報はこのブラウザに保存されます
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
+  const [loginInfo, setLoginInfo] = useState(() => loadStorage(STORAGE_KEYS.LOGIN, null));
   const [officeInfo, setOfficeInfo] = useState(() => loadStorage(STORAGE_KEYS.OFFICE_INFO, {
     companyName: '太陽シルバーサービス㈱', officeName: '小倉営業所',
     postal: '802-0011', address: '福岡県北九州市小倉北区重住3丁目11-21',
@@ -165,6 +209,22 @@ function App() {
     staffName: '', email: '',
   }));
   const [showOfficeModal, setShowOfficeModal] = useState(false);
+
+  const handleLogin = (info) => {
+    saveStorage(STORAGE_KEYS.LOGIN, info);
+    setLoginInfo(info);
+    const master = OFFICE_MASTER.find(o => o.name === info.office);
+    if (master) {
+      setOfficeInfo(prev => ({ ...prev, companyName: '太陽シルバーサービス㈱', officeName: master.name, postal: master.postal, address: master.address, phone: master.phone, fax: master.fax, manager: master.manager, staffName: info.userName }));
+    } else {
+      setOfficeInfo(prev => ({ ...prev, staffName: info.userName }));
+    }
+  };
+  const handleLogout = () => {
+    if (!confirm('ログアウトしますか？\n（入力中のデータはブラウザに残ります）')) return;
+    try { localStorage.removeItem(STORAGE_KEYS.LOGIN); } catch {}
+    setLoginInfo(null);
+  };
 
   const [clientName, setClientName] = useState('');
   const [clientName2, setClientName2] = useState('');
@@ -637,6 +697,8 @@ function App() {
     } catch (err) { notify('印刷エラー: ' + err.message); }
   };
 
+  if (!loginInfo) return <LoginScreen onLogin={handleLogin} />;
+
   return (
     <div className="min-h-screen bg-slate-100 font-sans text-slate-800 text-sm">
       <style>{`@page { size: A4; margin: 12mm 10mm; } .item-table-input { height: 40px !important; box-sizing: border-box !important; line-height: 1.2 !important; } @media print { .no-print { display: none !important; } }`}</style>
@@ -647,7 +709,7 @@ function App() {
               <FileText className="w-7 h-7 text-amber-400" />
               <div>
                 <h1 className="font-bold text-lg leading-tight">見積書・提案書作成システム</h1>
-                <span className="text-xs text-slate-300">{officeInfo.officeName || officeInfo.companyName}</span>
+                <span className="text-xs text-slate-300">{loginInfo.office}　/　担当: <strong className="text-amber-200">{loginInfo.userName}</strong></span>
               </div>
             </div>
             <div className="flex flex-wrap gap-2 justify-center lg:justify-end items-center">
@@ -659,6 +721,7 @@ function App() {
               <button onClick={() => setShowLoadModal(true)} className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Archive className="w-4 h-4" /> 保存BOX{savedProposals.length > 0 && <span className="bg-white text-indigo-700 rounded-full px-1.5 text-[10px] ml-1">{savedProposals.length}</span>}</button>
               <button onClick={() => setShowOfficeModal(true)} className="flex items-center gap-1 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><Building2 className="w-3.5 h-3.5" /> 営業所設定</button>
               <button onClick={() => setShowGuideModal(true)} className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded text-xs font-bold transition border border-slate-600"><BookOpen className="w-3.5 h-3.5" /> 使い方</button>
+              <button onClick={handleLogout} className="flex items-center gap-1 bg-slate-600 hover:bg-slate-500 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><X className="w-3.5 h-3.5" /> ログアウト</button>
             </div>
           </div>
         </div>
