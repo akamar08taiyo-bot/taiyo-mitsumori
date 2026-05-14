@@ -45,6 +45,7 @@ const STORAGE_KEYS = {
   OFFICE_INFO: 'taiyo_office_info_v1',
   DRAFT: 'taiyo_draft_v1',
   LOGIN: 'taiyo_login_v1',
+  FOLDERS: 'taiyo_folders_v1',
 };
 
 const OFFICE_MASTER = [
@@ -294,6 +295,14 @@ function App() {
 
   const [attachments, setAttachments] = useState([]);
   const [savedProposals, setSavedProposals] = useState(() => loadStorage(STORAGE_KEYS.PROPOSALS, []));
+  const [folders, setFolders] = useState(() => loadStorage(STORAGE_KEYS.FOLDERS, []));
+  const [selectedFolderId, setSelectedFolderId] = useState(null);
+  const [saveFolderId, setSaveFolderId] = useState(null);
+  const [newFolderInputName, setNewFolderInputName] = useState('');
+  const [editingFolderId, setEditingFolderId] = useState(null);
+  const [editingFolderName, setEditingFolderName] = useState('');
+  const [editingProposalId, setEditingProposalId] = useState(null);
+  const [editingProposalName, setEditingProposalName] = useState('');
   const [favorites, setFavorites] = useState(() => loadStorage(STORAGE_KEYS.FAVORITES, []));
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [showLoadModal, setShowLoadModal] = useState(false);
@@ -308,6 +317,34 @@ function App() {
   useEffect(() => { saveStorage(STORAGE_KEYS.OFFICE_INFO, officeInfo); }, [officeInfo]);
   useEffect(() => { saveStorage(STORAGE_KEYS.FAVORITES, favorites); }, [favorites]);
   useEffect(() => { saveStorage(STORAGE_KEYS.PROPOSALS, savedProposals); }, [savedProposals]);
+  useEffect(() => { saveStorage(STORAGE_KEYS.FOLDERS, folders); }, [folders]);
+
+  const addFolder = (name) => {
+    const n = (name||'').trim(); if (!n) return null;
+    const dup = folders.find(f => f.name === n);
+    if (dup) return dup.id;
+    const id = genId('fld');
+    setFolders(prev => [{ id, name: n, createdAt: Date.now() }, ...prev]);
+    return id;
+  };
+  const renameFolder = (id, name) => {
+    const n = (name||'').trim(); if (!n) return;
+    setFolders(prev => prev.map(f => f.id === id ? { ...f, name: n } : f));
+  };
+  const deleteFolder = (id) => {
+    const f = folders.find(x => x.id === id);
+    if (!f) return;
+    const count = savedProposals.filter(p => p.folderId === id).length;
+    if (!confirm(`施設フォルダ「${f.name}」を削除しますか？\n中の見積（${count}件）はフォルダなしへ移動します。`)) return;
+    setSavedProposals(prev => prev.map(p => p.folderId === id ? { ...p, folderId: null } : p));
+    setFolders(prev => prev.filter(x => x.id !== id));
+    if (selectedFolderId === id) setSelectedFolderId(null);
+  };
+  const moveProposal = (pid, fid) => setSavedProposals(prev => prev.map(p => p.id === pid ? { ...p, folderId: fid } : p));
+  const renameProposal = (pid, name) => {
+    const n = (name||'').trim(); if (!n) return;
+    setSavedProposals(prev => prev.map(p => p.id === pid ? { ...p, name: n } : p));
+  };
 
   const draftLoadedRef = useRef(false);
   useEffect(() => {
@@ -509,9 +546,11 @@ function App() {
 
   const handleSave = () => {
     if (!saveName.trim()) return;
-    const np = { id: genId('prop'), name: saveName, clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal, groups, attachments, updatedAt: Date.now() };
+    let folderId = saveFolderId;
+    if (folderId === '__new__') folderId = addFolder(newFolderInputName);
+    const np = { id: genId('prop'), name: saveName, folderId: folderId || null, clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal, groups, attachments, updatedAt: Date.now() };
     setSavedProposals(prev => [np, ...prev]);
-    setShowSaveModal(false); setSaveName(''); notify('保存しました');
+    setShowSaveModal(false); setSaveName(''); setSaveFolderId(null); setNewFolderInputName(''); notify('保存しました');
   };
   const handleLoad = (p) => {
     setClientName(p.clientName||''); setClientName2(p.clientName2||''); setClientHonorific(p.clientHonorific||'御中');
@@ -893,33 +932,134 @@ function App() {
         </div>
       )}
 
-      {showSaveModal && (
+      {showSaveModal && (() => {
+        const matchedFolder = folders.find(f => clientName && f.name === clientName);
+        const currentFolderId = saveFolderId !== null ? saveFolderId : (matchedFolder?.id ?? null);
+        return (
         <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
-          <div className="bg-white p-5 rounded-xl shadow-2xl max-w-md w-full">
-            <h3 className="text-lg font-bold mb-3">見積を保存</h3>
-            <input value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="例: A病院様 2026見積" className="w-full border border-slate-300 p-2 rounded mb-3 outline-none focus:border-blue-500" autoFocus />
-            <div className="flex justify-end gap-2"><button onClick={() => setShowSaveModal(false)} className="px-4 py-2 font-bold text-slate-600 hover:bg-slate-100 rounded text-sm">キャンセル</button><button onClick={handleSave} disabled={!saveName.trim()} className={`px-4 py-2 font-bold rounded text-sm text-white ${saveName.trim() ? 'bg-blue-600' : 'bg-slate-300'}`}><Save className="w-4 h-4 inline mr-1" /> 保存</button></div>
-          </div>
-        </div>
-      )}
-
-      {showLoadModal && (
-        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
-          <div className="bg-white p-5 rounded-xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col">
-            <div className="flex justify-between items-center mb-3"><h3 className="text-lg font-bold flex items-center gap-2"><Archive className="w-5 h-5" /> 保存BOX</h3><button onClick={() => setShowLoadModal(false)}><X className="w-5 h-5" /></button></div>
-            <div className="flex-1 overflow-y-auto space-y-2">
-              {savedProposals.length === 0 ? <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />保存されたデータはありません</div> :
-                savedProposals.map(p => (
-                  <div key={p.id} className="border border-slate-200 rounded p-3 flex justify-between items-center hover:bg-slate-50">
-                    <div className="min-w-0"><div className="font-bold truncate">{p.name}</div><div className="text-[11px] text-slate-500">{p.clientName && <span>{p.clientName}　</span>}{new Date(p.updatedAt).toLocaleString('ja-JP')}</div></div>
-                    <div className="flex gap-1"><button onClick={() => handleLoad(p)} className="px-3 py-1.5 bg-blue-100 text-blue-700 font-bold rounded text-xs">開く</button><button onClick={() => handleDeleteProposal(p.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button></div>
-                  </div>
-                ))
-              }
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="p-4 border-b bg-blue-50 flex justify-between items-center"><h3 className="text-lg font-bold text-blue-800 flex items-center gap-2"><Save className="w-5 h-5" /> 見積を保存</h3><button onClick={() => { setShowSaveModal(false); setSaveFolderId(null); setNewFolderInputName(''); }}><X className="w-5 h-5" /></button></div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">📁 保存先フォルダ（施設）</label>
+                <div className="grid grid-cols-2 gap-1.5 max-h-40 overflow-y-auto border border-slate-200 rounded p-2 bg-slate-50">
+                  <button type="button" onClick={() => setSaveFolderId(null)} className={`text-left px-2.5 py-1.5 rounded text-xs font-bold border ${currentFolderId === null ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-600 border-slate-200 hover:bg-blue-50'}`}>📂 フォルダなし</button>
+                  {folders.map(f => (
+                    <button key={f.id} type="button" onClick={() => setSaveFolderId(f.id)} className={`text-left px-2.5 py-1.5 rounded text-xs font-bold border truncate ${currentFolderId === f.id ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-700 border-slate-200 hover:bg-blue-50'}`}>🏢 {f.name}</button>
+                  ))}
+                </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <input value={newFolderInputName} onChange={e => { setNewFolderInputName(e.target.value); if (e.target.value.trim()) setSaveFolderId('__new__'); }} placeholder="または新しい施設フォルダ名を入力" className="flex-1 border border-slate-300 p-1.5 rounded text-sm outline-none focus:border-blue-500" />
+                  {clientName && !folders.find(f => f.name === clientName) && <button type="button" onClick={() => { setNewFolderInputName(clientName); setSaveFolderId('__new__'); }} className="text-xs bg-amber-100 text-amber-700 px-2 py-1.5 rounded font-bold whitespace-nowrap flex items-center gap-1"><Sparkles className="w-3 h-3" />「{clientName}」</button>}
+                </div>
+                {currentFolderId === '__new__' && newFolderInputName.trim() && <div className="text-[11px] text-green-700 font-bold mt-1">→ 新規フォルダ「{newFolderInputName.trim()}」を作成して保存</div>}
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">📝 この見積の名前</label>
+                <input value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="例: 2026年4月分 / 通常品 / 春の提案" className="w-full border-2 border-slate-300 p-2.5 rounded outline-none focus:border-blue-500" autoFocus />
+                <div className="flex gap-1 mt-1.5 flex-wrap">
+                  {clientName && <button type="button" onClick={() => setSaveName(`${clientName}_${proposalDate}`)} className="text-[10px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded">宛先+日付</button>}
+                  <button type="button" onClick={() => setSaveName(`${proposalDate}_${proposalTitle}`)} className="text-[10px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded">日付+タイトル</button>
+                </div>
+              </div>
+            </div>
+            <div className="p-4 border-t bg-slate-50 flex justify-between items-center">
+              <div className="text-[11px] text-slate-500">保存先：<strong>{currentFolderId === null ? 'フォルダなし' : currentFolderId === '__new__' ? `🆕 ${newFolderInputName||'(名前未入力)'}` : folders.find(f => f.id === currentFolderId)?.name}</strong></div>
+              <div className="flex gap-2"><button onClick={() => { setShowSaveModal(false); setSaveFolderId(null); setNewFolderInputName(''); }} className="px-4 py-2 font-bold text-slate-600 hover:bg-slate-100 rounded text-sm">キャンセル</button><button onClick={handleSave} disabled={!saveName.trim()} className={`px-5 py-2 font-bold rounded text-sm text-white ${saveName.trim() ? 'bg-blue-600 hover:bg-blue-700' : 'bg-slate-300'}`}><Save className="w-4 h-4 inline mr-1" /> 保存</button></div>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
+
+      {showLoadModal && (() => {
+        const proposalsInFolder = selectedFolderId === '__all__' ? savedProposals : savedProposals.filter(p => (p.folderId || null) === selectedFolderId);
+        return (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[85vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center p-4 border-b bg-indigo-50">
+              <h3 className="text-lg font-bold text-indigo-800 flex items-center gap-2"><Archive className="w-5 h-5" /> 保存BOX <span className="text-xs font-normal text-slate-500">（左：施設フォルダ／右：見積一覧）</span></h3>
+              <button onClick={() => { setShowLoadModal(false); setEditingFolderId(null); setEditingProposalId(null); }}><X className="w-5 h-5" /></button>
+            </div>
+            <div className="flex-1 flex overflow-hidden">
+              <div className="w-64 border-r border-slate-200 bg-slate-50 flex flex-col">
+                <div className="px-3 py-2 border-b border-slate-200 bg-white text-xs font-bold text-slate-600 flex items-center justify-between">
+                  <span>📁 施設フォルダ</span><span className="text-[10px] text-slate-400">{folders.length}件</span>
+                </div>
+                <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
+                  <button onClick={() => setSelectedFolderId('__all__')} className={`w-full text-left px-2.5 py-1.5 rounded text-xs font-bold ${selectedFolderId === '__all__' ? 'bg-indigo-600 text-white' : 'hover:bg-slate-200 text-slate-700'}`}>📋 すべての見積 <span className="text-[10px] opacity-70">({savedProposals.length})</span></button>
+                  <button onClick={() => setSelectedFolderId(null)} className={`w-full text-left px-2.5 py-1.5 rounded text-xs font-bold ${selectedFolderId === null ? 'bg-indigo-600 text-white' : 'hover:bg-slate-200 text-slate-700'}`}>📂 フォルダなし <span className="text-[10px] opacity-70">({savedProposals.filter(p => !p.folderId).length})</span></button>
+                  <div className="border-t border-slate-200 my-1"></div>
+                  {folders.length === 0 && <div className="text-[10px] text-slate-400 text-center py-2">↓下で施設フォルダを作成</div>}
+                  {folders.map(f => (
+                    <div key={f.id} className={`group rounded ${selectedFolderId === f.id ? 'bg-indigo-600' : ''}`}>
+                      {editingFolderId === f.id ? (
+                        <div className="flex items-center gap-1 p-1">
+                          <input value={editingFolderName} onChange={e => setEditingFolderName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { renameFolder(f.id, editingFolderName); setEditingFolderId(null); } if (e.key === 'Escape') setEditingFolderId(null); }} className="flex-1 text-xs px-1.5 py-1 border border-blue-400 rounded outline-none" autoFocus />
+                          <button onClick={() => { renameFolder(f.id, editingFolderName); setEditingFolderId(null); }} className="p-1 bg-blue-600 text-white rounded"><CheckCircle2 className="w-3 h-3" /></button>
+                          <button onClick={() => setEditingFolderId(null)} className="p-1 bg-slate-300 rounded"><X className="w-3 h-3" /></button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center">
+                          <button onClick={() => setSelectedFolderId(f.id)} className={`flex-1 text-left px-2.5 py-1.5 rounded-l text-xs font-bold truncate ${selectedFolderId === f.id ? 'text-white' : 'hover:bg-slate-200 text-slate-700'}`}>🏢 {f.name} <span className="text-[10px] opacity-70">({savedProposals.filter(p => p.folderId === f.id).length})</span></button>
+                          <button onClick={(e) => { e.stopPropagation(); setEditingFolderId(f.id); setEditingFolderName(f.name); }} title="名前を変更" className={`p-1 opacity-0 group-hover:opacity-100 ${selectedFolderId === f.id ? 'text-white hover:bg-indigo-700' : 'text-slate-500 hover:bg-slate-200'} rounded`}><Settings className="w-3 h-3" /></button>
+                          <button onClick={(e) => { e.stopPropagation(); deleteFolder(f.id); }} title="削除" className={`p-1 opacity-0 group-hover:opacity-100 ${selectedFolderId === f.id ? 'text-white hover:bg-indigo-700' : 'text-slate-500 hover:text-red-600 hover:bg-red-50'} rounded mr-1`}><Trash2 className="w-3 h-3" /></button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="p-2 border-t border-slate-200 bg-white">
+                  <div className="text-[10px] font-bold text-slate-500 mb-1">＋ 新規施設フォルダ</div>
+                  <div className="flex gap-1"><input id="new-fld-inp" placeholder="施設名" className="flex-1 text-xs px-2 py-1.5 border border-slate-300 rounded outline-none focus:border-blue-500" onKeyDown={e => { if (e.key === 'Enter' && e.target.value.trim()) { addFolder(e.target.value); e.target.value = ''; notify('フォルダを作成しました'); } }} /><button onClick={() => { const el = document.getElementById('new-fld-inp'); if (el?.value.trim()) { addFolder(el.value); el.value = ''; notify('フォルダを作成しました'); } }} className="bg-blue-600 text-white px-2 py-1 rounded text-xs font-bold"><Plus className="w-3 h-3" /></button></div>
+                </div>
+              </div>
+              <div className="flex-1 flex flex-col overflow-hidden">
+                <div className="px-4 py-2 border-b border-slate-200 bg-white text-xs font-bold text-slate-600 flex items-center justify-between">
+                  <span>📝 {selectedFolderId === '__all__' ? 'すべての見積' : selectedFolderId === null ? 'フォルダなしの見積' : `「${folders.find(f => f.id === selectedFolderId)?.name||''}」の見積`}</span>
+                  <span className="text-[10px] text-slate-400">{proposalsInFolder.length}件</span>
+                </div>
+                <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                  {proposalsInFolder.length === 0 ? <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />このフォルダには見積がありません</div> :
+                    proposalsInFolder.map(p => (
+                      <div key={p.id} className="border border-slate-200 rounded p-3 hover:bg-slate-50 group">
+                        {editingProposalId === p.id ? (
+                          <div className="flex items-center gap-2 mb-2">
+                            <input value={editingProposalName} onChange={e => setEditingProposalName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { renameProposal(p.id, editingProposalName); setEditingProposalId(null); notify('名前を変更しました'); } if (e.key === 'Escape') setEditingProposalId(null); }} className="flex-1 text-sm font-bold px-2 py-1 border-2 border-blue-400 rounded outline-none" autoFocus />
+                            <button onClick={() => { renameProposal(p.id, editingProposalName); setEditingProposalId(null); notify('名前を変更しました'); }} className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-bold">確定</button>
+                            <button onClick={() => setEditingProposalId(null)} className="px-2 py-1 bg-slate-300 rounded text-xs">取消</button>
+                          </div>
+                        ) : (
+                          <div className="flex justify-between items-start gap-2 mb-1">
+                            <div className="min-w-0 flex-1">
+                              <div className="font-bold truncate">{p.name}</div>
+                              <div className="text-[11px] text-slate-500">{p.clientName && <span>宛先: {p.clientName}　</span>}{new Date(p.updatedAt).toLocaleString('ja-JP')}</div>
+                            </div>
+                            <div className="flex gap-1 shrink-0">
+                              <button onClick={() => handleLoad(p)} className="px-3 py-1.5 bg-blue-100 text-blue-700 font-bold rounded text-xs hover:bg-blue-200">開く</button>
+                              <button onClick={() => { setEditingProposalId(p.id); setEditingProposalName(p.name); }} title="名前を変更" className="p-1.5 text-slate-400 hover:text-blue-600"><Settings className="w-4 h-4" /></button>
+                              <button onClick={() => { if (confirm(`「${p.name}」を削除しますか？`)) handleDeleteProposal(p.id); }} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-[10px] text-slate-500">📁</span>
+                          <select value={p.folderId || ''} onChange={e => { moveProposal(p.id, e.target.value || null); notify('移動しました'); }} className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white outline-none focus:border-blue-500">
+                            <option value="">（フォルダなし）</option>
+                            {folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                    ))
+                  }
+                </div>
+              </div>
+            </div>
+            <div className="px-4 py-2 border-t bg-slate-50 text-[11px] text-slate-500 flex items-center gap-3"><span>💡 フォルダ横の <Settings className="w-3 h-3 inline" /> でリネーム、<Trash2 className="w-3 h-3 inline" /> で削除</span><span>各見積の 📁 で別フォルダへ移動</span></div>
+          </div>
+        </div>
+        );
+      })()}
 
       {showGuideModal && (
         <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
