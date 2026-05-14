@@ -1,0 +1,2783 @@
+import React, { useState, useMemo, useRef, useEffect } from 'react';
+import {
+  Trash2, TrendingDown, Plus, Calculator, FileText, BarChart3,
+  X as MultiplyIcon, PackagePlus, Percent, LayoutTemplate, ArrowUpDown,
+  X, AlertTriangle, Eye, EyeOff, Coins, Package, Save, Archive,
+  Paperclip, FileSpreadsheet, Loader2, ExternalLink, Info, Sparkles,
+  ShieldCheck, BookOpen, CheckCircle2, Star, Printer, Building2,
+  Download, Upload, Settings, ToggleLeft, ToggleRight,
+  ChevronDown, ChevronUp, HighlighterIcon
+} from 'lucide-react';
+
+// ===== ストレージキー =====
+const STORAGE_KEYS = {
+  PROPOSALS: 'taiyo_proposals_v1',
+  FAVORITES: 'taiyo_favorites_v1',
+  OFFICE_INFO: 'taiyo_office_info_v1',
+  DRAFT: 'taiyo_draft_v1',
+};
+
+// ===== 営業所マスタ（太陽シルバーサービス㈱ 全営業所） =====
+const OFFICE_MASTER = [
+  { name: '小倉営業所',   postal: '802-0011', address: '福岡県北九州市小倉北区重住3丁目11-21',  phone: '093-952-1616', fax: '093-952-1627', manager: '森口 賢一' },
+  { name: '小倉南営業所', postal: '800-0226', address: '福岡県北九州市小倉南区田原新町1-3-34',  phone: '093-474-5670', fax: '093-474-5671', manager: '串山 清彦' },
+  { name: '八幡西営業所', postal: '807-0815', address: '福岡県北九州市八幡西区本城東2-4-8',    phone: '093-603-3512', fax: '093-601-3593', manager: '福本 浩史' },
+  { name: '八幡東営業所', postal: '805-0033', address: '福岡県北九州市八幡東区山路松尾町14-6', phone: '093-654-8515', fax: '093-654-8516', manager: '兼重 陽介' },
+  { name: '行橋営業所',   postal: '824-0043', address: '福岡県行橋市大字流末1327番地',         phone: '0930-26-9640', fax: '0930-26-9641', manager: '久保 匠史' },
+  { name: '田川営業所',   postal: '826-0042', address: '福岡県田川市大字川宮1200番地',         phone: '0947-44-1895', fax: '0947-44-2372', manager: '早崎 勝' },
+  { name: '飯塚営業所',   postal: '820-0081', address: '福岡県飯塚市枝国510番地7',             phone: '0948-52-6360', fax: '0948-52-6362', manager: '佐藤 正仁' },
+  { name: '福岡南営業所', postal: '816-0912', address: '福岡県大野城市御笠川2-10-15',          phone: '092-504-9810', fax: '092-504-9811', manager: '神谷 大輔' },
+  { name: '福岡西営業所', postal: '814-0032', address: '福岡県福岡市早良区小田部4-11-31',      phone: '092-833-0131', fax: '092-833-0132', manager: '佐藤 正利' },
+  { name: '福岡東営業所', postal: '812-0064', address: '福岡県福岡市東区松田3丁目25-2',        phone: '092-627-1150', fax: '092-627-1151', manager: '岡本 将臣' },
+  { name: '久留米営業所', postal: '838-0814', address: '福岡県朝倉郡筑前町高田585-1',          phone: '0946-21-5355', fax: '0946-21-5356', manager: '牟田 知広' },
+  { name: '大牟田営業所', postal: '837-0924', address: '福岡県大牟田市歴木446-1',              phone: '0944-59-1488', fax: '0944-59-1481', manager: '橋本 浩志' },
+  { name: '佐賀営業所',   postal: '849-0937', address: '佐賀県佐賀市鍋島5丁目4-15',            phone: '0952-34-1224', fax: '0952-34-1225', manager: '江原 諒' },
+  { name: '長崎営業所',   postal: '851-0122', address: '長崎県長崎市界2丁目2-4',               phone: '095-834-0535', fax: '095-834-0536', manager: '吉本 幸治' },
+  { name: '大村営業所',   postal: '856-0844', address: '長崎県大村市溝陸町643-1',              phone: '0957-49-6222', fax: '0957-49-6333', manager: '山口 隆史' },
+  { name: '壱岐営業所',   postal: '811-5117', address: '長崎県壱岐市郷ノ浦町中触1078',         phone: '0920-47-9005', fax: '0920-47-9006', manager: '長岡 計治' },
+  { name: '熊本営業所',   postal: '862-0945', address: '熊本県熊本市東区画図町大字下無田1432-22', phone: '096-377-7630', fax: '096-377-7631', manager: '城戸 健' },
+  { name: '熊本北営業所', postal: '861-5517', address: '熊本県熊本市北区鶴羽田1-10-7',         phone: '096-341-5765', fax: '096-341-5766', manager: '高木 伸基' },
+  { name: '大分営業所',   postal: '870-0142', address: '大分県大分市三川下2-7-8',              phone: '097-555-9684', fax: '097-555-9685', manager: '山下 厚' },
+];
+
+// ===== 単位オプション =====
+const UNIT_OPTIONS = [
+  { label: '容量 (ml)', value: 'ml', defaultBase: 100 },
+  { label: '容量 (L)', value: 'L', defaultBase: 1 },
+  { label: '重量 (g)', value: 'g', defaultBase: 100 },
+  { label: '重量 (kg)', value: 'kg', defaultBase: 1 },
+  { label: '長さ (m)', value: 'm', defaultBase: 1 },
+  { label: '長さ (cm)', value: 'cm', defaultBase: 100 },
+  { label: '枚数 (枚)', value: '枚', defaultBase: 1 },
+  { label: '個数 (個)', value: '個', defaultBase: 1 },
+  { label: 'セット (組)', value: '組', defaultBase: 1 },
+  { label: '本数 (本)', value: '本', defaultBase: 1 },
+  { label: 'ケース (箱)', value: '箱', defaultBase: 1 },
+  { label: '台数 (台)', value: '台', defaultBase: 1 },
+];
+
+// ===== ユーティリティ =====
+const getEmptyItem = () => ({
+  name: '', memo: '', volume: '', packSize: '1',
+  price: '', casePrice: '', cost: '', caseCost: '', targetMargin: '',
+  isHighlighted: false, memoOpen: false
+});
+
+const genId = (prefix = 'id') =>
+  `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+const loadStorage = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+// ★ パフォーマンス最適化: 同一値書込みをスキップ（localStorage は同期I/Oで重い）
+const saveStorageCache = {};
+const saveStorage = (key, data) => {
+  try {
+    const serialized = JSON.stringify(data);
+    if (saveStorageCache[key] === serialized) return true; // 同一なら何もしない
+    saveStorageCache[key] = serialized;
+    localStorage.setItem(key, serialized);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// ===== 商品名からの推測ロジック =====
+const inferFromProductName = (name) => {
+  if (!name) return null;
+  const n = name.toLowerCase();
+  let volume = null, unit = null, baseScale = null;
+
+  const match = n.match(/(\d+\.?\d*)\s*(ml|l|g|kg|枚|個|本|箱|m|cm|組|台)/i);
+  if (match) {
+    volume = match[1];
+    const foundUnit = match[2].toLowerCase();
+    const option = UNIT_OPTIONS.find(
+      (o) => o.value.toLowerCase() === foundUnit || (foundUnit === 'l' && o.value === 'L')
+    );
+    if (option) {
+      unit = option.value;
+      baseScale = option.defaultBase;
+    }
+  }
+
+  if (!unit) {
+    if (n.includes('トイレット') || n.includes('ロール')) unit = '個';
+    else if (n.includes('アルコール') || n.includes('石鹸') || n.includes('液') || n.includes('洗剤')) unit = 'ml';
+    else if (n.includes('袋') || n.includes('グローブ') || n.includes('マスク')) unit = '枚';
+    else if (n.includes('ラップ')) unit = 'm';
+    else if (n.includes('車椅子') || n.includes('車いす') || n.includes('ベッド')) unit = '台';
+
+    if (unit) {
+      const option = UNIT_OPTIONS.find((o) => o.value === unit);
+      baseScale = option?.defaultBase || 1;
+    }
+  }
+  return { volume, unit, baseScale };
+};
+
+// ===== モジュールスコープの静的ヘルパー（コンポーネント外で1度だけ定義してメモリ・GC負荷を最小化） =====
+// 税区分による自動文言（フッター備考欄のデフォルト）
+const getAutoBottomText = (mode) => {
+  switch (mode) {
+    case 'inclusive': return '本見積書の記載金額は、税込金額となっております。';
+    case 'nontax':    return '本見積書の記載商品は、非課税商品となっております。';
+    default:          return '本見積書の記載金額には、消費税は含まれておりません。';
+  }
+};
+// 既知のデフォルト文言（税区分3パターン）：ユーザー手動編集と区別するための定数
+const KNOWN_BOTTOM_TEXTS = [
+  '本見積書の記載金額には、消費税は含まれておりません。',
+  '本見積書の記載金額は、税込金額となっております。',
+  '本見積書の記載商品は、非課税商品となっております。',
+];
+
+// ★ 最適化: 正規表現はモジュールスコープで1度だけ生成（毎レンダー再生成を回避）
+const CLEAN_TITLE_REGEX = /\s*[（(].*?[)）]/g;
+
+// ★ 最適化: 編集画面ページング件数（コンポーネント外で安定参照）
+const ITEMS_PER_PAGE = 10;
+
+// ★ 最適化: インラインstyle のオブジェクトを定数化（参照安定）
+const STYLE_CATEGORY_INPUT = { maxWidth: '320px', flex: '1 1 280px' };
+const STYLE_TABLE_AUTO = { tableLayout: 'auto' };
+
+// ★ 数値フォーマッタ：カンマ区切り（千円区切り）。null/undefined/空文字は空表示。
+const formatNumber = (value) => {
+  if (value === null || value === undefined || value === '') return '';
+  const n = Number(value);
+  if (!isFinite(n)) return '';
+  return n.toLocaleString('ja-JP');
+};
+// 入力欄からの数値解析（カンマ・全角数字を許容）
+const parseNumberInput = (raw) => {
+  if (raw === null || raw === undefined) return '';
+  const s = String(raw)
+    .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/[,，\s]/g, '');
+  return s;
+};
+// 空のグループ・newItems 初期値（モード切替・初期化時に共通利用：再生成によるGC負荷を最小化）
+const makeEmptyGroups = () => ([
+  { id: 'g-1', title: '', catalogMemo: '',
+    baseVolume: 100, baseQuantity: 1,
+    unit: 'ml', baseScale: 100, items: [] }
+]);
+const makeEmptyNewItems = () => ({ 'g-1': getEmptyItem() });
+
+export default function App() {
+  // ===== 営業所・会社情報 =====
+  // 初回はデフォルト=小倉営業所。ユーザー選択はlocalStorageに自動保存され次回起動時に復元される
+  const [officeInfo, setOfficeInfo] = useState(() =>
+    loadStorage(STORAGE_KEYS.OFFICE_INFO, {
+      companyName: '太陽シルバーサービス㈱',
+      officeName: '小倉営業所',
+      postal: '802-0011',
+      address: '福岡県北九州市小倉北区重住3丁目11-21',
+      phone: '093-952-1616',
+      fax: '093-952-1627',
+      manager: '森口 賢一',
+      staffName: '',
+      email: '',
+    })
+  );
+  const [showOfficeModal, setShowOfficeModal] = useState(false);
+
+  // ===== 基本情報 =====
+  const [clientName, setClientName] = useState('');
+  // ★ 仕様: 宛名（施設名）2段＋敬称（御中／様）切替
+  const [clientName2, setClientName2] = useState('');
+  const [clientHonorific, setClientHonorific] = useState('御中'); // '御中' | '様'
+  const [proposalTitle, setProposalTitle] = useState('御見積書');
+  const [proposalDate, setProposalDate] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+  // 発行日のフリーテキスト表記（手入力対応）。空ならproposalDateから自動生成
+  const [proposalDateText, setProposalDateText] = useState('');
+
+  // ===== 日付変更ハンドラー：カレンダーから選択したら右側に自動でテキスト表示 =====
+  const handleDateChange = (e) => {
+    const newDate = e.target.value;
+    setProposalDate(newDate);
+    if (newDate) {
+      const parts = newDate.split('-');
+      if (parts.length === 3) {
+        setProposalDateText(`${parts[0]}年${parseInt(parts[1], 10)}月${parseInt(parts[2], 10)}日`);
+      }
+    } else {
+      setProposalDateText('');
+    }
+  };
+
+  const [proposalNumber, setProposalNumber] = useState('');
+  const [validityPeriod, setValidityPeriod] = useState('お見積日より30日間');
+  const [paymentTerms, setPaymentTerms] = useState('月末締め翌月末払い');
+  const [deliveryInfo, setDeliveryInfo] = useState('ご注文後、通常2〜3営業日');
+  const [remarks, setRemarks] = useState('消費税は含まれておりません。');
+  const [bottomRemarks, setBottomRemarks] = useState('本見積書の記載金額には、消費税は含まれておりません。');
+
+  // ===== 税区分（税抜/税込/非課税）デフォルト：税抜 =====
+  const [taxMode, setTaxMode] = useState('exclusive'); // 'exclusive' | 'inclusive' | 'nontax'
+
+  // ===== 合計金額の表示/非表示 =====
+  const [showGrandTotal, setShowGrandTotal] = useState(true);
+
+  // ===== アプリモード切替: 'quote'(御見積) | 'proposal'(提案書) =====
+  // 御見積モード = シンプル表示（容量/数量・仕入・利益率を非表示）
+  // 提案書モード = フル表示（全ての列を表示）
+  const [appMode, setAppMode] = useState('quote');
+
+  // ===== 税区分による自動文言（フッター備考＆合計サフィックス連動） =====
+  // getAutoBottomText / KNOWN_BOTTOM_TEXTS はモジュールスコープへ移動済（再生成回避）
+  // getTotalSuffix のみ taxMode への閉包参照のためここに残す
+  const getTotalSuffix = () => {
+    if (taxMode === 'inclusive') return '（税込）';
+    if (taxMode === 'nontax')    return '（非課税）';
+    return '';
+  };
+
+  useEffect(() => {
+    setBottomRemarks((prev) => {
+      // ユーザーが手動で書き換えた文言は保持。デフォルト系のみ自動切替。
+      if (prev && !KNOWN_BOTTOM_TEXTS.includes(prev)) return prev;
+      return getAutoBottomText(taxMode);
+    });
+  }, [taxMode]);
+
+  // ===== モード連動：ケース表示は「提案書作成モード」のみON、「見積作成モード」はOFF =====
+  // ケースON/OFFボタンは廃止。モード切替で自動連動。
+  useEffect(() => {
+    setShowCaseMode(appMode === 'proposal');
+  }, [appMode]);
+
+  // ===== モード別データ完全分離 =====
+  // 見積モード／提案書モードそれぞれのスナップショットを保持し、切替時に保存・復元する
+  // これにより一方のモードで入力したデータが他方に影響しない
+  const quoteGroupsRef = React.useRef(null);
+  const proposalGroupsRef = React.useRef(null);
+  const quoteNewItemsRef = React.useRef(null);
+  const proposalNewItemsRef = React.useRef(null);
+  const prevAppModeRef = React.useRef(appMode);
+  // makeEmptyGroups / makeEmptyNewItems はモジュールスコープへ移動済（再生成回避）
+
+  // ===== 編集画面のページング（手動切替用）=====
+  // 各グループの商品リストを ITEMS_PER_PAGE 件ずつに分割し、currentPage で表示制御
+  const [currentPage, setCurrentPage] = useState(1);
+  // itemsPerPage はモジュール定数 ITEMS_PER_PAGE を使用（最適化済）
+
+  // ===== 表示モード =====
+  const [showSimulation, setShowSimulation] = useState(false);
+  const [showCost, setShowCost] = useState(false);
+  // ★ 仕様: 提案書モードでの「単位」表示ON/OFF
+  const [showUnit, setShowUnit] = useState(true);
+  const [showCaseMode, setShowCaseMode] = useState(false);
+  const [isPreviewMode, setIsPreviewMode] = useState(false);
+
+  // ===== データ =====
+  const [groups, setGroups] = useState([
+    {
+      id: 'g-1', title: '', catalogMemo: '',
+      baseVolume: 100, baseQuantity: 1,
+      unit: 'ml', baseScale: 100, items: []
+    }
+  ]);
+  const [newItems, setNewItems] = useState({ 'g-1': getEmptyItem() });
+
+  // ===== モード切替時：現在の入力を退避し、切替先モードのデータを復元 =====
+  useEffect(() => {
+    const prevMode = prevAppModeRef.current;
+    if (prevMode === appMode) return; // 初回マウント時はスキップ
+    // 1) 現在表示中の groups/newItems を「以前のモード」のスナップショットへ退避
+    if (prevMode === 'quote') {
+      quoteGroupsRef.current = groups;
+      quoteNewItemsRef.current = newItems;
+    } else {
+      proposalGroupsRef.current = groups;
+      proposalNewItemsRef.current = newItems;
+    }
+    // 2) 「新しいモード」のスナップショットを復元（無ければ空のデータ）
+    if (appMode === 'quote') {
+      setGroups(quoteGroupsRef.current || makeEmptyGroups());
+      setNewItems(quoteNewItemsRef.current || makeEmptyNewItems());
+    } else {
+      setGroups(proposalGroupsRef.current || makeEmptyGroups());
+      setNewItems(proposalNewItemsRef.current || makeEmptyNewItems());
+    }
+    prevAppModeRef.current = appMode;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appMode]);
+
+  // ===== 添付資料 =====
+  const [attachments, setAttachments] = useState([]);
+  const [showLinkInput, setShowLinkInput] = useState(false);
+  const [tempLinkName, setTempLinkName] = useState('');
+  const [tempLinkUrl, setTempLinkUrl] = useState('');
+
+  // ===== 保存・お気に入り =====
+  const [savedProposals, setSavedProposals] = useState(() =>
+    loadStorage(STORAGE_KEYS.PROPOSALS, [])
+  );
+  const [favorites, setFavorites] = useState(() =>
+    loadStorage(STORAGE_KEYS.FAVORITES, [])
+  );
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [showLoadModal, setShowLoadModal] = useState(false);
+  const [showFavoritesModal, setShowFavoritesModal] = useState(false);
+  const [targetGroupIdForFav, setTargetGroupIdForFav] = useState(null);
+  const [saveName, setSaveName] = useState('');
+  const [notification, setNotification] = useState('');
+
+  // ===== その他モーダル =====
+  const [showGuideModal, setShowGuideModal] = useState(false);
+  const [showSecurityModal, setShowSecurityModal] = useState(false);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [deleteConfirmMap, setDeleteConfirmMap] = useState({});
+
+  const importFileRef = useRef(null);
+
+  // ===== localStorage 同期 =====
+  useEffect(() => { saveStorage(STORAGE_KEYS.OFFICE_INFO, officeInfo); }, [officeInfo]);
+  useEffect(() => { saveStorage(STORAGE_KEYS.FAVORITES, favorites); }, [favorites]);
+  useEffect(() => { saveStorage(STORAGE_KEYS.PROPOSALS, savedProposals); }, [savedProposals]);
+
+  // ===== 下書き（一時保存）の復元：起動時に1度だけ読み込む =====
+  const draftLoadedRef = useRef(false);
+  useEffect(() => {
+    if (draftLoadedRef.current) return;
+    draftLoadedRef.current = true;
+    const draft = loadStorage(STORAGE_KEYS.DRAFT, null);
+    if (draft && typeof draft === 'object') {
+      if (draft.clientName !== undefined) setClientName(draft.clientName);
+      if (draft.clientName2 !== undefined) setClientName2(draft.clientName2);
+      if (draft.clientHonorific !== undefined) setClientHonorific(draft.clientHonorific);
+      if (draft.proposalTitle !== undefined) setProposalTitle(draft.proposalTitle);
+      // ★ 仕様: 日付は常に当日（実行時）に自動設定 → draftからの復元はスキップ
+      // 「日付の自動初期化」要件のため。ユーザーが手動変更した日付は維持されない仕様。
+      // (draft.proposalDate / draft.proposalDateText は復元しない)
+      if (draft.proposalNumber !== undefined) setProposalNumber(draft.proposalNumber);
+      if (draft.validityPeriod !== undefined) setValidityPeriod(draft.validityPeriod);
+      if (draft.paymentTerms !== undefined) setPaymentTerms(draft.paymentTerms);
+      if (draft.deliveryInfo !== undefined) setDeliveryInfo(draft.deliveryInfo);
+      if (draft.remarks !== undefined) setRemarks(draft.remarks);
+      if (draft.bottomRemarks !== undefined) setBottomRemarks(draft.bottomRemarks);
+      if (draft.taxMode !== undefined) setTaxMode(draft.taxMode);
+      if (draft.appMode !== undefined) setAppMode(draft.appMode);
+      if (draft.showGrandTotal !== undefined) setShowGrandTotal(draft.showGrandTotal);
+      if (Array.isArray(draft.groups)) setGroups(draft.groups);
+    }
+  }, []);
+
+  // ===== 下書き（一時保存）の自動保存：入力データを常時バックアップ =====
+  // 初回マウントで上のuseEffectが復元を完了する前に保存しないよう draftLoadedRef を確認
+  // ★ パフォーマンス最適化: 依存配列を明示し、500msデバウンス + 重複書込みスキップ
+  //   - 毎キーストロークで同期I/Oが走らないようデバウンス
+  //   - 同一内容の場合 localStorage.setItem を呼ばずスキップ
+  const lastDraftStringRef = useRef('');
+  const draftSaveTimerRef = useRef(null);
+  useEffect(() => {
+    if (!draftLoadedRef.current) return;
+    // 既存タイマーをクリアして書込みを後ろ倒し
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+    }
+    draftSaveTimerRef.current = setTimeout(() => {
+      const draft = {
+        clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber,
+        validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks,
+        taxMode, showGrandTotal, appMode, groups,
+      };
+      try {
+        const serialized = JSON.stringify(draft);
+        // 同一内容ならスキップ（localStorage は同期I/Oで重い）
+        if (serialized === lastDraftStringRef.current) return;
+        lastDraftStringRef.current = serialized;
+        localStorage.setItem(STORAGE_KEYS.DRAFT, serialized);
+      } catch (err) {
+        console.warn('Draft save error:', err);
+      }
+    }, 500);
+    return () => {
+      if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+    };
+  }, [clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber,
+      validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks,
+      taxMode, showGrandTotal, appMode, groups]);
+
+  // ===== 通知 =====
+  // ★ パフォーマンス最適化: 既存タイマーをクリアして重複setStateを防止
+  const notifyTimerRef = useRef(null);
+  const notify = (msg) => {
+    setNotification(msg);
+    if (notifyTimerRef.current) clearTimeout(notifyTimerRef.current);
+    notifyTimerRef.current = setTimeout(() => setNotification(''), 3500);
+  };
+
+  // ===== 計算エンジン =====
+  const calculatePrices = (item, changedField) => {
+    let { packSize, price, casePrice, cost, caseCost, targetMargin } = item;
+    const ps = Math.max(Number(packSize) || 1, 1);
+
+    // 利益率の自動算出ヘルパー：原価と価格の両方が入力されていれば利益率を逆算
+    const recalcMargin = () => {
+      const p = Number(price) || 0;
+      const c = Number(cost) || 0;
+      if (p > 0 && c > 0 && c < p) {
+        // 利益率（粗利率）= (販売価格 - 原価) / 販売価格 × 100
+        targetMargin = Math.round(((p - c) / p) * 1000) / 10; // 小数1桁
+      } else if (p > 0 && c === 0) {
+        targetMargin = '';
+      }
+    };
+
+    if (changedField === 'packSize') {
+      casePrice = (Number(price) || 0) * ps;
+      caseCost = (Number(cost) || 0) * ps;
+    } else if (changedField === 'casePrice') {
+      price = Math.round((Number(casePrice) || 0) / ps);
+      recalcMargin(); // 価格変更時：原価があれば利益率を逆算
+    } else if (changedField === 'caseCost') {
+      cost = Math.round((Number(caseCost) || 0) / ps);
+      // 原価変更時：すでに目標利益率があれば価格を再計算、なければ価格から逆算
+      if (targetMargin !== '' && Number(targetMargin) < 100 && Number(targetMargin) > 0 && (Number(price) || 0) === 0) {
+        price = Math.round(cost / (1 - Number(targetMargin) / 100));
+        casePrice = price * ps;
+      } else {
+        recalcMargin();
+      }
+    } else if (changedField === 'price') {
+      casePrice = (Number(price) || 0) * ps;
+      recalcMargin(); // 販売価格変更時：原価があれば利益率を逆算表示
+    } else if (changedField === 'cost') {
+      caseCost = (Number(cost) || 0) * ps;
+      if (targetMargin !== '' && Number(targetMargin) < 100 && Number(targetMargin) > 0 && (Number(price) || 0) === 0) {
+        price = Math.round(cost / (1 - Number(targetMargin) / 100));
+        casePrice = price * ps;
+      } else {
+        recalcMargin();
+      }
+    } else if (changedField === 'targetMargin') {
+      // 利益率を手入力した場合：原価から販売価格を逆算
+      if (targetMargin !== '' && Number(targetMargin) < 100 && Number(targetMargin) > 0) {
+        const c = Number(cost) || 0;
+        if (c > 0) {
+          price = Math.round(c / (1 - Number(targetMargin) / 100));
+          casePrice = price * ps;
+        }
+      }
+    }
+    return { ...item, packSize, price, casePrice, cost, caseCost, targetMargin };
+  };
+
+  const computedGroups = useMemo(() => {
+    return groups.map((group) => {
+      const monthlyUsage = (group.baseVolume || 0) * (group.baseQuantity || 0);
+      const cleanTitle = group.title ? group.title.replace(CLEAN_TITLE_REGEX, '').trim() : '';
+
+      const calculatedItems = group.items.map((item) => {
+        const vol = Number(item.volume);
+        const pri = Number(item.price);
+        const cost = Number(item.cost) || 0;
+        const profit = pri - cost;
+        const margin = pri > 0 ? (profit / pri) * 100 : 0;
+        const unitPrice = vol > 0 ? (pri / vol) * group.baseScale : 0;
+        const monthlyCost = vol > 0 ? (monthlyUsage / vol) * pri : 0;
+        return {
+          ...item,
+          profit,
+          margin: Math.round(margin * 10) / 10,
+          unitPrice: Math.round(unitPrice * 10) / 10,
+          unitPriceRaw: unitPrice,
+          monthlyCost: Math.round(monthlyCost),
+          yearlyCost: Math.round(monthlyCost * 12),
+        };
+      });
+
+      if (calculatedItems.length === 0) return { ...group, cleanTitle, items: [], stats: null };
+
+      const sortedForStats = [...calculatedItems].sort((a, b) => b.unitPriceRaw - a.unitPriceRaw);
+      const best = sortedForStats[sortedForStats.length - 1];
+      const worst = sortedForStats[0];
+      const discountRate = worst.unitPriceRaw > 0
+        ? Math.round(((worst.unitPriceRaw - best.unitPriceRaw) / worst.unitPriceRaw) * 100) : 0;
+      const yearlyReduction = worst.yearlyCost - best.yearlyCost;
+
+      return {
+        ...group, cleanTitle, items: calculatedItems,
+        stats: { minItem: best, maxItem: worst, discountRate, yearlyReduction, monthlyUsage }
+      };
+    });
+  }, [groups]);
+
+  const totalReduction = useMemo(
+    () => computedGroups.reduce((sum, g) => sum + (g.stats?.yearlyReduction || 0), 0),
+    [computedGroups]
+  );
+
+  const grandTotal = useMemo(() => {
+    return computedGroups.reduce((sum, g) => {
+      return sum + g.items.reduce((s, i) => {
+        // 金額モード別自動算出（見積=数量×単価／提案書=ケース入数×単価）
+        const pri = Number(i.price) || 0;
+        const factor = appMode === 'proposal'
+          ? (Number(i.packSize) || 0)
+          : (Number(i.volume) || 0);
+        return s + (factor * pri);
+      }, 0);
+    }, 0);
+  }, [computedGroups, appMode]);
+
+  // ===== グループ操作 =====
+  const addGroup = () => {
+    const newId = genId('g');
+    setGroups((prev) => [...prev, {
+      id: newId, title: '', catalogMemo: '',
+      baseVolume: 100, baseQuantity: 1, unit: 'ml', baseScale: 100, items: []
+    }]);
+    setNewItems((prev) => ({ ...prev, [newId]: getEmptyItem() }));
+  };
+
+  const removeGroup = (groupId) => {
+    if (!deleteConfirmMap[groupId]) {
+      setDeleteConfirmMap((prev) => ({ ...prev, [groupId]: true }));
+      setTimeout(() => setDeleteConfirmMap((prev) => ({ ...prev, [groupId]: false })), 3000);
+      return;
+    }
+    setGroups((prev) => prev.filter((g) => g.id !== groupId));
+  };
+
+  const updateGroupField = (id, field, value) => {
+    setGroups((prev) => prev.map((g) => {
+      if (g.id !== id) return g;
+      const updated = { ...g, [field]: value };
+      if (field === 'title') {
+        const inf = inferFromProductName(value);
+        if (inf?.unit) { updated.unit = inf.unit; updated.baseScale = inf.baseScale; }
+      }
+      return updated;
+    }));
+  };
+
+  const changeGroupUnit = (groupId, newUnit) => {
+    const def = UNIT_OPTIONS.find((u) => u.value === newUnit);
+    setGroups((prev) => prev.map((g) =>
+      g.id === groupId ? { ...g, unit: newUnit, baseScale: def ? def.defaultBase : 1 } : g
+    ));
+  };
+
+  const sortGroupItems = (groupId) => {
+    setGroups((prev) => prev.map((g) => {
+      if (g.id !== groupId || g.items.length <= 1) return g;
+      const baseline = g.items[0];
+      const proposals = g.items.slice(1).sort((a, b) => {
+        const ua = Number(a.volume) > 0 ? Number(a.price) / Number(a.volume) : 0;
+        const ub = Number(b.volume) > 0 ? Number(b.price) / Number(b.volume) : 0;
+        return ua - ub;
+      });
+      return { ...g, items: [baseline, ...proposals] };
+    }));
+  };
+
+  // ===== アイテム操作 =====
+  const handleInputChange = (groupId, field, value) => {
+    setNewItems((prev) => {
+      const cur = prev[groupId] || getEmptyItem();
+      let updated = { ...cur, [field]: value };
+      if (field === 'name') {
+        const inf = inferFromProductName(value);
+        if (inf) {
+          if (inf.volume) updated.volume = inf.volume;
+          if (inf.unit) {
+            updateGroupField(groupId, 'unit', inf.unit);
+            updateGroupField(groupId, 'baseScale', inf.baseScale);
+          }
+        }
+      }
+      return { ...prev, [groupId]: calculatePrices(updated, field) };
+    });
+  };
+
+  const handleAddItem = (groupId) => {
+    const input = newItems[groupId];
+    if (!input) return;
+    // ★ 仕様: 空欄でも行追加を許可（バリデーション削除）
+    setGroups((prev) => prev.map((g) => {
+      if (g.id !== groupId) return g;
+      return {
+        ...g,
+        items: [...g.items, {
+          id: genId('i'), ...input,
+          volume: input.volume === '' ? '' : Number(input.volume),
+          packSize: input.packSize === '' ? '' : (Number(input.packSize) || 1),
+          price: input.price === '' ? '' : Number(input.price),
+          casePrice: input.casePrice === '' ? '' : Number(input.casePrice),
+          cost: input.cost === '' ? '' : (Number(input.cost) || 0),
+          caseCost: input.caseCost === '' ? '' : (Number(input.caseCost) || 0),
+        }]
+      };
+    }));
+    setNewItems((prev) => ({ ...prev, [groupId]: getEmptyItem() }));
+  };
+
+  const updateItem = (groupId, itemId, field, value) => {
+    setGroups((prev) => prev.map((g) => {
+      if (g.id !== groupId) return g;
+      return {
+        ...g,
+        items: g.items.map((i) => {
+          if (i.id !== itemId) return i;
+          let updatedItem = { ...i, [field]: value };
+          if (field === 'name') {
+            const inf = inferFromProductName(value);
+            if (inf?.volume) updatedItem.volume = inf.volume;
+          }
+          return calculatePrices(updatedItem, field);
+        })
+      };
+    }));
+  };
+
+  const deleteItem = (groupId, itemId) => {
+    setGroups((prev) => prev.map((g) =>
+      g.id === groupId ? { ...g, items: g.items.filter((i) => i.id !== itemId) } : g
+    ));
+  };
+
+  // ===== 並び替え機能（上へ／下へ） =====
+  // direction: -1 = 上へ, +1 = 下へ
+  const moveItem = (groupId, index, direction) => {
+    setGroups((prev) => prev.map((g) => {
+      if (g.id !== groupId) return g;
+      const newIndex = index + direction;
+      if (newIndex < 0 || newIndex >= g.items.length) return g;
+      const newItems = [...g.items];
+      const temp = newItems[index];
+      newItems[index] = newItems[newIndex];
+      newItems[newIndex] = temp;
+      return { ...g, items: newItems };
+    }));
+  };
+
+  const handleClearAll = () => {
+    if (confirmClearAll) {
+      setGroups([]); setNewItems({}); setAttachments([]); setConfirmClearAll(false);
+      notify('全データをリセットしました');
+    } else {
+      setConfirmClearAll(true);
+      setTimeout(() => setConfirmClearAll(false), 3000);
+    }
+  };
+
+  // ===== 保存・読込 =====
+  const handleSave = () => {
+    if (!saveName.trim()) return;
+    const newProp = {
+      id: genId('prop'),
+      name: saveName,
+      clientName, proposalTitle, proposalDate, proposalDateText, proposalNumber,
+      validityPeriod, paymentTerms, deliveryInfo, remarks,
+      groups, attachments,
+      updatedAt: Date.now(),
+    };
+    setSavedProposals((prev) => [newProp, ...prev]);
+    setShowSaveModal(false);
+    setSaveName('');
+    notify('保存しました');
+  };
+
+  const handleLoad = (prop) => {
+    setClientName(prop.clientName || '');
+    setClientName2(prop.clientName2 || '');
+    setClientHonorific(prop.clientHonorific || '御中');
+    setProposalTitle(prop.proposalTitle || '御見積書');
+    setProposalDate(prop.proposalDate || proposalDate);
+    setProposalDateText(prop.proposalDateText || '');
+    setProposalNumber(prop.proposalNumber || '');
+    setValidityPeriod(prop.validityPeriod || 'お見積日より30日間');
+    setPaymentTerms(prop.paymentTerms || '月末締め翌月末払い');
+    setDeliveryInfo(prop.deliveryInfo || 'ご注文後、通常2〜3営業日');
+    setRemarks(prop.remarks || '');
+    setGroups(prop.groups || []);
+    setAttachments(prop.attachments || []);
+    const ni = {};
+    (prop.groups || []).forEach((g) => { ni[g.id] = getEmptyItem(); });
+    setNewItems(ni);
+    setShowLoadModal(false);
+    notify('読み込みました');
+  };
+
+  const handleDeleteProposal = (id) => {
+    setSavedProposals((prev) => prev.filter((p) => p.id !== id));
+  };
+
+  // ===== お気に入り =====
+  const toggleFavorite = (item) => {
+    if (!item.name || !item.name.trim()) {
+      notify('商品名が未入力のため登録できません');
+      return;
+    }
+    const existing = favorites.find((f) => f.name === item.name);
+    if (existing) {
+      setFavorites((prev) => prev.filter((f) => f.id !== existing.id));
+      notify('商品マスタから削除しました');
+    } else {
+      const newFav = {
+        id: genId('fav'),
+        name: item.name, memo: item.memo || '',
+        volume: item.volume, packSize: item.packSize,
+        price: item.price, casePrice: item.casePrice,
+        cost: item.cost, caseCost: item.caseCost,
+        targetMargin: item.targetMargin,
+        createdAt: Date.now(),
+      };
+      setFavorites((prev) => [newFav, ...prev]);
+      notify('商品マスタに登録しました');
+    }
+  };
+
+  const handleAddFromFavorite = (fav) => {
+    if (!targetGroupIdForFav) return;
+    setGroups((prev) => prev.map((g) => {
+      if (g.id !== targetGroupIdForFav) return g;
+      return {
+        ...g,
+        items: [...g.items, {
+          id: genId('i'), ...fav,
+          volume: Number(fav.volume) || '',
+          packSize: Number(fav.packSize) || 1,
+          price: Number(fav.price) || '',
+          casePrice: Number(fav.casePrice) || '',
+          cost: Number(fav.cost) || '',
+          caseCost: Number(fav.caseCost) || '',
+        }]
+      };
+    }));
+    setShowFavoritesModal(false);
+    setTargetGroupIdForFav(null);
+  };
+
+  // ===== 添付 =====
+  const handleAddLink = () => {
+    if (!tempLinkUrl) return;
+    setAttachments((prev) => [...prev, {
+      id: genId('link'), name: tempLinkName || 'Webカタログ',
+      url: tempLinkUrl, type: 'url',
+    }]);
+    setTempLinkName(''); setTempLinkUrl(''); setShowLinkInput(false);
+  };
+
+  const removeAttachment = (id) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  // HTMLエスケープ（XSS対策） - handlePrintから使用するので先に定義
+  const escapeHTML = (str) => {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  };
+
+  // ===== 印刷 =====（DOM注入方式で確実に印刷できるように） =====
+  const handlePrint = (mode = 'print') => {
+    const formatDate = (d) => {
+      if (!d) return '';
+      const parts = d.split('-');
+      if (parts.length === 3) {
+        // 先頭の0を除去（"04月" → "4月"）
+        const y = parts[0];
+        const m = String(parseInt(parts[1], 10));
+        const day = String(parseInt(parts[2], 10));
+        return `${y}年${m}月${day}日`;
+      }
+      return d;
+    };
+    // 表示する発行日：手入力テキストが優先、なければカレンダーから自動生成
+    const displayDate = (proposalDateText && proposalDateText.trim())
+      ? proposalDateText.trim()
+      : formatDate(proposalDate);
+
+    // HTML生成
+    const groupsHTML = computedGroups.map((group) => {
+      const baseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
+      const rows = group.items.map((item, idx) => {
+        const isBaseline = idx === 0;
+        const isHighlighted = !!item.isHighlighted;
+        const trClass = isHighlighted ? ' class="highlighted"' : '';
+        // === 印刷HTML 列構成（仕様準拠） ===
+        // 提案書モード: 品目 / 容量・枚数・長さなど / ケース入数 / [仕入(原価ON時)] / 単価 / 金額
+        // 見積モード  : 品目 / 数量 / [利益率(原価ON時)] / 単価 / 金額
+        let cols = `<td class="pname"><div class="name">${escapeHTML(item.name)}</div></td>`;
+        // 提案書モードは「容量・枚数・長さなど」(単位付き)、見積モードは「数量」(単位なし)
+        if (appMode === 'proposal') {
+          cols += `<td class="num">${escapeHTML(String(item.volume || ''))}${showUnit ? `<span class="unit">${escapeHTML(item.unitOverride ?? group.unit)}</span>` : ''}</td>`;
+          if (showCaseMode) cols += `<td class="num">${item.packSize}</td>`;
+        } else {
+          cols += `<td class="num">${escapeHTML(String(item.volume || ''))}</td>`;
+        }
+        // 単価 → 金額 の順、金額は数量×単価で自動算出
+        cols += `<td class="price strong">¥${(item.price || 0).toLocaleString()}</td>`;
+        // 金額モード別自動算出: 見積=数量×単価 / 提案書=ケース入数×単価
+        const factor = appMode === 'proposal' ? (Number(item.packSize) || 0) : (Number(item.volume) || 0);
+        const autoAmount = factor * (Number(item.price) || 0);
+        cols += `<td class="price">¥${autoAmount.toLocaleString()}</td>`;
+        if (appMode === 'proposal') cols += `<td class="unit-price">¥${item.unitPrice.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</td>`;
+        if (showSimulation) cols += `<td class="yearly">¥${item.yearlyCost.toLocaleString()}</td>`;
+        return `<tr${trClass}>${cols}</tr>`;
+      }).join('');
+
+      let headers = `<th class="pname">品目</th>`;
+      // 数量列ヘッダ（モード別ラベル）
+      if (appMode === 'proposal') {
+        headers += `<th class="num">容量・枚数・長さなど</th>`;
+        if (showCaseMode) headers += `<th class="num">ケース入数</th>`;
+      } else {
+        headers += `<th class="num">数量</th>`;
+      }
+      // 単価 → 金額（両モード常時表示）
+      headers += `<th class="price">単価</th>`;
+      headers += `<th class="price">金額</th>`;
+      if (appMode === 'proposal') headers += `<th class="unit-price">${baseLabel}単価</th>`;
+      if (showSimulation) headers += `<th class="yearly">年間コスト</th>`;
+
+      const sim = showSimulation && group.stats ? `
+        <div class="sim-info">
+          <span>試算条件: ${group.baseVolume}${group.unit} × ${group.baseQuantity}個/月</span>
+          ${group.stats.discountRate > 0 ? `<span class="discount">約 ${group.stats.discountRate}% ダウン</span>` : ''}
+          ${group.stats.yearlyReduction > 0 ? `<span class="reduction">年間削減: ¥${group.stats.yearlyReduction.toLocaleString()}</span>` : ''}
+        </div>` : '';
+
+      return `
+        <div class="group">
+          ${(group.title && group.title.trim()) ? `<div class="group-title">${escapeHTML(group.title)}</div>` : ''}
+          <table class="items-table">
+            <thead><tr>${headers}</tr></thead>
+            <tbody>${rows || '<tr><td colspan="10" class="empty">商品データがありません</td></tr>'}</tbody>
+          </table>
+          ${sim}
+        </div>`;
+    }).join('');
+
+    const html = `
+<style>
+  /* ===== 印刷用：薄いブルー基調・シンプルで見やすい見積書 ===== */
+  /* @page でA4縦・余白指定 */
+  @page {
+    size: A4 portrait;
+    margin: 12mm 10mm;
+  }
+  #print-content-holder, #print-content-holder * { box-sizing: border-box; }
+  #print-content-holder {
+    font-family: 'Yu Gothic', 'YuGothic', 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', 'Meiryo', sans-serif;
+    color: #1f2937;
+    background: #fff;
+    font-size: 9.5pt;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: 0.02em;
+  }
+  #print-content-holder .page { max-width: 180mm; margin: 0 auto; padding: 5mm 7mm; }
+
+  /* ===== 見積書ヘッダー（1ページ目のみで分割しない） ===== */
+  #print-content-holder .doc-header {
+    display: flex; justify-content: space-between; gap: 10mm;
+    margin-bottom: 5mm; align-items: flex-start;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  #print-content-holder .doc-header .left { flex: 1; min-width: 0; }
+  #print-content-holder .doc-header .right { width: 70mm; flex-shrink: 0; }
+
+  /* ===== 合計欄は分割しない ===== */
+  #print-content-holder .grand-total {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  #print-content-holder .title {
+    font-family: 'Yu Mincho', 'YuMincho', 'Hiragino Mincho ProN', serif;
+    font-size: 22pt; font-weight: 600; letter-spacing: 0.5em;
+    color: #1e3a8a;
+    padding: 0 0 6px 0; margin: 0 0 10px 0;
+    text-indent: 0.5em;
+    border-bottom: 1.5px solid #3b82f6;
+  }
+
+  #print-content-holder .client {
+    font-size: 15pt; font-weight: 600;
+    padding: 4px 4px 6px;
+    color: #111827;
+    border-bottom: 1px solid #93c5fd;
+    letter-spacing: 0.05em;
+  }
+  #print-content-holder .client .suffix {
+    font-size: 10.5pt; font-weight: 400; margin-left: 8px;
+    color: #3b82f6;
+  }
+  #print-content-holder .greeting {
+    font-size: 8.5pt; margin-top: 8px; padding-left: 2px;
+    line-height: 1.7; color: #4b5563;
+  }
+
+  /* ===== 発行元情報 ===== */
+  #print-content-holder .issuer {
+    font-size: 8.5pt; line-height: 1.4;
+    border: 1px solid #bfdbfe;
+    background: #f0f7ff;
+    padding: 5px 8px;
+    margin-top: -1.5mm;
+  }
+  #print-content-holder .issuer .meta-table {
+    width: 100%; border-collapse: collapse; margin-bottom: 4px;
+    font-size: 8.5pt;
+  }
+  #print-content-holder .issuer .meta-table td {
+    padding: 2px 5px; border-bottom: 0.5px solid #dbeafe;
+  }
+  #print-content-holder .issuer .meta-table td.label {
+    color: #2563eb; width: 22mm; letter-spacing: 0.05em; font-size: 8pt;
+    font-weight: 600;
+  }
+  #print-content-holder .issuer .meta-table td.value {
+    text-align: right; font-weight: 600; color: #111827;
+  }
+  #print-content-holder .issuer .meta-table tr:last-child td { border-bottom: none; }
+
+  #print-content-holder .issuer-info {
+    padding: 4px 0 0;
+    border-top: 1px solid #93c5fd;
+  }
+  #print-content-holder .issuer-info .company {
+    font-weight: 700; font-size: 10pt; letter-spacing: 0.03em;
+    color: #1e3a8a; margin-bottom: 1px;
+  }
+  #print-content-holder .issuer-info .office {
+    font-weight: 600; font-size: 9pt; color: #1e40af;
+    margin-bottom: 2px;
+  }
+  #print-content-holder .issuer-info .addr {
+    font-size: 8pt; color: #4b5563; line-height: 1.4;
+    margin: 0;
+  }
+  #print-content-holder .issuer-info .addr.invoice-no {
+    font-size: 7.5pt; color: #2563eb; font-weight: 600;
+    letter-spacing: 0.03em; margin-top: 1px;
+  }
+  #print-content-holder .issuer-info .staff {
+    font-size: 8.5pt; margin-top: 3px; padding-top: 3px;
+    border-top: 0.5px dashed #bfdbfe;
+    color: #1f2937; line-height: 1.3;
+  }
+  #print-content-holder .issuer-info .staff strong {
+    font-weight: 700; letter-spacing: 0.05em; color: #111827;
+  }
+
+  /* ===== 印鑑欄（所長印・担当印）□枠 同サイズ26mm ===== */
+  #print-content-holder .stamps {
+    display: flex; justify-content: flex-end; gap: 4mm;
+    margin-top: 4px; padding-top: 4px;
+    border-top: 1px solid #dbeafe;
+  }
+  #print-content-holder .stamp-box {
+    text-align: center;
+  }
+  #print-content-holder .stamp-label {
+    font-size: 7pt; color: #3b82f6; font-weight: 600;
+    letter-spacing: 0.1em; margin-bottom: 2px;
+  }
+  #print-content-holder .stamp-square {
+    width: 19mm; height: 19mm;
+    border: 1px solid #93c5fd;
+    background: #fff;
+  }
+
+  /* ===== 取引条件（左カラム内に縦並び） ===== */
+  #print-content-holder .terms-small {
+    margin: 6mm 0 0 0;
+    max-width: 100mm;
+    page-break-inside: avoid;
+  }
+  #print-content-holder .terms-table-sm {
+    width: 100%; border-collapse: collapse;
+    font-size: 7.5pt;
+    border: 0.5px solid #bfdbfe;
+  }
+  #print-content-holder .terms-table-sm td {
+    padding: 3px 6px;
+    border-bottom: 0.5px solid #dbeafe;
+    vertical-align: top;
+  }
+  #print-content-holder .terms-table-sm td.label {
+    color: #2563eb;
+    font-size: 7pt;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+    background: #f0f7ff;
+    white-space: nowrap;
+    width: 22mm;
+  }
+  #print-content-holder .terms-table-sm td.value {
+    color: #374151;
+    white-space: pre-wrap;
+    font-size: 7.5pt;
+  }
+  #print-content-holder .terms-table-sm tr:last-child td { border-bottom: none; }
+
+  /* ===== 商品グループ（複数ページ対応） ===== */
+  #print-content-holder .group {
+    margin-bottom: 7mm;
+    /* グループ全体は基本まとめたいが、内容が1ページに収まらない場合は分割を許可 */
+    page-break-inside: auto;
+    break-inside: auto;
+  }
+  #print-content-holder .group-title {
+    font-size: 10.5pt; font-weight: 700; color: #1e3a8a;
+    padding: 5px 10px; margin-bottom: 0;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-bottom: none;
+    letter-spacing: 0.1em;
+    /* 見出しは次の内容と一緒に保持 */
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+  #print-content-holder .items-table {
+    width: 100%; border-collapse: collapse; font-size: 10pt;
+    margin-top: 0;
+    border: 1px solid #bfdbfe;
+    /* 行単位で分割可能 */
+    page-break-inside: auto;
+  }
+  #print-content-holder .items-table thead {
+    /* 各ページにヘッダーを繰り返し表示 */
+    display: table-header-group;
+  }
+  #print-content-holder .items-table tbody tr {
+    /* 各行はページ内で分割しない */
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  #print-content-holder .items-table th {
+    background: #dbeafe;
+    padding: 6px 8px;
+    text-align: left;
+    border-bottom: 1px solid #93c5fd;
+    font-size: 8.5pt; font-weight: 600;
+    color: #1e40af;
+    letter-spacing: 0.05em;
+  }
+  #print-content-holder .items-table td {
+    padding: 7px 8px;
+    border-bottom: 0.5px solid #dbeafe;
+    vertical-align: middle;
+    font-size: 10pt;
+  }
+  #print-content-holder .items-table tbody tr:nth-child(even) {
+    background: #f8fbff;
+  }
+  #print-content-holder .items-table tbody tr.highlighted,
+  #print-content-holder .items-table tbody tr.highlighted:nth-child(even) {
+    background: #fef08a;
+  }
+  #print-content-holder .items-table tbody tr.highlighted td {
+    background: #fef08a;
+  }
+  #print-content-holder .items-table tbody tr.highlighted td.pname .name,
+  #print-content-holder .items-table tbody tr.highlighted td.price,
+  #print-content-holder .items-table tbody tr.highlighted td.unit-price,
+  #print-content-holder .items-table tbody tr.highlighted td.num,
+  #print-content-holder .items-table tbody tr.highlighted td.yearly {
+    color: #713f12;
+    font-weight: 700;
+  }
+  #print-content-holder .items-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+  #print-content-holder .items-table th.num,
+  #print-content-holder .items-table td.num {
+    text-align: right; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  #print-content-holder .items-table th.price,
+  #print-content-holder .items-table td.price {
+    text-align: right; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  #print-content-holder .items-table th.unit-price,
+  #print-content-holder .items-table td.unit-price {
+    text-align: right; white-space: nowrap;
+    color: #6b7280; font-size: 9pt;
+    font-variant-numeric: tabular-nums;
+  }
+  #print-content-holder .items-table th.yearly,
+  #print-content-holder .items-table td.yearly {
+    text-align: right; white-space: nowrap;
+    font-weight: 600; color: #1e40af;
+    font-variant-numeric: tabular-nums;
+  }
+  #print-content-holder .items-table td.pname {
+    position: relative; min-width: 50mm;
+  }
+  #print-content-holder .items-table td.pname .name {
+    font-weight: 600; padding-left: 2px; color: #111827;
+  }
+  #print-content-holder .items-table td.pname .memo {
+    font-size: 8.5pt; color: #6b7280; padding-left: 2px;
+    margin-top: 2px; line-height: 1.4;
+  }
+  #print-content-holder .items-table td.price.strong {
+    font-weight: 700; font-size: 10.5pt; color: #1e3a8a;
+  }
+  #print-content-holder .items-table td .unit {
+    font-size: 8pt; color: #93c5fd; margin-left: 3px;
+    font-weight: normal;
+  }
+  #print-content-holder .items-table td.empty {
+    text-align: center; color: #93c5fd; padding: 16px;
+  }
+
+  /* 現状品マーク */
+  #print-content-holder .items-table td.pname .baseline-tag {
+    display: inline-block;
+    font-size: 7pt;
+    padding: 1px 5px;
+    background: #dbeafe;
+    color: #1e40af;
+    border-radius: 2px;
+    margin-right: 5px;
+    letter-spacing: 0.1em;
+    vertical-align: middle;
+    font-weight: 600;
+  }
+
+  /* ===== 試算情報 ===== */
+  #print-content-holder .sim-info {
+    margin-top: 0; padding: 5px 10px;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-top: none;
+    font-size: 8.5pt; color: #4b5563;
+    display: flex; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+  }
+  #print-content-holder .sim-info .discount {
+    color: #dc2626; font-weight: 700;
+  }
+  #print-content-holder .sim-info .reduction {
+    font-weight: 700; color: #1e3a8a;
+  }
+
+  /* ===== 合計 ===== */
+  #print-content-holder .grand-total {
+    margin: 0 0 4mm 0;
+    padding: 10px 16px;
+    border: 1.5px solid #3b82f6;
+    display: flex; justify-content: space-between; align-items: baseline;
+    background: #eff6ff;
+  }
+  #print-content-holder .grand-total .label {
+    font-size: 9.5pt; font-weight: 600;
+    letter-spacing: 0.3em;
+    color: #1e3a8a;
+  }
+  #print-content-holder .grand-total .amount {
+    font-family: 'Yu Mincho', 'YuMincho', 'Hiragino Mincho ProN', serif;
+    font-size: 19pt; font-weight: 700;
+    color: #1e3a8a;
+    letter-spacing: 0.05em;
+    font-variant-numeric: tabular-nums;
+  }
+  #print-content-holder .grand-total .amount .currency {
+    font-size: 12pt; margin-right: 3px;
+  }
+  #print-content-holder .grand-total .amount .suffix {
+    font-size: 10pt; margin-left: 6px; color: #93c5fd;
+    letter-spacing: 0.1em;
+  }
+
+  /* ===== 全商品下部の備考欄（新規） ===== */
+  #print-content-holder .bottom-remarks {
+    margin-top: 4mm;
+    padding: 8px 12px;
+    border: 1px solid #bfdbfe;
+    background: #f8fbff;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  #print-content-holder .bottom-remarks-label {
+    font-size: 8pt; font-weight: 600; color: #2563eb;
+    letter-spacing: 0.15em; margin-bottom: 3px;
+  }
+  #print-content-holder .bottom-remarks-text {
+    font-size: 9pt; color: #1f2937;
+    white-space: pre-wrap;
+    line-height: 1.6;
+  }
+</style>
+
+<div class="page">
+  <div class="doc-header">
+    <div class="left">
+      <div class="title">${escapeHTML(proposalTitle || '御見積書')}</div>
+      <div class="client">${escapeHTML(clientName || '　')}${clientName2 ? `<br/>${escapeHTML(clientName2)}` : ''}<span class="suffix">${escapeHTML(clientHonorific || '御中')}</span></div>
+      <div class="greeting">
+        下記の通り、お見積り申し上げます。<br>
+        ご検討のほど、よろしくお願い申し上げます。
+      </div>
+      <div class="terms-small">
+        <table class="terms-table-sm">
+          <tr>
+            <td class="label">見積有効期限</td>
+            <td class="value">${escapeHTML(validityPeriod || '—')}</td>
+          </tr>
+          <tr>
+            <td class="label">お支払条件</td>
+            <td class="value">${escapeHTML(paymentTerms || '—')}</td>
+          </tr>
+          <tr>
+            <td class="label">納期</td>
+            <td class="value">${escapeHTML(deliveryInfo || '—')}</td>
+          </tr>
+          ${remarks ? `
+          <tr>
+            <td class="label">備考</td>
+            <td class="value">${escapeHTML(remarks)}</td>
+          </tr>` : ''}
+        </table>
+      </div>
+    </div>
+    <div class="right">
+      <div class="issuer">
+        <table class="meta-table">
+          <tr>
+            <td class="label">見積番号</td>
+            <td class="value">${escapeHTML(proposalNumber || '—')}</td>
+          </tr>
+          <tr>
+            <td class="label">発行日</td>
+            <td class="value">${escapeHTML(displayDate || '—')}</td>
+          </tr>
+        </table>
+        <div class="issuer-info">
+          <div class="company">${escapeHTML(officeInfo.companyName || '')}</div>
+          ${officeInfo.officeName ? `<div class="office">${escapeHTML(officeInfo.officeName)}</div>` : ''}
+          ${officeInfo.postal ? `<div class="addr">〒${escapeHTML(officeInfo.postal)}</div>` : ''}
+          ${officeInfo.address ? `<div class="addr">${escapeHTML(officeInfo.address)}</div>` : ''}
+          ${officeInfo.phone ? `<div class="addr">TEL ${escapeHTML(officeInfo.phone)}</div>` : ''}
+          ${officeInfo.fax ? `<div class="addr">FAX ${escapeHTML(officeInfo.fax)}</div>` : ''}
+          <div class="addr invoice-no">登録番号　T1290001044462</div>
+          ${officeInfo.email ? `<div class="addr">${escapeHTML(officeInfo.email)}</div>` : ''}
+          ${officeInfo.manager ? `<div class="staff">所長　<strong>${escapeHTML(officeInfo.manager)}</strong></div>` : ''}
+          ${officeInfo.staffName ? `<div class="staff">担当　<strong>${escapeHTML(officeInfo.staffName)}</strong></div>` : ''}
+        </div>
+        <div class="stamps">
+          <div class="stamp-box">
+            <div class="stamp-label">所長印</div>
+            <div class="stamp-square"></div>
+          </div>
+          <div class="stamp-box">
+            <div class="stamp-label">担当印</div>
+            <div class="stamp-square"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  ${(showGrandTotal && grandTotal > 0) ? `
+  <div class="grand-total">
+    <span class="label">御見積金額　合計${getTotalSuffix()}</span>
+    <span class="amount"><span class="currency">¥</span>${grandTotal.toLocaleString()}<span class="suffix">―</span></span>
+  </div>` : ''}
+
+  ${groupsHTML || '<div style="text-align:center;padding:40px;color:#b0b0b0;">商品データがありません</div>'}
+
+  ${bottomRemarks ? `
+  <div class="bottom-remarks">
+    <div class="bottom-remarks-label">備考</div>
+    <div class="bottom-remarks-text">${escapeHTML(bottomRemarks)}</div>
+  </div>` : ''}
+</div>
+`;
+
+    // ===== 確実な印刷方式：現在のページに印刷用コンテンツを一時的に注入 =====
+    // ポップアップ・iframe不使用 → サンドボックス環境でも確実に動作
+    try {
+      console.log('[Print] 印刷処理を開始します');
+
+      // 既存の印刷ホルダーがあれば削除
+      const existing = document.getElementById('print-content-holder');
+      if (existing) existing.remove();
+      const existingStyle = document.getElementById('print-injected-style');
+      if (existingStyle) existingStyle.remove();
+
+      // 印刷専用コンテナを作成（画面上にもプレビューとして表示）
+      const holder = document.createElement('div');
+      holder.id = 'print-content-holder';
+      holder.innerHTML = html;
+
+      // 印刷時の制御用スタイル + 画面プレビュー用スタイル
+      const styleEl = document.createElement('style');
+      styleEl.id = 'print-injected-style';
+      styleEl.textContent = `
+        /* 画面表示時：全画面オーバーレイで見積書をプレビュー表示 */
+        #print-content-holder {
+          position: fixed;
+          top: 0; left: 0; right: 0; bottom: 0;
+          background: #f1f5f9;
+          z-index: 99999;
+          overflow: auto;
+          padding: 0;
+        }
+        #print-content-holder::before {
+          content: '';
+          display: block;
+          height: 60px;
+        }
+        #print-content-holder .page {
+          background: #fff;
+          box-shadow: 0 0 20px rgba(0,0,0,0.15);
+          margin: 0 auto 40px !important;
+          max-width: 210mm !important;
+        }
+        /* 画面用の操作バー */
+        #print-toolbar {
+          position: fixed;
+          top: 0; left: 0; right: 0;
+          background: #1e293b;
+          color: #fff;
+          padding: 10px 20px;
+          z-index: 100000;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        #print-toolbar .info { font-size: 13px; }
+        #print-toolbar .info strong { color: #fbbf24; }
+        #print-toolbar .actions { display: flex; gap: 8px; }
+        #print-toolbar button {
+          padding: 8px 16px;
+          font-size: 14px;
+          font-weight: bold;
+          border: none;
+          border-radius: 6px;
+          cursor: pointer;
+          font-family: inherit;
+        }
+        #print-toolbar button.primary { background: #ef4444; color: #fff; }
+        #print-toolbar button.primary:hover { background: #dc2626; }
+        #print-toolbar button.secondary { background: #475569; color: #fff; }
+        #print-toolbar button.secondary:hover { background: #334155; }
+
+        @media print {
+          /* 印刷時：プレビューのスタイルを全部解除 */
+          #print-toolbar { display: none !important; }
+          #print-content-holder {
+            position: static !important;
+            background: #fff !important;
+            overflow: visible !important;
+            padding: 0 !important;
+          }
+          #print-content-holder::before { display: none !important; }
+          #print-content-holder .page {
+            box-shadow: none !important;
+            margin: 0 !important;
+            max-width: 100% !important;
+          }
+          /* 元のアプリを完全に非表示 */
+          body > *:not(#print-content-holder) { display: none !important; }
+          @page { size: A4; margin: 12mm 10mm; }
+          html, body {
+            background: #fff !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+        }
+      `;
+
+      // ツールバー（画面用、印刷時非表示）
+      const isPdfMode = mode === 'pdf';
+      const toolbar = document.createElement('div');
+      toolbar.id = 'print-toolbar';
+      toolbar.innerHTML = isPdfMode ? `
+        <div class="info">
+          📑 PDF保存プレビュー　<strong>「PDFとして保存」</strong>を押すと、ブラウザのPDF保存ダイアログが開きます（送信先で「PDFに保存」を選択してください）
+        </div>
+        <div class="actions">
+          <button class="primary" id="print-toolbar-print">📑 PDFとして保存</button>
+          <button class="secondary" id="print-toolbar-close">✕ 閉じる</button>
+        </div>
+      ` : `
+        <div class="info">
+          📄 印刷プレビュー　<strong>「印刷する」</strong>を押すか、<strong>Ctrl+P（Mac: Cmd+P）</strong>で印刷できます
+        </div>
+        <div class="actions">
+          <button class="primary" id="print-toolbar-print">🖨 印刷する</button>
+          <button class="secondary" id="print-toolbar-close">✕ 閉じる</button>
+        </div>
+      `;
+
+      document.head.appendChild(styleEl);
+      document.body.appendChild(holder);
+      document.body.appendChild(toolbar);
+
+      // 後片付け関数
+      const cleanup = () => {
+        const h = document.getElementById('print-content-holder');
+        const s = document.getElementById('print-injected-style');
+        const t = document.getElementById('print-toolbar');
+        if (h) h.remove();
+        if (s) s.remove();
+        if (t) t.remove();
+        window.removeEventListener('afterprint', afterPrintHandler);
+        document.removeEventListener('keydown', escHandler);
+      };
+
+      const afterPrintHandler = () => {
+        console.log('[Print] afterprint イベント');
+      };
+      const escHandler = (e) => {
+        if (e.key === 'Escape') cleanup();
+      };
+
+      window.addEventListener('afterprint', afterPrintHandler);
+      document.addEventListener('keydown', escHandler);
+
+      // ボタン動作
+      document.getElementById('print-toolbar-print').onclick = () => {
+        console.log(isPdfMode ? '[PDF] 保存ボタンが押されました' : '[Print] 印刷ボタンが押されました');
+        try {
+          window.print();
+        } catch (err) {
+          alert(isPdfMode ? 'PDF保存ダイアログを開けません。Ctrl+P（Mac: Cmd+P）でお試しください。' : '印刷ダイアログを開けません。Ctrl+P（Mac: Cmd+P）でお試しください。');
+        }
+      };
+      document.getElementById('print-toolbar-close').onclick = cleanup;
+
+      // 印刷モードのみ自動でダイアログを呼ぶ。PDFモードはプレビューのみ表示しユーザー操作を待つ
+      if (!isPdfMode) {
+        // ダブル requestAnimationFrame + setTimeout でDOMレンダリング完了を確実に待つ
+        // （印刷ダイアログが内容描画前に起動して白紙になるバグを回避）
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            setTimeout(() => {
+              try {
+                console.log('[Print] window.print() を呼び出します');
+                window.print();
+              } catch (err) {
+                console.warn('[Print] 自動印刷失敗、手動ボタンを使ってください:', err);
+              }
+            }, 500);
+          });
+        });
+      }
+
+      console.log('[Print] プレビュー表示完了');
+    } catch (err) {
+      notify('印刷の準備中にエラーが発生しました: ' + err.message);
+      console.error('Print error:', err);
+    }
+  };
+
+  // ===== PDF保存（window.print に依存しない実装） =====
+  // html2pdf.js を CDN から動的に読み込み、見積書HTMLを直接PDFとしてダウンロードする
+  const handleSavePDF = async () => {
+    try {
+      notify('PDFを生成しています...');
+      // html2pdf.js を動的ロード（既にロード済みならスキップ）
+      if (typeof window.html2pdf === 'undefined') {
+        await new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
+          script.onload = resolve;
+          script.onerror = reject;
+          document.head.appendChild(script);
+          setTimeout(() => reject(new Error('html2pdf 読込タイムアウト')), 10000);
+        });
+      }
+
+      // 印刷用と同じHTML生成ロジックを共有するため、handlePrint('pdf') でプレビューを準備
+      handlePrint('pdf');
+
+      // プレビューが描画されるのを待つ。フォントロード等を考慮して十分な時間を確保
+      setTimeout(() => {
+        const holder = document.getElementById('print-content-holder');
+        if (!holder || typeof window.html2pdf === 'undefined') {
+          notify('PDF生成に失敗しました。「PDFとして保存」ボタンから手動で保存してください。');
+          return;
+        }
+
+        // .page 要素を直接キャプチャ対象とする（ホルダーは fixed overlay なので不適切）
+        const pageElement = holder.querySelector('.page');
+        if (!pageElement || pageElement.innerHTML.trim() === '') {
+          notify('PDFの内容が空です。再試行してください。');
+          return;
+        }
+
+        // PDF キャプチャ用に .page を一時的にスタンドアロン化（box-shadow 等を解除）
+        const originalShadow = pageElement.style.boxShadow;
+        const originalMargin = pageElement.style.margin;
+        const originalMaxWidth = pageElement.style.maxWidth;
+        pageElement.style.boxShadow = 'none';
+        pageElement.style.margin = '0';
+        pageElement.style.maxWidth = '210mm';
+
+        // ツールバーを一時的に非表示にしてからキャプチャ
+        const toolbar = document.getElementById('print-toolbar');
+        if (toolbar) toolbar.style.display = 'none';
+
+        const filename = `${proposalTitle || '御見積書'}_${clientName || '見積'}.pdf`;
+        const opt = {
+          margin: [10, 10, 10, 10],
+          filename: filename,
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: {
+            scale: 2,
+            useCORS: true,
+            backgroundColor: '#ffffff',
+            logging: false,
+            // .page要素自身の幅を尊重
+            windowWidth: pageElement.scrollWidth,
+            windowHeight: pageElement.scrollHeight,
+          },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+          pagebreak: { mode: ['avoid-all', 'css', 'legacy'] },
+        };
+
+        const restore = () => {
+          pageElement.style.boxShadow = originalShadow;
+          pageElement.style.margin = originalMargin;
+          pageElement.style.maxWidth = originalMaxWidth;
+          if (toolbar) toolbar.style.display = '';
+        };
+
+        window.html2pdf().set(opt).from(pageElement).save().then(() => {
+          restore();
+          notify('PDFを保存しました');
+        }).catch((err) => {
+          restore();
+          console.error('PDF生成エラー:', err);
+          notify('PDF生成エラー。プレビューから手動でPDF保存できます。');
+        });
+      }, 1000);
+    } catch (err) {
+      console.error('PDF処理エラー:', err);
+      notify('PDFライブラリの読込に失敗しました。プレビューから手動で保存してください。');
+      // フォールバック: プレビューだけ開く
+      handlePrint('pdf');
+    }
+  };
+
+  // ===== CSV =====
+  const downloadCSV = () => {
+    let csv = '\ufeff';
+    csv += `"${proposalTitle}"\n`;
+    csv += `"お客様","${clientName}"\n`;
+    csv += `"発行日","${proposalDateText && proposalDateText.trim() ? proposalDateText.trim() : proposalDate}"\n`;
+    csv += `"担当者","${officeInfo.staffName}"\n\n`;
+    computedGroups.forEach((group) => {
+      csv += `"商品項目：${group.cleanTitle}"\n`;
+      const baseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
+      let headers = ['商品名'];
+      if (showCaseMode) headers.push('ケース入数', `数量(${group.unit})`, '単価(円)', '金額(円)');
+      else headers.push(`数量(${group.unit})`, '単価(円)');
+      headers.push(`${baseLabel}単価(円)`);
+      csv += headers.join(',') + '\n';
+      group.items.forEach((item) => {
+        let row = [`"${item.name.replace(/"/g, '""')}"`];
+        if (showCaseMode) row.push(item.packSize, item.volume, item.price, item.casePrice);
+        else row.push(item.volume, item.price);
+        row.push(Number(item.unitPriceRaw || 0).toFixed(1));
+        csv += row.join(',') + '\n';
+      });
+      csv += '\n';
+    });
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${proposalTitle}_${clientName || '見積'}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ===== 営業所データエクスポート・インポート（他営業所共有用） =====
+  const exportOfficeData = () => {
+    const data = {
+      exportedAt: new Date().toISOString(),
+      officeInfo, favorites, savedProposals,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `見積アプリデータ_${officeInfo.officeName || '営業所'}_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    notify('データをエクスポートしました');
+  };
+
+  const handleImportFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (data.officeInfo) setOfficeInfo(data.officeInfo);
+        if (Array.isArray(data.favorites)) setFavorites(data.favorites);
+        if (Array.isArray(data.savedProposals)) setSavedProposals(data.savedProposals);
+        notify('データをインポートしました');
+      } catch {
+        notify('ファイルの読み込みに失敗しました');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // ===== CSV インポート =====
+  // 想定列: 商品名,数量,単価,ケース入数,金額（順不同・ヘッダ行必須）
+  // 列名は半角全角ゆらぎを許容（数量・数 / 単価・価格 / ケース入数・入数 など）
+  const parseCSVLine = (line) => {
+    const out = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; }
+        else if (ch === '"') { inQuotes = false; }
+        else { cur += ch; }
+      } else {
+        if (ch === '"') inQuotes = true;
+        else if (ch === ',') { out.push(cur); cur = ''; }
+        else cur += ch;
+      }
+    }
+    out.push(cur);
+    return out;
+  };
+  const matchHeader = (h, candidates) => {
+    const norm = String(h).trim().toLowerCase();
+    return candidates.some((c) => norm.includes(String(c).toLowerCase()));
+  };
+  const handleImportCSV = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        // BOM除去 + 改行統一
+        let text = String(ev.target.result || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+        const lines = text.split('\n').filter((l) => l.trim() !== '');
+        if (lines.length < 2) {
+          notify('CSVに有効なデータがありません');
+          e.target.value = '';
+          return;
+        }
+        const headers = parseCSVLine(lines[0]).map((h) => h.trim());
+        // 列インデックスを推定
+        const idxName  = headers.findIndex((h) => matchHeader(h, ['商品名', '品名', '品目', 'name', 'item']));
+        const idxQty   = headers.findIndex((h) => matchHeader(h, ['数量', '容量', 'quantity', 'qty', 'volume']));
+        const idxPrice = headers.findIndex((h) => matchHeader(h, ['単価', '価格', 'price', 'unitprice']));
+        const idxCase  = headers.findIndex((h) => matchHeader(h, ['ケース入数', '入数', 'case', 'pack']));
+        // 金額は自動計算なので無視（あっても無視）
+
+        if (idxName < 0) {
+          notify('列「商品名」が見つかりません');
+          e.target.value = '';
+          return;
+        }
+
+        const importedItems = [];
+        for (let i = 1; i < lines.length; i++) {
+          const cols = parseCSVLine(lines[i]);
+          const name = (cols[idxName] || '').trim();
+          if (!name) continue;
+          const qtyRaw   = idxQty   >= 0 ? parseNumberInput(cols[idxQty]   || '') : '';
+          const priceRaw = idxPrice >= 0 ? parseNumberInput(cols[idxPrice] || '') : '';
+          const caseRaw  = idxCase  >= 0 ? parseNumberInput(cols[idxCase]  || '') : '';
+          importedItems.push({
+            id: genId('i'),
+            name,
+            memo: '',
+            volume: qtyRaw === '' ? '' : Number(qtyRaw),
+            packSize: caseRaw === '' ? 1 : (Number(caseRaw) || 1),
+            price: priceRaw === '' ? '' : Number(priceRaw),
+            casePrice: '',
+            cost: 0, caseCost: 0, targetMargin: '',
+            isHighlighted: false, memoOpen: false,
+          });
+        }
+
+        if (importedItems.length === 0) {
+          notify('CSVから取り込める商品データがありませんでした');
+          e.target.value = '';
+          return;
+        }
+
+        // 最初のグループに追加
+        setGroups((prev) => {
+          if (prev.length === 0) {
+            return [{
+              id: genId('g'), title: '', catalogMemo: '',
+              baseVolume: 100, baseQuantity: 1, unit: 'ml', baseScale: 100,
+              items: importedItems
+            }];
+          }
+          return prev.map((g, idx) => idx === 0
+            ? { ...g, items: [...g.items, ...importedItems] }
+            : g
+          );
+        });
+        notify(`CSVから ${importedItems.length} 件取り込みました`);
+      } catch (err) {
+        console.error('CSV import error:', err);
+        notify('CSVの読み込みに失敗しました');
+      }
+    };
+    reader.readAsText(file, 'UTF-8');
+    e.target.value = '';
+  };
+
+  // ===== UI =====
+  return (
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-800 text-sm print:bg-white">
+      {/* 印刷用スタイル - これが印刷の要 */}
+      <style>{`
+        @page {
+          size: A4;
+          margin: 12mm 10mm;
+        }
+        /* === 全入力欄の縦幅を40pxで厳密に固定（box-sizing: border-box含む）=== */
+        .item-table-input {
+          height: 40px !important;
+          box-sizing: border-box !important;
+          line-height: 1.2 !important;
+        }
+        @media print {
+          html, body {
+            background: #fff !important;
+            color: #000 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          .no-print { display: none !important; }
+          .print-only { display: block !important; }
+          .print-break-inside-avoid { break-inside: avoid; page-break-inside: avoid; }
+          .print-break-before { break-before: page; page-break-before: always; }
+          input, select, textarea {
+            border: none !important;
+            background: transparent !important;
+            padding: 0 !important;
+            color: #000 !important;
+            -webkit-appearance: none;
+            appearance: none;
+          }
+          .print-container {
+            box-shadow: none !important;
+            border: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            max-width: 100% !important;
+          }
+          table { page-break-inside: auto; }
+          tr { page-break-inside: avoid; page-break-after: auto; }
+          thead { display: table-header-group; }
+          tfoot { display: table-footer-group; }
+          .print-header { display: flex !important; }
+        }
+        .print-only { display: none; }
+        body { font-family: 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', 'Yu Gothic', Meiryo, sans-serif; }
+      `}</style>
+
+      {/* ===== ヘッダー（印刷時非表示） ===== */}
+      <header className="no-print bg-gradient-to-r from-slate-800 to-slate-900 text-white shadow-lg sticky top-0 z-50">
+        <div className="max-w-[1400px] mx-auto px-4 py-3">
+          <div className="flex flex-col lg:flex-row justify-between items-center gap-3">
+            <div className="flex items-center gap-3 shrink-0">
+              <FileText className="w-7 h-7 text-amber-400" />
+              <div>
+                <span className="text-sm text-slate-300 font-medium">{officeInfo.officeName || officeInfo.companyName}</span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 justify-center lg:justify-end items-center">
+              {/* モード切り替え（プレビューのみ） */}
+              <div className="flex items-center gap-1.5 bg-slate-700/50 rounded px-1.5 py-1">
+                <button onClick={() => setIsPreviewMode(!isPreviewMode)}
+                  className={`flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-bold transition ${isPreviewMode ? 'bg-teal-500 text-white' : 'text-slate-300 hover:bg-slate-600'}`}>
+                  {isPreviewMode ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />} プレビュー
+                </button>
+              </div>
+
+              {/* 主要アクション（印刷・CSV） */}
+              <div className="flex gap-1.5">
+                <button onClick={() => handlePrint('print')}
+                  className="flex items-center gap-1 bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition">
+                  <Printer className="w-4 h-4" /> 印刷
+                </button>
+                <button onClick={downloadCSV}
+                  className="flex items-center gap-1 bg-green-600 hover:bg-green-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition">
+                  <LayoutTemplate className="w-4 h-4" /> CSV出力
+                </button>
+                <label className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition cursor-pointer">
+                  <LayoutTemplate className="w-4 h-4" /> CSV取込
+                  <input type="file" accept=".csv,text/csv"
+                    onChange={handleImportCSV}
+                    className="hidden" />
+                </label>
+              </div>
+
+              {/* 設定 */}
+              <div className="flex gap-1.5">
+                <button onClick={() => setShowOfficeModal(true)}
+                  className="flex items-center gap-1 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition">
+                  <Building2 className="w-3.5 h-3.5" /> 営業所設定
+                </button>
+                <button onClick={() => setShowGuideModal(true)}
+                  className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded text-xs font-bold transition border border-slate-600">
+                  <BookOpen className="w-3.5 h-3.5" /> 使い方
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* ===== 印刷専用のメインコンテナ ===== */}
+      <main className="max-w-[1100px] mx-auto w-full p-4 print:p-0 print:max-w-full print-container">
+
+        {/* === 見積書ヘッダー（編集時はコンパクト1段、プレビュー時はフル表示） === */}
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 mb-2 print:shadow-none print:border-0 print:mb-6 print-break-inside-avoid">
+          {!isPreviewMode ? (
+            <>
+              {/* 見積書本体の入力行 */}
+              <div className="px-3 py-2 flex flex-wrap items-center gap-3">
+                <input value={proposalTitle} onChange={(e) => setProposalTitle(e.target.value)}
+                  className="text-base font-bold tracking-widest text-slate-900 outline-none bg-transparent border-b border-dashed border-slate-300 focus:border-blue-500 w-32"
+                  placeholder="御見積書" />
+                <div className="flex items-start gap-1.5">
+                  <div className="flex flex-col gap-1">
+                    <input value={clientName} onChange={(e) => setClientName(e.target.value)}
+                      placeholder="施設名（1段目）"
+                      className="item-table-input text-base font-bold text-slate-800 border-b-2 border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] sm:w-[340px] md:w-[420px] bg-transparent" />
+                    <input value={clientName2} onChange={(e) => setClientName2(e.target.value)}
+                      placeholder="施設名（2段目・任意）"
+                      className="item-table-input text-base font-bold text-slate-800 border-b border-dashed border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] sm:w-[340px] md:w-[420px] bg-transparent" />
+                  </div>
+                  <select value={clientHonorific} onChange={(e) => setClientHonorific(e.target.value)}
+                    className="item-table-input text-sm text-slate-600 font-bold border border-slate-300 rounded px-1.5 py-1 outline-none bg-white focus:border-blue-500 mt-1">
+                    <option value="御中">御中</option>
+                    <option value="様">様</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-2 ml-auto text-slate-600">
+                  <span className="text-slate-500 text-sm font-bold">No.</span>
+                  <input value={proposalNumber} onChange={(e) => setProposalNumber(e.target.value)}
+                    placeholder="見積番号"
+                    className="font-mono outline-none w-24 border-b border-dotted border-slate-300 text-sm px-1.5 py-1" />
+                  <input type="date" value={proposalDate} onChange={handleDateChange}
+                    className="outline-none text-sm font-bold border-b border-dotted border-slate-300 px-2 py-1 cursor-pointer" />
+                  {/* カレンダー選択日を右側に和暦表記でテキスト表示（自動） */}
+                  <span className="text-sm font-bold text-slate-700">
+                    {(() => {
+                      if (proposalDateText && proposalDateText.trim()) return proposalDateText;
+                      const p = (proposalDate || '').split('-');
+                      return p.length === 3 ? `${p[0]}年${parseInt(p[1], 10)}月${parseInt(p[2], 10)}日` : '';
+                    })()}
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-500 w-full">
+                  {officeInfo.officeName || officeInfo.companyName}
+                  {officeInfo.staffName && ` / ${officeInfo.staffName}`}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="p-6">
+              <div className="flex flex-col md:flex-row justify-between gap-6">
+                <div className="flex-1">
+                  <div className="border-b-2 border-slate-800 pb-3 mb-4">
+                    <h2 className="text-3xl font-bold tracking-[0.3em] text-slate-900">{proposalTitle}</h2>
+                  </div>
+                  <div className="space-y-2.5">
+                    <div className="text-2xl font-bold text-slate-800 border-b-2 border-slate-300 px-2 py-1 min-w-[280px]">
+                      {clientName || '　'} <span className="text-lg font-normal">御中</span>
+                    </div>
+                    <div className="text-sm text-slate-600 pl-2 leading-relaxed">
+                      下記の通り、お見積り申し上げます。<br />
+                      ご検討のほど、よろしくお願い申し上げます。
+                    </div>
+                  </div>
+                </div>
+                <div className="flex-none md:w-[300px] bg-slate-50 rounded p-2.5">
+                  <div className="text-xs space-y-0.5 text-slate-700">
+                    <div className="flex justify-between border-b border-slate-200 py-0.5">
+                      <span className="text-slate-500">見積番号</span>
+                      <span className="font-mono">{proposalNumber || '—'}</span>
+                    </div>
+                    <div className="flex justify-between border-b border-slate-200 py-0.5">
+                      <span className="text-slate-500">発行日</span>
+                      <span>{proposalDateText && proposalDateText.trim()
+                        ? proposalDateText
+                        : (() => { const p = (proposalDate||'').split('-'); return p.length===3 ? `${p[0]}年${parseInt(p[1],10)}月${parseInt(p[2],10)}日` : proposalDate; })()}</span>
+                    </div>
+                  </div>
+                  <div className="pt-1 border-t border-slate-300 mt-1">
+                    <div className="font-bold text-sm text-slate-800 leading-tight">{officeInfo.companyName}</div>
+                    {officeInfo.officeName && <div className="font-semibold text-slate-700 text-xs leading-tight">{officeInfo.officeName}</div>}
+                    {officeInfo.postal && <div className="text-[11px] mt-0.5 leading-tight">〒{officeInfo.postal}</div>}
+                    {officeInfo.address && <div className="text-[11px] leading-tight">{officeInfo.address}</div>}
+                    <div className="text-[11px] mt-0 leading-tight">
+                      {officeInfo.phone && <div>TEL: {officeInfo.phone}</div>}
+                      {officeInfo.fax && <div>FAX: {officeInfo.fax}</div>}
+                      <div className="text-blue-700 font-semibold">登録番号: T1290001044462</div>
+                    </div>
+                    {officeInfo.manager && (
+                      <div className="text-[11px] mt-1 pt-1 border-t border-dashed border-slate-300 leading-tight">
+                        所長: <span className="font-bold">{officeInfo.manager}</span>
+                      </div>
+                    )}
+                    {officeInfo.staffName && (
+                      <div className="text-[11px] leading-tight">
+                        担当: <span className="font-bold">{officeInfo.staffName}</span>
+                      </div>
+                    )}
+                    {/* 所長印・担当印（同サイズ26mm） */}
+                    <div className="flex justify-end gap-2 mt-1.5 pt-1 border-t border-slate-200">
+                      <div className="text-center">
+                        <div className="text-[10px] text-blue-600 font-semibold mb-0.5">所長印</div>
+                        <div className="w-[72px] h-[72px] border border-blue-300 bg-white"></div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-[10px] text-blue-600 font-semibold mb-0.5">担当印</div>
+                        <div className="w-[72px] h-[72px] border border-blue-300 bg-white"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {showGrandTotal && grandTotal > 0 && (
+                <div className="mt-4 bg-slate-800 text-white rounded px-5 py-2.5 flex items-center justify-between">
+                  <span className="text-sm font-bold tracking-widest">御見積金額 合計{getTotalSuffix()}</span>
+                  <span className="text-xl font-bold">¥{grandTotal.toLocaleString()}<span className="text-sm font-normal ml-2">—</span></span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* === リセットボタン === */}
+        {groups.length > 0 && !isPreviewMode && (
+          <div className="flex justify-end mb-2 no-print">
+            <button onClick={handleClearAll}
+              className={`text-xs flex items-center gap-1.5 px-3 py-1.5 rounded border transition ${confirmClearAll ? 'bg-red-600 text-white font-bold border-red-700' : 'text-slate-400 hover:text-red-600 border-transparent'}`}>
+              <Trash2 className="w-3.5 h-3.5" />
+              {confirmClearAll ? 'もう一度押すと削除' : '全データをリセット'}
+            </button>
+          </div>
+        )}
+
+        {/* === お取引条件（コンパクト表示） === */}
+        <div className="bg-slate-50 rounded border border-slate-200 px-3 py-1.5 mb-3 no-print">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+            <span className="text-slate-400 font-bold">条件:</span>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">有効期限</span>
+              <input value={validityPeriod} onChange={(e) => setValidityPeriod(e.target.value)}
+                className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-32 text-[11px] focus:border-blue-400" />
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">支払</span>
+              <input value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)}
+                className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-32 text-[11px] focus:border-blue-400" />
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">納期</span>
+              <input value={deliveryInfo} onChange={(e) => setDeliveryInfo(e.target.value)}
+                className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-36 text-[11px] focus:border-blue-400" />
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-400">備考</span>
+              <input value={remarks} onChange={(e) => setRemarks(e.target.value)}
+                placeholder="特記事項"
+                className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-36 text-[11px] focus:border-blue-400" />
+            </div>
+          </div>
+        </div>
+
+        {/* === 商品グループ === */}
+        {computedGroups.map((group, groupIdx) => {
+          const inputState = newItems[group.id] || getEmptyItem();
+          // ★ 仕様: 空欄でも行追加を許可（バリデーション無効化）
+          const canAdd = true;
+
+          return (
+            <div key={group.id}
+              className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden mb-4 print:shadow-none print:border print:border-slate-300 print:mb-4 print-break-inside-avoid">
+
+              {/* === 操作パネル（2段構成：上=モード切替 / 下=設定切り替え） === */}
+              {!isPreviewMode && groupIdx === 0 && (
+                <div className="bg-slate-100 border-b border-slate-200 no-print">
+                  {/* 上段：モード切替 */}
+                  <div className="px-4 py-2 flex flex-wrap items-center gap-2.5 border-b border-slate-200">
+                    <span className="text-xs font-bold text-slate-500 tracking-widest mr-1">【モード切替】</span>
+                    <div className="flex items-center gap-0 bg-white border border-slate-300 rounded overflow-hidden">
+                      <button onClick={() => setAppMode('quote')}
+                        className={`px-4 py-2 text-sm font-bold transition ${appMode === 'quote' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                        見積作成モード
+                      </button>
+                      <button onClick={() => setAppMode('proposal')}
+                        className={`px-4 py-2 text-sm font-bold transition ${appMode === 'proposal' ? 'bg-purple-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                        提案書作成モード
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 下段：設定切り替え（ケースON/OFFは廃止：モード連動のため） */}
+                  <div className="px-4 py-2 flex flex-wrap items-center gap-2.5">
+                    <span className="text-xs font-bold text-slate-500 tracking-widest mr-1">【設定切り替え】</span>
+                    <button onClick={() => setShowCost(!showCost)}
+                      className={`flex items-center gap-1.5 px-4 py-2 rounded text-sm font-bold transition ${showCost ? 'bg-orange-500 text-white' : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-50'}`}>
+                      <Coins className="w-4 h-4" /> 原価{showCost ? 'ON' : 'OFF'}
+                    </button>
+                    {/* ★ 単位表示ON/OFF（提案書モードのみ） */}
+                    {appMode === 'proposal' && (
+                      <div className="flex items-center gap-2 bg-white border border-slate-300 rounded px-3 py-2">
+                        <span className="text-sm font-bold text-slate-600">単位表示:</span>
+                        <label className="flex items-center cursor-pointer">
+                          <input type="checkbox" checked={showUnit}
+                            onChange={(e) => setShowUnit(e.target.checked)}
+                            className="sr-only peer" />
+                          <div className="w-9 h-5 bg-slate-300 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600 relative"></div>
+                        </label>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2 bg-white border border-slate-300 rounded px-3 py-2">
+                      <span className="text-sm font-bold text-slate-600">合計表示:</span>
+                      <label className="flex items-center cursor-pointer">
+                        <input type="checkbox" checked={showGrandTotal}
+                          onChange={(e) => setShowGrandTotal(e.target.checked)}
+                          className="sr-only peer" />
+                        <div className="w-9 h-5 bg-slate-300 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600 relative"></div>
+                      </label>
+                    </div>
+                    <div className="flex items-center gap-2 bg-white border border-slate-300 rounded px-3 py-2">
+                      <span className="text-sm font-bold text-slate-600">税区分:</span>
+                      <select value={taxMode} onChange={(e) => setTaxMode(e.target.value)}
+                        className="bg-transparent outline-none text-sm font-bold text-slate-700">
+                        <option value="exclusive">税抜</option>
+                        <option value="inclusive">税込</option>
+                        <option value="nontax">非課税</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* グループヘッダー */}
+              <div className="px-4 py-3 border-b flex flex-col md:flex-row md:items-center justify-between gap-3 bg-slate-50 print:bg-slate-100 print:py-2">
+                <div className="flex items-center gap-3 flex-1">
+                  <PackagePlus className="w-6 h-6 text-slate-700" />
+                  {isPreviewMode ? (
+                    (group.title && group.title.trim()) ? (
+                      <div className="font-bold text-slate-800 text-lg">■ {group.title}</div>
+                    ) : null
+                  ) : (
+                    <div className="relative flex-shrink-0" style={STYLE_CATEGORY_INPUT}>
+                      <input value={group.title} onChange={(e) => updateGroupField(group.id, 'title', e.target.value)}
+                        placeholder="商品カテゴリ名 (例: ビニール手袋)"
+                        className="bg-white border border-slate-300 rounded px-2.5 py-1.5 font-bold text-slate-800 text-sm outline-none w-full shadow-sm focus:border-blue-500 pr-7" />
+                      <Sparkles className="absolute right-2 top-2 w-3.5 h-3.5 text-blue-300 pointer-events-none" />
+                    </div>
+                  )}
+                </div>
+
+                {!isPreviewMode && (
+                  <div className="flex flex-wrap items-center gap-2 no-print">
+                    {/* 単位・基準セレクタは「提案書作成モード」でのみ表示（100ml単価等の計算に使用） */}
+                    {appMode === 'proposal' && (
+                      <div className="flex items-center gap-1.5 bg-white px-2 py-1 rounded border border-slate-200">
+                        <span className="text-xs font-bold text-slate-500">単位:</span>
+                        <select value={group.unit} onChange={(e) => changeGroupUnit(group.id, e.target.value)}
+                          className="bg-transparent outline-none text-slate-700 font-bold text-xs">
+                          {UNIT_OPTIONS.map((u) => <option key={u.value} value={u.value}>{u.label}</option>)}
+                        </select>
+                        <span className="text-xs font-bold text-slate-500 ml-2">基準:</span>
+                        <select value={group.baseScale} onChange={(e) => updateGroupField(group.id, 'baseScale', Number(e.target.value))}
+                          className="bg-transparent outline-none text-slate-700 font-bold text-xs">
+                          <option value="1">1{group.unit}</option>
+                          <option value="100">100{group.unit}</option>
+                          <option value="1000">1000{group.unit}</option>
+                        </select>
+                      </div>
+                    )}
+                    <button onClick={() => sortGroupItems(group.id)}
+                      className="flex items-center gap-1 px-2 py-1 bg-white border border-slate-300 rounded hover:bg-slate-50 text-xs text-slate-600">
+                      <ArrowUpDown className="w-3.5 h-3.5" /> 並替
+                    </button>
+                    <button onClick={() => removeGroup(group.id)}
+                      className={`p-1.5 rounded transition ${deleteConfirmMap[group.id] ? 'bg-red-600 text-white animate-pulse' : 'text-slate-400 hover:text-red-500 hover:bg-red-50'}`}>
+                      {deleteConfirmMap[group.id] ? <AlertTriangle className="w-4 h-4" /> : <X className="w-4 h-4" />}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* テーブル本体 */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left" style={STYLE_TABLE_AUTO}>
+                  <thead className="text-xs text-slate-800 bg-slate-50 border-b border-slate-200 print:bg-slate-100">
+                    <tr>
+                      <th className={`px-3 py-2 text-left font-bold text-slate-800 ${showCost && !isPreviewMode ? 'min-w-[200px]' : 'min-w-[320px]'}`}>品目</th>
+                      {showCaseMode && <th className="px-2 py-2 text-right font-bold text-slate-800 w-[95px]">ケース入数</th>}
+                      {appMode === 'proposal' && <th className="px-2 py-2 text-right font-bold text-slate-800 w-[110px]">容量・枚数・長さなど</th>}
+                      {appMode === 'quote' && <th className="px-2 py-2 text-right font-bold text-slate-800 w-[95px]">数量</th>}
+                      {showCost && !isPreviewMode && (
+                        <>
+                          <th className="px-2 py-2 text-right font-semibold text-orange-600 bg-orange-50 no-print w-[95px]">単価仕入</th>
+                          {showCaseMode && <th className="px-2 py-2 text-right font-semibold text-orange-600 bg-orange-50 no-print w-[95px]">ケース仕入</th>}
+                          <th className="px-2 py-2 text-right font-semibold text-orange-600 bg-orange-50 no-print w-[95px]">利益率</th>
+                        </>
+                      )}
+                      <th className="px-2 py-2 text-right font-bold text-slate-800 w-[100px]">単価</th>
+                      <th className="px-2 py-2 text-right font-bold text-slate-800 w-[100px]">金額</th>
+                      {showCost && !isPreviewMode && <th className="px-2 py-2 text-right font-semibold text-orange-600 bg-orange-50 no-print w-[95px]">利益</th>}
+                      {appMode === 'proposal' && <th className="px-2 py-2 text-right font-semibold text-slate-500 w-[95px]">{group.baseScale === 1 ? '' : group.baseScale}{group.unit}単価</th>}
+                      {showSimulation && <th className="px-2 py-2 text-right text-slate-700 font-semibold min-w-[100px]">年間コスト</th>}
+                      {!isPreviewMode && <th className="px-2 py-2 text-center w-[100px] no-print"></th>}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(() => {
+                      // 印刷時は全件、編集時は currentPage のみ表示
+                      const visibleItems = isPreviewMode
+                        ? group.items
+                        : group.items.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
+                      const startIndex = isPreviewMode ? 0 : (currentPage - 1) * ITEMS_PER_PAGE;
+                      return visibleItems.map((item, idx) => {
+                      const index = startIndex + idx;
+                      const isBest = item.id === group.stats?.minItem?.id;
+                      const isBaseline = index === 0;
+                      return (
+                        <tr key={item.id} className={`${item.isHighlighted ? 'bg-yellow-200' : isBest ? 'bg-blue-50/40' : 'hover:bg-slate-50'} print:hover:bg-transparent`}>
+                          <td className="px-3 py-2 relative">
+                            {isBaseline && <div className="absolute left-0 top-0 bottom-0 w-1 bg-slate-400 print:bg-slate-600"></div>}
+                            {isPreviewMode ? (
+                              <div className="py-1 pl-1">
+                                <div className="font-bold text-slate-800">{item.name}</div>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col gap-2 w-full pl-1">
+                                <div className="flex items-center gap-2">
+                                  <input value={item.name} onChange={(e) => updateItem(group.id, item.id, 'name', e.target.value)}
+                                    className={`item-table-input flex-1 border rounded px-2.5 py-1.5 outline-none font-bold text-sm focus:border-blue-500 ${item.isHighlighted ? 'bg-yellow-100 border-yellow-300' : 'bg-white border-slate-300'}`} />
+                                  <button type="button"
+                                    onClick={() => updateItem(group.id, item.id, 'isHighlighted', !item.isHighlighted)}
+                                    title="マーカー（強調表示）"
+                                    className={`p-1.5 rounded transition ${item.isHighlighted ? 'bg-yellow-400 text-white' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}>
+                                    <HighlighterIcon className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </td>
+                          {showCaseMode && (
+                            <td className="px-2 py-2 text-right font-bold align-top pt-3 text-base">
+                              {isPreviewMode ? item.packSize :
+                                <input type="text" inputMode="numeric" value={formatNumber(item.packSize)} onChange={(e) => updateItem(group.id, item.id, 'packSize', parseNumberInput(e.target.value))}
+                                  className="item-table-input w-[85px] flex-shrink-0 bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none text-base" />
+                              }
+                            </td>
+                          )}
+                          {/* 数量列（両モードで表示。提案書は単位付き＝容量・枚数・長さなど、見積は単位なし＝数量） */}
+                          <td className="px-2 py-2 text-right font-bold text-slate-800 align-top pt-3 text-base">
+                            {isPreviewMode ? (
+                              <span>{item.volume}{appMode === 'proposal' && showUnit && (
+                                <span className="text-[10px] text-slate-500 ml-0.5">{item.unitOverride ?? group.unit}</span>
+                              )}</span>
+                            ) : appMode === 'proposal' ? (
+                              <div className="flex items-center justify-end gap-1">
+                                <input type="text" value={item.volume}
+                                  onChange={(e) => updateItem(group.id, item.id, 'volume', e.target.value)}
+                                  placeholder="例：500ml・200枚・100m"
+                                  className="item-table-input w-[60px] flex-shrink-0 bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none text-base font-bold text-slate-800" />
+                                {showUnit && (
+                                  <input type="text" value={item.unitOverride ?? group.unit}
+                                    onChange={(e) => updateItem(group.id, item.id, 'unitOverride', e.target.value)}
+                                    placeholder="単位"
+                                    title="単位を上書きできます（例：枚／ml／m）"
+                                    className="item-table-input w-[36px] flex-shrink-0 bg-slate-50 border border-slate-200 rounded px-1 py-1 text-center outline-none text-[11px] text-slate-600" />
+                                )}
+                              </div>
+                            ) : (
+                              <input type="number" value={item.volume}
+                                onChange={(e) => updateItem(group.id, item.id, 'volume', e.target.value)}
+                                className="item-table-input w-[85px] flex-shrink-0 bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none text-base font-bold text-slate-800" />
+                            )}
+                          </td>
+                          {showCost && !isPreviewMode && (
+                            <>
+                              <td className="px-2 py-2 bg-orange-50 text-right align-top pt-3 no-print">
+                                <input type="text" inputMode="numeric" value={item.cost === 0 || item.cost === '' ? '' : formatNumber(item.cost)}
+                                  onChange={(e) => updateItem(group.id, item.id, 'cost', parseNumberInput(e.target.value))}
+                                  className="item-table-input w-[85px] flex-shrink-0 bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none text-base" />
+                              </td>
+                              {showCaseMode && (
+                                <td className="px-2 py-2 bg-orange-50 text-right align-top pt-3 no-print">
+                                  <input type="text" inputMode="numeric" value={item.caseCost === 0 || item.caseCost === '' ? '' : formatNumber(item.caseCost)}
+                                    onChange={(e) => updateItem(group.id, item.id, 'caseCost', parseNumberInput(e.target.value))}
+                                    className="item-table-input w-[85px] flex-shrink-0 bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none text-base" />
+                                </td>
+                              )}
+                              <td className="px-2 py-2 bg-orange-50 text-right align-top pt-3 no-print">
+                                <input type="text" inputMode="decimal" value={item.targetMargin}
+                                  onChange={(e) => updateItem(group.id, item.id, 'targetMargin', e.target.value)}
+                                  placeholder={String(item.margin)}
+                                  className="item-table-input w-[85px] flex-shrink-0 bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none text-base" />
+                              </td>
+                            </>
+                          )}
+                          <td className="px-2 py-2 text-right font-bold align-top pt-3 text-base">
+                            {isPreviewMode ? `¥${(item.price || 0).toLocaleString()}` :
+                              <input type="text" inputMode="numeric" value={item.price === 0 || item.price === '' ? '' : formatNumber(item.price)}
+                                onChange={(e) => updateItem(group.id, item.id, 'price', parseNumberInput(e.target.value))}
+                                className="item-table-input w-[85px] flex-shrink-0 bg-white border border-slate-300 rounded px-2 py-1 text-right outline-none font-bold text-base" />
+                            }
+                          </td>
+                          {/* 金額列：モード別自動算出（見積=数量×単価／提案書=ケース入数×単価） */}
+                          <td className="px-2 py-2 text-right font-bold text-slate-800 align-top pt-3 text-base">
+                            {(() => {
+                              const pri = Number(item.price) || 0;
+                              const factor = appMode === 'proposal'
+                                ? (Number(item.packSize) || 0)   // 提案書: ケース入数
+                                : (Number(item.volume) || 0);    // 見積: 数量
+                              return `¥${(factor * pri).toLocaleString()}`;
+                            })()}
+                          </td>
+                          {showCost && !isPreviewMode && (
+                            <td className="px-2 py-2 text-right font-medium text-orange-700 bg-orange-50 align-top pt-3 no-print text-base">
+                              ¥{item.profit.toLocaleString()}
+                            </td>
+                          )}
+                          {appMode === 'proposal' && (
+                            <td className="px-2 py-2 text-right text-slate-600 font-medium align-top pt-3 text-base">
+                              ¥{item.unitPrice.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                            </td>
+                          )}
+                          {showSimulation && (
+                            <td className={`px-2 py-2 text-right font-bold align-top pt-3 ${isBest ? 'text-red-600' : 'text-slate-700'}`}>
+                              ¥{item.yearlyCost.toLocaleString()}
+                            </td>
+                          )}
+                          {!isPreviewMode && (
+                            <td className="px-2 py-2 text-center align-top pt-3 no-print">
+                              <div className="flex items-center justify-center gap-0.5">
+                                {/* 上へ */}
+                                <button onClick={() => index > 0 && moveItem(group.id, index, -1)}
+                                  disabled={index === 0}
+                                  title={index === 0 ? '一番上の行です' : '上へ移動'}
+                                  className={`p-1 ${index > 0 ? 'text-slate-400 hover:text-blue-600 cursor-pointer' : 'text-slate-200 cursor-not-allowed opacity-40'}`}>
+                                  <ChevronUp className="w-4 h-4" />
+                                </button>
+                                {/* 下へ */}
+                                <button onClick={() => index < group.items.length - 1 && moveItem(group.id, index, 1)}
+                                  disabled={index >= group.items.length - 1}
+                                  title={index >= group.items.length - 1 ? '一番下の行です' : '下へ移動'}
+                                  className={`p-1 ${index < group.items.length - 1 ? 'text-slate-400 hover:text-blue-600 cursor-pointer' : 'text-slate-200 cursor-not-allowed opacity-40'}`}>
+                                  <ChevronDown className="w-4 h-4" />
+                                </button>
+                                {(() => {
+                                  // 全行に削除ボタンを表示。ただし最後の1行は削除不可（最低1行は残す）
+                                  const enabled = group.items.length > 1;
+                                  return (
+                                    <button onClick={() => enabled && deleteItem(group.id, item.id)}
+                                      disabled={!enabled}
+                                      title={enabled ? '削除' : '最後の1行は削除できません'}
+                                      className={`p-1 ${enabled ? 'text-slate-300 hover:text-red-600 cursor-pointer' : 'text-slate-200 cursor-not-allowed opacity-40'}`}>
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  );
+                                })()}
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    });
+                    })()}
+
+                    {/* 入力行（編集モードのみ） */}
+                    {!isPreviewMode && (
+                      <tr className={`bg-slate-50/50 no-print ${inputState.isHighlighted ? 'bg-yellow-200' : ''}`}>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-center gap-2">
+                              <input placeholder="商品名 (例: 除菌液 500ml)" value={inputState.name}
+                                onChange={(e) => handleInputChange(group.id, 'name', e.target.value)}
+                                className={`item-table-input flex-1 border-2 rounded px-3 py-2 outline-none focus:border-blue-500 font-bold text-base ${inputState.isHighlighted ? 'bg-yellow-100 border-yellow-300' : 'bg-white border-slate-300'}`} />
+                              <button type="button"
+                                onClick={() => handleInputChange(group.id, 'isHighlighted', !inputState.isHighlighted)}
+                                title="マーカー（強調表示）"
+                                className={`p-1.5 rounded transition ${inputState.isHighlighted ? 'bg-yellow-400 text-white' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}>
+                                <HighlighterIcon className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        </td>
+                        {showCaseMode && (
+                          <td className="px-2 py-2 text-right align-top pt-3">
+                            <input type="text" inputMode="numeric" value={inputState.packSize === '' ? '' : formatNumber(inputState.packSize)}
+                              onChange={(e) => handleInputChange(group.id, 'packSize', parseNumberInput(e.target.value))}
+                              className="item-table-input w-[85px] flex-shrink-0 bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none font-bold text-base" />
+                          </td>
+                        )}
+                        {/* 入力行：数量列（両モードで表示） */}
+                        <td className="px-2 py-2 text-right align-top pt-3">
+                          <input type={appMode === 'proposal' ? 'text' : 'number'}
+                            placeholder={appMode === 'proposal' ? '例：500ml・200枚・100m' : '数量'}
+                            value={inputState.volume}
+                            onChange={(e) => handleInputChange(group.id, 'volume', e.target.value)}
+                            className="item-table-input w-[85px] flex-shrink-0 bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none font-bold text-base" />
+                        </td>
+                        {showCost && (
+                          <>
+                            <td className="px-2 py-2 bg-orange-50 text-right align-top pt-3">
+                              <input type="text" inputMode="numeric" placeholder="単価仕入" value={inputState.cost === '' ? '' : formatNumber(inputState.cost)}
+                                onChange={(e) => handleInputChange(group.id, 'cost', parseNumberInput(e.target.value))}
+                                className="item-table-input w-[85px] flex-shrink-0 bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none text-base" />
+                            </td>
+                            {showCaseMode && (
+                              <td className="px-2 py-2 bg-orange-50 text-right align-top pt-3">
+                                <input type="text" inputMode="numeric" placeholder="ケース仕入" value={inputState.caseCost === '' ? '' : formatNumber(inputState.caseCost)}
+                                  onChange={(e) => handleInputChange(group.id, 'caseCost', parseNumberInput(e.target.value))}
+                                  className="item-table-input w-[85px] flex-shrink-0 bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none text-base" />
+                              </td>
+                            )}
+                            <td className="px-2 py-2 bg-orange-50 text-right align-top pt-3">
+                              <input type="text" inputMode="decimal" placeholder="利益%" value={inputState.targetMargin}
+                                onChange={(e) => handleInputChange(group.id, 'targetMargin', e.target.value)}
+                                className="item-table-input w-[85px] flex-shrink-0 bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none text-base" />
+                            </td>
+                          </>
+                        )}
+                        <td className="px-2 py-2 text-right align-top pt-3">
+                          <input type="text" inputMode="numeric" placeholder="単価" value={inputState.price === '' ? '' : formatNumber(inputState.price)}
+                            onChange={(e) => handleInputChange(group.id, 'price', parseNumberInput(e.target.value))}
+                            className="item-table-input w-[85px] flex-shrink-0 bg-white border border-slate-300 rounded px-2 py-1 text-right outline-none font-bold" />
+                        </td>
+                        {/* 入力行：金額 = モード別自動算出（見積=数量×単価／提案書=ケース入数×単価） */}
+                        <td className="px-2 py-2 text-right align-top pt-3 text-base font-bold text-slate-700">
+                          {(() => {
+                            const pri = Number(inputState.price) || 0;
+                            const factor = appMode === 'proposal'
+                              ? (Number(inputState.packSize) || 0)
+                              : (Number(inputState.volume) || 0);
+                            return `¥${(factor * pri).toLocaleString()}`;
+                          })()}
+                        </td>
+                        <td colSpan={(showCost ? 2 : 0) + (showSimulation ? 2 : 1) + 1}
+                          className="px-3 py-2 text-right align-top pt-3">
+                          <button onClick={() => handleAddItem(group.id)} disabled={!canAdd}
+                            className={`px-3 py-1.5 rounded text-xs font-bold transition w-full ${canAdd ? 'bg-slate-800 text-white hover:bg-slate-700' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}>
+                            <Plus className="w-3 h-3 inline mr-0.5" /> 追加
+                          </button>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* === 手動ページ切替（前へ／次へ）=== */}
+              {!isPreviewMode && group.items.length > ITEMS_PER_PAGE && (
+                <div className="flex items-center justify-center gap-3 px-4 py-2 bg-slate-50 border-t border-slate-200 no-print">
+                  <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    disabled={currentPage <= 1}
+                    className={`px-4 py-1.5 rounded text-sm font-bold transition ${currentPage <= 1 ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'}`}>
+                    ← 前へ
+                  </button>
+                  <span className="text-sm font-bold text-slate-600">
+                    {currentPage} / {Math.ceil(group.items.length / ITEMS_PER_PAGE)} ページ
+                  </span>
+                  <button onClick={() => setCurrentPage(p => Math.min(Math.ceil(group.items.length / ITEMS_PER_PAGE), p + 1))}
+                    disabled={currentPage >= Math.ceil(group.items.length / ITEMS_PER_PAGE)}
+                    className={`px-4 py-1.5 rounded text-sm font-bold transition ${currentPage >= Math.ceil(group.items.length / ITEMS_PER_PAGE) ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'}`}>
+                    次へ →
+                  </button>
+                </div>
+              )}
+
+              {/* 試算情報 */}
+              {showSimulation && (
+                <div className="bg-blue-50/50 px-4 py-2.5 border-t border-slate-200 flex flex-col md:flex-row justify-between items-center gap-3 print:bg-slate-50 print:py-1.5">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="font-bold text-slate-600">試算条件:</span>
+                    <div className="flex items-center bg-white px-2 py-1 rounded border border-slate-200">
+                      <Calculator className="w-3 h-3 text-slate-400 mr-1" />
+                      {isPreviewMode ? <span className="font-bold text-slate-700">{group.baseVolume}</span> :
+                        <input type="number" value={group.baseVolume}
+                          onChange={(e) => updateGroupField(group.id, 'baseVolume', e.target.value)}
+                          className="w-14 text-right outline-none font-bold text-slate-700 bg-transparent" />}
+                      <span className="text-[10px] text-slate-500 mx-1">{group.unit}</span>
+                      <MultiplyIcon className="w-3 h-3 text-slate-400" />
+                      {isPreviewMode ? <span className="font-bold text-slate-700 ml-1">{group.baseQuantity}</span> :
+                        <input type="number" value={group.baseQuantity}
+                          onChange={(e) => updateGroupField(group.id, 'baseQuantity', e.target.value)}
+                          className="w-12 text-right outline-none font-bold text-slate-700 ml-1 bg-transparent" />}
+                      <span className="text-[10px] text-slate-500 ml-1">個/月</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 text-xs">
+                    {group.stats?.discountRate > 0 && (
+                      <div className="flex items-center text-red-700 bg-red-50 px-2 py-1 rounded border border-red-200 font-bold">
+                        <Percent className="w-3 h-3 mr-1" />約 {group.stats.discountRate}% ダウン
+                      </div>
+                    )}
+                    <div>
+                      <span className="text-slate-500">年間削減見込：</span>
+                      <span className={`font-bold text-base ml-1 ${group.stats?.yearlyReduction > 0 ? 'text-red-600' : 'text-slate-400'}`}>
+                        ¥{(group.stats?.yearlyReduction || 0).toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* カテゴリ追加ボタン */}
+        {!isPreviewMode && (
+          <button onClick={addGroup}
+            className="w-full py-4 border-2 border-dashed border-slate-300 rounded-lg text-slate-400 hover:text-slate-700 hover:border-slate-500 hover:bg-slate-50 transition flex items-center justify-center gap-2 no-print">
+            <Plus className="w-5 h-5" />
+            <span className="font-bold">新しい商品カテゴリを追加</span>
+          </button>
+        )}
+
+        {/* === 全商品下部の備考欄（新規） === */}
+        <div className="bg-white rounded-lg shadow-sm border border-blue-200 p-3 mt-4">
+          <label className="text-xs font-bold text-blue-700 mb-1 block">備考（見積書下部に印字されます）</label>
+          {isPreviewMode ? (
+            <div className="text-sm text-slate-800 whitespace-pre-wrap min-h-[1.5em]">{bottomRemarks || '—'}</div>
+          ) : (
+            <textarea value={bottomRemarks} onChange={(e) => setBottomRemarks(e.target.value)}
+              placeholder="本見積書の記載金額には、消費税は含まれておりません。"
+              rows={2}
+              className="w-full bg-slate-50 border border-slate-200 rounded px-3 py-1.5 text-sm outline-none focus:bg-white focus:border-blue-500 resize-none" />
+          )}
+        </div>
+
+        {/* 下部余白 */}
+        <div className="pb-20 print:pb-0"></div>
+      </main>
+
+      {/* === 年間削減サマリー（固定フッター） === */}
+      {showSimulation && totalReduction > 0 && (
+        <div className="bg-white border-t border-slate-200 shadow-lg sticky bottom-0 z-40 p-3 no-print">
+          <div className="max-w-[1100px] mx-auto flex justify-end items-center gap-3">
+            <span className="text-xs font-bold text-slate-600">年間削減総額（試算）:</span>
+            <span className="text-xl font-bold text-red-600">¥{totalReduction.toLocaleString()}</span>
+          </div>
+        </div>
+      )}
+
+      {/* === 通知 === */}
+      {notification && (
+        <div className="fixed bottom-4 right-4 bg-slate-900 text-white px-4 py-2.5 rounded-lg shadow-xl z-[100] text-sm font-bold animate-fade-in no-print">
+          {notification}
+        </div>
+      )}
+
+      {/* ===== 各モーダル ===== */}
+
+      {/* 営業所設定モーダル */}
+      {showOfficeModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4 no-print">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center p-4 border-b bg-amber-50 shrink-0">
+              <h3 className="text-lg font-bold text-amber-800 flex items-center gap-2">
+                <Building2 className="w-5 h-5" /> 営業所・会社情報の設定
+              </h3>
+              <button onClick={() => setShowOfficeModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-3">
+              {/* 営業所マスタから選択 */}
+              <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 mb-2">
+                <label className="text-xs font-bold text-amber-800 block mb-1.5 flex items-center gap-1">
+                  <Building2 className="w-3.5 h-3.5" /> 営業所マスタから選択（自動入力）
+                </label>
+                <select
+                  onChange={(e) => {
+                    const selected = OFFICE_MASTER.find((o) => o.name === e.target.value);
+                    if (selected) {
+                      setOfficeInfo({
+                        ...officeInfo,
+                        companyName: '太陽シルバーサービス㈱',
+                        officeName: selected.name,
+                        postal: selected.postal || '',
+                        address: selected.address,
+                        phone: selected.phone,
+                        fax: selected.fax,
+                        manager: selected.manager || '',
+                      });
+                      notify(`${selected.name}を選択しました`);
+                    }
+                    e.target.value = '';
+                  }}
+                  defaultValue=""
+                  className="w-full p-2 border border-amber-300 rounded outline-none focus:border-amber-500 bg-white text-sm font-medium"
+                >
+                  <option value="" disabled>▼ 営業所を選んでください</option>
+                  {OFFICE_MASTER.map((o) => (
+                    <option key={o.name} value={o.name}>
+                      {o.name} （〒{o.postal} {o.address.slice(0, 16)}…）
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-amber-700 mt-1.5">
+                  選択すると、営業所名・郵便番号・住所・電話・FAX・所長名が自動入力されます。
+                </p>
+              </div>
+
+              <p className="text-xs text-slate-600 bg-blue-50 border border-blue-200 rounded p-2.5 mb-2">
+                ここで入力した情報が見積書の右上に印字されます。手動でも編集できます。
+              </p>
+              {[
+                { key: 'companyName', label: '会社名 ※', placeholder: '太陽シルバーサービス㈱' },
+                { key: 'officeName', label: '営業所名', placeholder: '行橋営業所' },
+                { key: 'postal', label: '郵便番号', placeholder: '824-0043' },
+                { key: 'address', label: '住所', placeholder: '福岡県行橋市大字流末1327番地' },
+                { key: 'phone', label: '電話番号', placeholder: '0930-26-9640' },
+                { key: 'fax', label: 'FAX', placeholder: '0930-26-9641' },
+                { key: 'email', label: 'Email', placeholder: 'info@example.co.jp' },
+                { key: 'manager', label: '所長名', placeholder: '久保 匠史' },
+                { key: 'staffName', label: '担当者名', placeholder: '営業　太郎' },
+              ].map((field) => (
+                <div key={field.key}>
+                  <label className="text-xs font-bold text-slate-600 block mb-1">{field.label}</label>
+                  <input value={officeInfo[field.key] || ''}
+                    onChange={(e) => setOfficeInfo({ ...officeInfo, [field.key]: e.target.value })}
+                    placeholder={field.placeholder}
+                    className="w-full p-2 border border-slate-300 rounded outline-none focus:border-blue-500" />
+                </div>
+              ))}
+            </div>
+            <div className="p-4 border-t flex justify-end gap-2 bg-slate-50 shrink-0">
+              <button onClick={() => setShowOfficeModal(false)}
+                className="px-5 py-2 bg-slate-200 font-bold rounded hover:bg-slate-300 text-sm">閉じる</button>
+              <button onClick={() => { setShowOfficeModal(false); notify('保存しました'); }}
+                className="px-5 py-2 bg-amber-500 text-white font-bold rounded hover:bg-amber-600 text-sm flex items-center gap-1">
+                <Save className="w-4 h-4" /> 保存して閉じる
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 保存モーダル */}
+      {showSaveModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4 no-print">
+          <div className="bg-white p-5 rounded-xl shadow-2xl max-w-md w-full">
+            <h3 className="text-lg font-bold text-slate-800 mb-3">見積を保存</h3>
+            <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
+              placeholder="例: A病院様 2026見積"
+              className="w-full border border-slate-300 p-2 rounded mb-3 outline-none focus:border-blue-500 text-sm"
+              autoFocus />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowSaveModal(false)}
+                className="px-4 py-2 font-bold text-slate-600 hover:bg-slate-100 rounded text-sm">キャンセル</button>
+              <button onClick={handleSave} disabled={!saveName.trim()}
+                className={`px-4 py-2 font-bold rounded text-sm text-white ${saveName.trim() ? 'bg-blue-600 hover:bg-blue-700' : 'bg-slate-300 cursor-not-allowed'}`}>
+                <Save className="w-4 h-4 inline mr-1" /> 保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 保存BOXモーダル */}
+      {showLoadModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4 no-print">
+          <div className="bg-white p-5 rounded-xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col">
+            <div className="flex justify-between items-center mb-3 shrink-0">
+              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Archive className="w-5 h-5" /> 保存BOX
+              </h3>
+              <button onClick={() => setShowLoadModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-2">
+              {savedProposals.length === 0 ? (
+                <div className="text-center py-12 text-slate-400">
+                  <Archive className="w-10 h-10 mx-auto mb-2 text-slate-300" />
+                  保存されたデータはありません
+                </div>
+              ) : savedProposals.map((prop) => (
+                <div key={prop.id} className="border border-slate-200 rounded p-3 flex justify-between items-center hover:bg-slate-50">
+                  <div className="min-w-0">
+                    <div className="font-bold text-slate-800 truncate">{prop.name}</div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      {prop.clientName && <span>{prop.clientName}　</span>}
+                      {new Date(prop.updatedAt).toLocaleString('ja-JP')}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0 ml-2">
+                    <button onClick={() => handleLoad(prop)}
+                      className="px-3 py-1.5 bg-blue-100 text-blue-700 font-bold rounded text-xs hover:bg-blue-200">開く</button>
+                    <button onClick={() => handleDeleteProposal(prop.id)}
+                      className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 商品マスタモーダル */}
+      {showFavoritesModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4 no-print">
+          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col">
+            <div className="flex justify-between items-center p-4 border-b bg-amber-50 shrink-0">
+              <h3 className="text-lg font-bold text-amber-800 flex items-center gap-2">
+                <Star className="w-5 h-5 fill-current" /> 商品マスタから追加
+              </h3>
+              <button onClick={() => setShowFavoritesModal(false)}
+                className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-2">
+              {favorites.length === 0 ? (
+                <div className="text-center py-10 text-slate-500">
+                  <Star className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                  登録された商品はありません<br />
+                  <span className="text-xs">商品行右端の★を押すと登録できます</span>
+                </div>
+              ) : favorites.map((fav) => (
+                <div key={fav.id}
+                  onClick={() => handleAddFromFavorite(fav)}
+                  className="border border-slate-200 rounded p-3 flex justify-between items-center hover:bg-amber-50 cursor-pointer transition">
+                  <div className="min-w-0">
+                    <div className="font-bold text-slate-800 truncate">{fav.name}</div>
+                    <div className="text-[11px] text-slate-500 mt-0.5 flex gap-2">
+                      <span>容量: {fav.volume}</span>
+                      <span>価格: ¥{Number(fav.price || 0).toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <button className="px-3 py-1 bg-slate-800 text-white font-bold text-xs rounded shrink-0">追加</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 使い方ガイドモーダル */}
+      {showGuideModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4 no-print">
+          <div className="bg-white rounded-xl shadow-2xl max-w-3xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center p-4 border-b shrink-0">
+              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <BookOpen className="w-5 h-5 text-blue-600" /> 使い方ガイド
+              </h3>
+              <button onClick={() => setShowGuideModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-slate-50">
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="bg-red-500 text-white font-bold w-7 h-7 rounded-full flex items-center justify-center text-sm">
+                    <Printer className="w-4 h-4" />
+                  </span>
+                  <h4 className="font-bold text-base text-slate-800">印刷・PDF出力の手順</h4>
+                </div>
+                <ol className="list-decimal pl-5 space-y-1.5 text-sm text-slate-600">
+                  <li>右上「<strong>印刷/PDF</strong>」ボタンを押します</li>
+                  <li>自動的にプレビューモードになり、ブラウザの印刷ダイアログが開きます</li>
+                  <li>プリンタを選択して「印刷」、またはプリンタ欄で「<strong>PDFに保存</strong>」を選べばPDFとして保存できます</li>
+                  <li>用紙サイズはA4縦に最適化されています</li>
+                </ol>
+                <div className="mt-2 text-xs text-slate-500 bg-slate-50 p-2 rounded">
+                  ヒント: Ctrl+P（Mac は Cmd+P）でも印刷できます。印刷時には原価・操作ボタン・参考資料セクションは自動で非表示になります。
+                </div>
+              </section>
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="bg-amber-500 text-white font-bold w-7 h-7 rounded-full flex items-center justify-center">
+                    <Building2 className="w-4 h-4" />
+                  </span>
+                  <h4 className="font-bold text-base text-slate-800">営業所ごとの設定</h4>
+                </div>
+                <p className="text-sm text-slate-600 mb-2">
+                  「<strong>営業所設定</strong>」ボタンから、会社名・営業所名・住所・電話番号・担当者名などを登録できます。
+                  登録内容は自動で保存され、見積書の右上に印字されます。営業所ごとに違う設定を持たせられます。
+                </p>
+              </section>
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="bg-blue-500 text-white font-bold w-7 h-7 rounded-full flex items-center justify-center text-sm">1</span>
+                  <h4 className="font-bold text-base text-slate-800">商品の入力</h4>
+                </div>
+                <p className="text-sm text-slate-600">
+                  画面下部の「新しい商品カテゴリを追加」から枠を作成し、商品を登録します。
+                  <strong>一番上の行が自動的に「現状品（比較基準）」</strong>となり、2行目以降が提案品として扱われます。
+                </p>
+              </section>
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="bg-blue-500 text-white font-bold w-7 h-7 rounded-full flex items-center justify-center text-sm">2</span>
+                  <h4 className="font-bold text-base text-slate-800">モードの使い分け</h4>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                  <div className="border border-indigo-100 bg-indigo-50/30 p-2 rounded">
+                    <strong className="text-indigo-700">ケース：</strong>「入数」項目が追加され、ケースと単価を自動連動計算
+                  </div>
+                  <div className="border border-orange-100 bg-orange-50/30 p-2 rounded">
+                    <strong className="text-orange-700">原価：</strong>仕入額と目標利益率から販売価格を自動算出（印刷時は非表示）
+                  </div>
+                  <div className="border border-amber-100 bg-amber-50/30 p-2 rounded">
+                    <strong className="text-amber-700">試算：</strong>月使用量から年間コスト比較・削減金額を表示
+                  </div>
+                  <div className="border border-teal-100 bg-teal-50/30 p-2 rounded">
+                    <strong className="text-teal-700">プレビュー：</strong>入力枠を隠し、見積書の最終レイアウトを確認
+                  </div>
+                </div>
+              </section>
+
+            </div>
+            <div className="p-3 border-t bg-white flex justify-end shrink-0">
+              <button onClick={() => setShowGuideModal(false)}
+                className="px-6 py-2 bg-blue-600 text-white font-bold rounded hover:bg-blue-700 text-sm">
+                確認しました
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
