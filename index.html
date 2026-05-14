@@ -1,0 +1,882 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>太陽シルバーサービス株式会社 — 見積書作成システム</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom": "https://esm.sh/react-dom@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.469.0?external=react"
+  }
+}
+</script>
+<style>
+  body { margin:0; font-family: 'Hiragino Kaku Gothic ProN','Hiragino Sans','Yu Gothic',Meiryo,sans-serif; }
+  #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px; background:#f1f5f9; color:#334155; font-weight:bold; z-index:9999; }
+  #loading .sp { width:42px; height:42px; border:4px solid #cbd5e1; border-top-color:#1e40af; border-radius:50%; animation:sp 0.9s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="loading"><div class="sp"></div><div>見積書作成システムを読み込み中…</div><div style="font-size:12px;color:#64748b;">初回読込は10〜20秒かかります</div></div>
+<div id="root"></div>
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  Trash2, TrendingDown, Plus, Calculator, FileText, BarChart3,
+  X as MultiplyIcon, PackagePlus, Percent, LayoutTemplate, ArrowUpDown,
+  X, AlertTriangle, Eye, EyeOff, Coins, Package, Save, Archive,
+  Paperclip, FileSpreadsheet, Loader2, ExternalLink, Info, Sparkles,
+  ShieldCheck, BookOpen, CheckCircle2, Star, Printer, Building2,
+  Download, Upload, Settings, ToggleLeft, ToggleRight,
+  ChevronDown, ChevronUp, Highlighter as HighlighterIcon
+} from 'lucide-react';
+
+const STORAGE_KEYS = {
+  PROPOSALS: 'taiyo_proposals_v1',
+  FAVORITES: 'taiyo_favorites_v1',
+  OFFICE_INFO: 'taiyo_office_info_v1',
+  DRAFT: 'taiyo_draft_v1',
+};
+
+const OFFICE_MASTER = [
+  { name: '小倉営業所',   postal: '802-0011', address: '福岡県北九州市小倉北区重住3丁目11-21',  phone: '093-952-1616', fax: '093-952-1627', manager: '森口 賢一' },
+  { name: '小倉南営業所', postal: '800-0226', address: '福岡県北九州市小倉南区田原新町1-3-34',  phone: '093-474-5670', fax: '093-474-5671', manager: '串山 清彦' },
+  { name: '八幡西営業所', postal: '807-0815', address: '福岡県北九州市八幡西区本城東2-4-8',    phone: '093-603-3512', fax: '093-601-3593', manager: '福本 浩史' },
+  { name: '八幡東営業所', postal: '805-0033', address: '福岡県北九州市八幡東区山路松尾町14-6', phone: '093-654-8515', fax: '093-654-8516', manager: '兼重 陽介' },
+  { name: '行橋営業所',   postal: '824-0043', address: '福岡県行橋市大字流末1327番地',         phone: '0930-26-9640', fax: '0930-26-9641', manager: '久保 匠史' },
+  { name: '田川営業所',   postal: '826-0042', address: '福岡県田川市大字川宮1200番地',         phone: '0947-44-1895', fax: '0947-44-2372', manager: '早崎 勝' },
+  { name: '飯塚営業所',   postal: '820-0081', address: '福岡県飯塚市枝国510番地7',             phone: '0948-52-6360', fax: '0948-52-6362', manager: '佐藤 正仁' },
+  { name: '福岡南営業所', postal: '816-0912', address: '福岡県大野城市御笠川2-10-15',          phone: '092-504-9810', fax: '092-504-9811', manager: '神谷 大輔' },
+  { name: '福岡西営業所', postal: '814-0032', address: '福岡県福岡市早良区小田部4-11-31',      phone: '092-833-0131', fax: '092-833-0132', manager: '佐藤 正利' },
+  { name: '福岡東営業所', postal: '812-0064', address: '福岡県福岡市東区松田3丁目25-2',        phone: '092-627-1150', fax: '092-627-1151', manager: '岡本 将臣' },
+  { name: '久留米営業所', postal: '838-0814', address: '福岡県朝倉郡筑前町高田585-1',          phone: '0946-21-5355', fax: '0946-21-5356', manager: '牟田 知広' },
+  { name: '大牟田営業所', postal: '837-0924', address: '福岡県大牟田市歴木446-1',              phone: '0944-59-1488', fax: '0944-59-1481', manager: '橋本 浩志' },
+  { name: '佐賀営業所',   postal: '849-0937', address: '佐賀県佐賀市鍋島5丁目4-15',            phone: '0952-34-1224', fax: '0952-34-1225', manager: '江原 諒' },
+  { name: '長崎営業所',   postal: '851-0122', address: '長崎県長崎市界2丁目2-4',               phone: '095-834-0535', fax: '095-834-0536', manager: '吉本 幸治' },
+  { name: '大村営業所',   postal: '856-0844', address: '長崎県大村市溝陸町643-1',              phone: '0957-49-6222', fax: '0957-49-6333', manager: '山口 隆史' },
+  { name: '壱岐営業所',   postal: '811-5117', address: '長崎県壱岐市郷ノ浦町中触1078',         phone: '0920-47-9005', fax: '0920-47-9006', manager: '長岡 計治' },
+  { name: '熊本営業所',   postal: '862-0945', address: '熊本県熊本市東区画図町大字下無田1432-22', phone: '096-377-7630', fax: '096-377-7631', manager: '城戸 健' },
+  { name: '熊本北営業所', postal: '861-5517', address: '熊本県熊本市北区鶴羽田1-10-7',         phone: '096-341-5765', fax: '096-341-5766', manager: '高木 伸基' },
+  { name: '大分営業所',   postal: '870-0142', address: '大分県大分市三川下2-7-8',              phone: '097-555-9684', fax: '097-555-9685', manager: '山下 厚' },
+];
+
+const UNIT_OPTIONS = [
+  { label: '容量 (ml)', value: 'ml', defaultBase: 100 },
+  { label: '容量 (L)', value: 'L', defaultBase: 1 },
+  { label: '重量 (g)', value: 'g', defaultBase: 100 },
+  { label: '重量 (kg)', value: 'kg', defaultBase: 1 },
+  { label: '長さ (m)', value: 'm', defaultBase: 1 },
+  { label: '長さ (cm)', value: 'cm', defaultBase: 100 },
+  { label: '枚数 (枚)', value: '枚', defaultBase: 1 },
+  { label: '個数 (個)', value: '個', defaultBase: 1 },
+  { label: 'セット (組)', value: '組', defaultBase: 1 },
+  { label: '本数 (本)', value: '本', defaultBase: 1 },
+  { label: 'ケース (箱)', value: '箱', defaultBase: 1 },
+  { label: '台数 (台)', value: '台', defaultBase: 1 },
+];
+
+const getEmptyItem = () => ({
+  name: '', memo: '', volume: '', packSize: '1',
+  price: '', casePrice: '', cost: '', caseCost: '', targetMargin: '',
+  isHighlighted: false, memoOpen: false
+});
+
+const genId = (prefix = 'id') =>
+  `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+const loadStorage = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+};
+
+const saveStorageCache = {};
+const saveStorage = (key, data) => {
+  try {
+    const s = JSON.stringify(data);
+    if (saveStorageCache[key] === s) return true;
+    saveStorageCache[key] = s;
+    localStorage.setItem(key, s);
+    return true;
+  } catch { return false; }
+};
+
+const inferFromProductName = (name) => {
+  if (!name) return null;
+  const n = name.toLowerCase();
+  let volume = null, unit = null, baseScale = null;
+  const match = n.match(/(\d+\.?\d*)\s*(ml|l|g|kg|枚|個|本|箱|m|cm|組|台)/i);
+  if (match) {
+    volume = match[1];
+    const foundUnit = match[2].toLowerCase();
+    const option = UNIT_OPTIONS.find(o => o.value.toLowerCase() === foundUnit || (foundUnit === 'l' && o.value === 'L'));
+    if (option) { unit = option.value; baseScale = option.defaultBase; }
+  }
+  if (!unit) {
+    if (n.includes('トイレット') || n.includes('ロール')) unit = '個';
+    else if (n.includes('アルコール') || n.includes('石鹸') || n.includes('液') || n.includes('洗剤')) unit = 'ml';
+    else if (n.includes('袋') || n.includes('グローブ') || n.includes('マスク')) unit = '枚';
+    else if (n.includes('ラップ')) unit = 'm';
+    else if (n.includes('車椅子') || n.includes('車いす') || n.includes('ベッド')) unit = '台';
+    if (unit) { const option = UNIT_OPTIONS.find(o => o.value === unit); baseScale = option?.defaultBase || 1; }
+  }
+  return { volume, unit, baseScale };
+};
+
+const getAutoBottomText = (mode) => {
+  switch (mode) {
+    case 'inclusive': return '本見積書の記載金額は、税込金額となっております。';
+    case 'nontax':    return '本見積書の記載商品は、非課税商品となっております。';
+    default:          return '本見積書の記載金額には、消費税は含まれておりません。';
+  }
+};
+const KNOWN_BOTTOM_TEXTS = [
+  '本見積書の記載金額には、消費税は含まれておりません。',
+  '本見積書の記載金額は、税込金額となっております。',
+  '本見積書の記載商品は、非課税商品となっております。',
+];
+const CLEAN_TITLE_REGEX = /\s*[（(].*?[)）]/g;
+const ITEMS_PER_PAGE = 10;
+
+const formatNumber = (v) => {
+  if (v === null || v === undefined || v === '') return '';
+  const n = Number(v); if (!isFinite(n)) return '';
+  return n.toLocaleString('ja-JP');
+};
+const parseNumberInput = (raw) => {
+  if (raw === null || raw === undefined) return '';
+  return String(raw).replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)).replace(/[,，\s]/g, '');
+};
+
+function App() {
+  const [officeInfo, setOfficeInfo] = useState(() => loadStorage(STORAGE_KEYS.OFFICE_INFO, {
+    companyName: '太陽シルバーサービス㈱', officeName: '小倉営業所',
+    postal: '802-0011', address: '福岡県北九州市小倉北区重住3丁目11-21',
+    phone: '093-952-1616', fax: '093-952-1627', manager: '森口 賢一',
+    staffName: '', email: '',
+  }));
+  const [showOfficeModal, setShowOfficeModal] = useState(false);
+
+  const [clientName, setClientName] = useState('');
+  const [clientName2, setClientName2] = useState('');
+  const [clientHonorific, setClientHonorific] = useState('御中');
+  const [proposalTitle, setProposalTitle] = useState('御見積書');
+  const [proposalDate, setProposalDate] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  });
+  const [proposalDateText, setProposalDateText] = useState('');
+  const handleDateChange = (e) => {
+    const v = e.target.value; setProposalDate(v);
+    if (v) { const p = v.split('-'); if (p.length === 3) setProposalDateText(`${p[0]}年${parseInt(p[1],10)}月${parseInt(p[2],10)}日`); }
+    else setProposalDateText('');
+  };
+  const [proposalNumber, setProposalNumber] = useState('');
+  const [validityPeriod, setValidityPeriod] = useState('お見積日より30日間');
+  const [paymentTerms, setPaymentTerms] = useState('月末締め翌月末払い');
+  const [deliveryInfo, setDeliveryInfo] = useState('ご注文後、通常2〜3営業日');
+  const [remarks, setRemarks] = useState('消費税は含まれておりません。');
+  const [bottomRemarks, setBottomRemarks] = useState('本見積書の記載金額には、消費税は含まれておりません。');
+  const [taxMode, setTaxMode] = useState('exclusive');
+  const [showGrandTotal, setShowGrandTotal] = useState(true);
+  const [appMode, setAppMode] = useState('quote');
+
+  const getTotalSuffix = () => taxMode === 'inclusive' ? '（税込）' : taxMode === 'nontax' ? '（非課税）' : '';
+
+  useEffect(() => {
+    setBottomRemarks(prev => (prev && !KNOWN_BOTTOM_TEXTS.includes(prev)) ? prev : getAutoBottomText(taxMode));
+  }, [taxMode]);
+
+  useEffect(() => { setShowCaseMode(appMode === 'proposal'); }, [appMode]);
+
+  const quoteGroupsRef = useRef(null);
+  const proposalGroupsRef = useRef(null);
+  const quoteNewItemsRef = useRef(null);
+  const proposalNewItemsRef = useRef(null);
+  const prevAppModeRef = useRef(appMode);
+
+  const makeEmptyGroups = () => ([{ id: 'g-1', title: '', catalogMemo: '', baseVolume: 100, baseQuantity: 1, unit: 'ml', baseScale: 100, items: [] }]);
+  const makeEmptyNewItems = () => ({ 'g-1': getEmptyItem() });
+
+  const [currentPage, setCurrentPage] = useState(1);
+  const [showSimulation, setShowSimulation] = useState(false);
+  const [showCost, setShowCost] = useState(false);
+  const [showUnit, setShowUnit] = useState(true);
+  const [showCaseMode, setShowCaseMode] = useState(false);
+  const [isPreviewMode, setIsPreviewMode] = useState(false);
+
+  const [groups, setGroups] = useState([{ id: 'g-1', title: '', catalogMemo: '', baseVolume: 100, baseQuantity: 1, unit: 'ml', baseScale: 100, items: [] }]);
+  const [newItems, setNewItems] = useState({ 'g-1': getEmptyItem() });
+
+  useEffect(() => {
+    const prev = prevAppModeRef.current;
+    if (prev === appMode) return;
+    if (prev === 'quote') { quoteGroupsRef.current = groups; quoteNewItemsRef.current = newItems; }
+    else { proposalGroupsRef.current = groups; proposalNewItemsRef.current = newItems; }
+    if (appMode === 'quote') {
+      setGroups(quoteGroupsRef.current || makeEmptyGroups());
+      setNewItems(quoteNewItemsRef.current || makeEmptyNewItems());
+    } else {
+      setGroups(proposalGroupsRef.current || makeEmptyGroups());
+      setNewItems(proposalNewItemsRef.current || makeEmptyNewItems());
+    }
+    prevAppModeRef.current = appMode;
+  }, [appMode]);
+
+  const [attachments, setAttachments] = useState([]);
+  const [savedProposals, setSavedProposals] = useState(() => loadStorage(STORAGE_KEYS.PROPOSALS, []));
+  const [favorites, setFavorites] = useState(() => loadStorage(STORAGE_KEYS.FAVORITES, []));
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [showLoadModal, setShowLoadModal] = useState(false);
+  const [showFavoritesModal, setShowFavoritesModal] = useState(false);
+  const [targetGroupIdForFav, setTargetGroupIdForFav] = useState(null);
+  const [saveName, setSaveName] = useState('');
+  const [notification, setNotification] = useState('');
+  const [showGuideModal, setShowGuideModal] = useState(false);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [deleteConfirmMap, setDeleteConfirmMap] = useState({});
+
+  useEffect(() => { saveStorage(STORAGE_KEYS.OFFICE_INFO, officeInfo); }, [officeInfo]);
+  useEffect(() => { saveStorage(STORAGE_KEYS.FAVORITES, favorites); }, [favorites]);
+  useEffect(() => { saveStorage(STORAGE_KEYS.PROPOSALS, savedProposals); }, [savedProposals]);
+
+  const draftLoadedRef = useRef(false);
+  useEffect(() => {
+    if (draftLoadedRef.current) return;
+    draftLoadedRef.current = true;
+    const draft = loadStorage(STORAGE_KEYS.DRAFT, null);
+    if (draft && typeof draft === 'object') {
+      if (draft.clientName !== undefined) setClientName(draft.clientName);
+      if (draft.clientName2 !== undefined) setClientName2(draft.clientName2);
+      if (draft.clientHonorific !== undefined) setClientHonorific(draft.clientHonorific);
+      if (draft.proposalTitle !== undefined) setProposalTitle(draft.proposalTitle);
+      if (draft.proposalNumber !== undefined) setProposalNumber(draft.proposalNumber);
+      if (draft.validityPeriod !== undefined) setValidityPeriod(draft.validityPeriod);
+      if (draft.paymentTerms !== undefined) setPaymentTerms(draft.paymentTerms);
+      if (draft.deliveryInfo !== undefined) setDeliveryInfo(draft.deliveryInfo);
+      if (draft.remarks !== undefined) setRemarks(draft.remarks);
+      if (draft.bottomRemarks !== undefined) setBottomRemarks(draft.bottomRemarks);
+      if (draft.taxMode !== undefined) setTaxMode(draft.taxMode);
+      if (draft.appMode !== undefined) setAppMode(draft.appMode);
+      if (draft.showGrandTotal !== undefined) setShowGrandTotal(draft.showGrandTotal);
+      if (Array.isArray(draft.groups)) setGroups(draft.groups);
+    }
+  }, []);
+
+  const lastDraftStringRef = useRef('');
+  const draftSaveTimerRef = useRef(null);
+  useEffect(() => {
+    if (!draftLoadedRef.current) return;
+    if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = setTimeout(() => {
+      const d = { clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups };
+      try {
+        const s = JSON.stringify(d);
+        if (s === lastDraftStringRef.current) return;
+        lastDraftStringRef.current = s;
+        localStorage.setItem(STORAGE_KEYS.DRAFT, s);
+      } catch {}
+    }, 500);
+    return () => { if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current); };
+  }, [clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups]);
+
+  const notifyTimerRef = useRef(null);
+  const notify = (msg) => { setNotification(msg); if (notifyTimerRef.current) clearTimeout(notifyTimerRef.current); notifyTimerRef.current = setTimeout(() => setNotification(''), 3500); };
+
+  const calculatePrices = (item, changedField) => {
+    let { packSize, price, casePrice, cost, caseCost, targetMargin } = item;
+    const ps = Math.max(Number(packSize) || 1, 1);
+    const recalcMargin = () => {
+      const p = Number(price) || 0; const c = Number(cost) || 0;
+      if (p > 0 && c > 0 && c < p) targetMargin = Math.round(((p - c) / p) * 1000) / 10;
+      else if (p > 0 && c === 0) targetMargin = '';
+    };
+    if (changedField === 'packSize') { casePrice = (Number(price)||0)*ps; caseCost = (Number(cost)||0)*ps; }
+    else if (changedField === 'casePrice') { price = Math.round((Number(casePrice)||0)/ps); recalcMargin(); }
+    else if (changedField === 'caseCost') {
+      cost = Math.round((Number(caseCost)||0)/ps);
+      if (targetMargin !== '' && Number(targetMargin) < 100 && Number(targetMargin) > 0 && (Number(price)||0) === 0) {
+        price = Math.round(cost/(1 - Number(targetMargin)/100)); casePrice = price*ps;
+      } else recalcMargin();
+    }
+    else if (changedField === 'price') { casePrice = (Number(price)||0)*ps; recalcMargin(); }
+    else if (changedField === 'cost') {
+      caseCost = (Number(cost)||0)*ps;
+      if (targetMargin !== '' && Number(targetMargin) < 100 && Number(targetMargin) > 0 && (Number(price)||0) === 0) {
+        price = Math.round(cost/(1 - Number(targetMargin)/100)); casePrice = price*ps;
+      } else recalcMargin();
+    }
+    else if (changedField === 'targetMargin') {
+      if (targetMargin !== '' && Number(targetMargin) < 100 && Number(targetMargin) > 0) {
+        const c = Number(cost)||0;
+        if (c > 0) { price = Math.round(c/(1 - Number(targetMargin)/100)); casePrice = price*ps; }
+      }
+    }
+    return { ...item, packSize, price, casePrice, cost, caseCost, targetMargin };
+  };
+
+  const computedGroups = useMemo(() => {
+    return groups.map((group) => {
+      const monthlyUsage = (group.baseVolume||0) * (group.baseQuantity||0);
+      const cleanTitle = group.title ? group.title.replace(CLEAN_TITLE_REGEX, '').trim() : '';
+      const calculatedItems = group.items.map((item) => {
+        const vol = Number(item.volume); const pri = Number(item.price); const cost = Number(item.cost)||0;
+        const profit = pri - cost; const margin = pri > 0 ? (profit/pri)*100 : 0;
+        const unitPrice = vol > 0 ? (pri/vol)*group.baseScale : 0;
+        const monthlyCost = vol > 0 ? (monthlyUsage/vol)*pri : 0;
+        return { ...item, profit, margin: Math.round(margin*10)/10, unitPrice: Math.round(unitPrice*10)/10, unitPriceRaw: unitPrice, monthlyCost: Math.round(monthlyCost), yearlyCost: Math.round(monthlyCost*12) };
+      });
+      if (calculatedItems.length === 0) return { ...group, cleanTitle, items: [], stats: null };
+      const sortedForStats = [...calculatedItems].sort((a,b) => b.unitPriceRaw - a.unitPriceRaw);
+      const best = sortedForStats[sortedForStats.length-1]; const worst = sortedForStats[0];
+      const discountRate = worst.unitPriceRaw > 0 ? Math.round(((worst.unitPriceRaw-best.unitPriceRaw)/worst.unitPriceRaw)*100) : 0;
+      const yearlyReduction = worst.yearlyCost - best.yearlyCost;
+      return { ...group, cleanTitle, items: calculatedItems, stats: { minItem: best, maxItem: worst, discountRate, yearlyReduction, monthlyUsage } };
+    });
+  }, [groups]);
+
+  const totalReduction = useMemo(() => computedGroups.reduce((s,g) => s+(g.stats?.yearlyReduction||0), 0), [computedGroups]);
+
+  const grandTotal = useMemo(() => {
+    return computedGroups.reduce((sum,g) => sum + g.items.reduce((s,i) => {
+      const pri = Number(i.price)||0;
+      const factor = appMode === 'proposal' ? (Number(i.packSize)||0) : (Number(i.volume)||0);
+      return s + factor*pri;
+    }, 0), 0);
+  }, [computedGroups, appMode]);
+
+  const addGroup = () => {
+    const newId = genId('g');
+    setGroups(prev => [...prev, { id: newId, title: '', catalogMemo: '', baseVolume: 100, baseQuantity: 1, unit: 'ml', baseScale: 100, items: [] }]);
+    setNewItems(prev => ({ ...prev, [newId]: getEmptyItem() }));
+  };
+  const removeGroup = (gid) => {
+    if (!deleteConfirmMap[gid]) {
+      setDeleteConfirmMap(prev => ({ ...prev, [gid]: true }));
+      setTimeout(() => setDeleteConfirmMap(prev => ({ ...prev, [gid]: false })), 3000);
+      return;
+    }
+    setGroups(prev => prev.filter(g => g.id !== gid));
+  };
+  const updateGroupField = (id, field, value) => {
+    setGroups(prev => prev.map(g => {
+      if (g.id !== id) return g;
+      const u = { ...g, [field]: value };
+      if (field === 'title') { const inf = inferFromProductName(value); if (inf?.unit) { u.unit = inf.unit; u.baseScale = inf.baseScale; } }
+      return u;
+    }));
+  };
+  const changeGroupUnit = (gid, newUnit) => {
+    const def = UNIT_OPTIONS.find(u => u.value === newUnit);
+    setGroups(prev => prev.map(g => g.id === gid ? { ...g, unit: newUnit, baseScale: def ? def.defaultBase : 1 } : g));
+  };
+  const sortGroupItems = (gid) => {
+    setGroups(prev => prev.map(g => {
+      if (g.id !== gid || g.items.length <= 1) return g;
+      const baseline = g.items[0];
+      const proposals = g.items.slice(1).sort((a,b) => {
+        const ua = Number(a.volume)>0 ? Number(a.price)/Number(a.volume) : 0;
+        const ub = Number(b.volume)>0 ? Number(b.price)/Number(b.volume) : 0;
+        return ua - ub;
+      });
+      return { ...g, items: [baseline, ...proposals] };
+    }));
+  };
+
+  const handleInputChange = (gid, field, value) => {
+    setNewItems(prev => {
+      const cur = prev[gid] || getEmptyItem();
+      let u = { ...cur, [field]: value };
+      if (field === 'name') {
+        const inf = inferFromProductName(value);
+        if (inf) {
+          if (inf.volume) u.volume = inf.volume;
+          if (inf.unit) { updateGroupField(gid, 'unit', inf.unit); updateGroupField(gid, 'baseScale', inf.baseScale); }
+        }
+      }
+      return { ...prev, [gid]: calculatePrices(u, field) };
+    });
+  };
+  const handleAddItem = (gid) => {
+    const inp = newItems[gid]; if (!inp) return;
+    setGroups(prev => prev.map(g => {
+      if (g.id !== gid) return g;
+      return { ...g, items: [...g.items, {
+        id: genId('i'), ...inp,
+        volume: inp.volume === '' ? '' : Number(inp.volume),
+        packSize: inp.packSize === '' ? '' : (Number(inp.packSize)||1),
+        price: inp.price === '' ? '' : Number(inp.price),
+        casePrice: inp.casePrice === '' ? '' : Number(inp.casePrice),
+        cost: inp.cost === '' ? '' : (Number(inp.cost)||0),
+        caseCost: inp.caseCost === '' ? '' : (Number(inp.caseCost)||0),
+      }]};
+    }));
+    setNewItems(prev => ({ ...prev, [gid]: getEmptyItem() }));
+  };
+  const updateItem = (gid, iid, field, value) => {
+    setGroups(prev => prev.map(g => {
+      if (g.id !== gid) return g;
+      return { ...g, items: g.items.map(i => {
+        if (i.id !== iid) return i;
+        let u = { ...i, [field]: value };
+        if (field === 'name') { const inf = inferFromProductName(value); if (inf?.volume) u.volume = inf.volume; }
+        return calculatePrices(u, field);
+      }) };
+    }));
+  };
+  const deleteItem = (gid, iid) => setGroups(prev => prev.map(g => g.id === gid ? { ...g, items: g.items.filter(i => i.id !== iid) } : g));
+  const moveItem = (gid, idx, dir) => {
+    setGroups(prev => prev.map(g => {
+      if (g.id !== gid) return g;
+      const ni = idx + dir; if (ni < 0 || ni >= g.items.length) return g;
+      const items = [...g.items]; const t = items[idx]; items[idx] = items[ni]; items[ni] = t;
+      return { ...g, items };
+    }));
+  };
+  const handleClearAll = () => {
+    if (confirmClearAll) { setGroups([]); setNewItems({}); setAttachments([]); setConfirmClearAll(false); notify('全データをリセットしました'); }
+    else { setConfirmClearAll(true); setTimeout(() => setConfirmClearAll(false), 3000); }
+  };
+
+  const handleSave = () => {
+    if (!saveName.trim()) return;
+    const np = { id: genId('prop'), name: saveName, clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal, groups, attachments, updatedAt: Date.now() };
+    setSavedProposals(prev => [np, ...prev]);
+    setShowSaveModal(false); setSaveName(''); notify('保存しました');
+  };
+  const handleLoad = (p) => {
+    setClientName(p.clientName||''); setClientName2(p.clientName2||''); setClientHonorific(p.clientHonorific||'御中');
+    setProposalTitle(p.proposalTitle||'御見積書'); setProposalDate(p.proposalDate||proposalDate);
+    setProposalDateText(p.proposalDateText||''); setProposalNumber(p.proposalNumber||'');
+    setValidityPeriod(p.validityPeriod||'お見積日より30日間'); setPaymentTerms(p.paymentTerms||'月末締め翌月末払い');
+    setDeliveryInfo(p.deliveryInfo||'ご注文後、通常2〜3営業日'); setRemarks(p.remarks||'');
+    setBottomRemarks(p.bottomRemarks||''); setTaxMode(p.taxMode||'exclusive');
+    setAppMode(p.appMode||'quote'); setShowGrandTotal(p.showGrandTotal !== undefined ? p.showGrandTotal : true);
+    setGroups(p.groups||[]); setAttachments(p.attachments||[]);
+    const ni = {}; (p.groups||[]).forEach(g => { ni[g.id] = getEmptyItem(); }); setNewItems(ni);
+    setShowLoadModal(false); notify('読み込みました');
+  };
+  const handleDeleteProposal = (id) => setSavedProposals(prev => prev.filter(p => p.id !== id));
+
+  const escapeHTML = (str) => str === null || str === undefined ? '' : String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+  const handlePrint = (mode = 'print') => {
+    const formatDate = (d) => {
+      if (!d) return ''; const p = d.split('-');
+      return p.length === 3 ? `${p[0]}年${parseInt(p[1],10)}月${parseInt(p[2],10)}日` : d;
+    };
+    const displayDate = (proposalDateText && proposalDateText.trim()) ? proposalDateText.trim() : formatDate(proposalDate);
+
+    const groupsHTML = computedGroups.map((group) => {
+      const baseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
+      const rows = group.items.map((item) => {
+        const trClass = item.isHighlighted ? ' class="highlighted"' : '';
+        let cols = `<td class="pname"><div class="name">${escapeHTML(item.name)}</div></td>`;
+        if (appMode === 'proposal') {
+          cols += `<td class="num">${escapeHTML(String(item.volume||''))}${showUnit ? `<span class="unit">${escapeHTML(item.unitOverride ?? group.unit)}</span>` : ''}</td>`;
+          if (showCaseMode) cols += `<td class="num">${item.packSize}</td>`;
+        } else {
+          cols += `<td class="num">${escapeHTML(String(item.volume||''))}</td>`;
+        }
+        cols += `<td class="price strong">¥${(item.price||0).toLocaleString()}</td>`;
+        const factor = appMode === 'proposal' ? (Number(item.packSize)||0) : (Number(item.volume)||0);
+        cols += `<td class="price">¥${(factor*(Number(item.price)||0)).toLocaleString()}</td>`;
+        if (appMode === 'proposal') cols += `<td class="unit-price">¥${item.unitPrice.toLocaleString('ja-JP',{minimumFractionDigits:1, maximumFractionDigits:1})}</td>`;
+        return `<tr${trClass}>${cols}</tr>`;
+      }).join('');
+      let headers = `<th class="pname">品目</th>`;
+      if (appMode === 'proposal') { headers += `<th class="num">容量・枚数・長さなど</th>`; if (showCaseMode) headers += `<th class="num">ケース入数</th>`; }
+      else headers += `<th class="num">数量</th>`;
+      headers += `<th class="price">単価</th><th class="price">金額</th>`;
+      if (appMode === 'proposal') headers += `<th class="unit-price">${baseLabel}単価</th>`;
+      return `<div class="group">${(group.title && group.title.trim()) ? `<div class="group-title">${escapeHTML(group.title)}</div>` : ''}<table class="items-table"><thead><tr>${headers}</tr></thead><tbody>${rows || '<tr><td colspan="10" class="empty">商品データがありません</td></tr>'}</tbody></table></div>`;
+    }).join('');
+
+    const html = `
+<style>
+  @page { size: A4 portrait; margin: 12mm 10mm; }
+  #print-content-holder, #print-content-holder * { box-sizing: border-box; }
+  #print-content-holder { font-family: 'Yu Gothic','YuGothic','Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif; color: #1f2937; background: #fff; font-size: 9.5pt; line-height: 1.55; -webkit-font-smoothing: antialiased; letter-spacing: 0.02em; }
+  #print-content-holder .page { max-width: 180mm; margin: 0 auto; padding: 5mm 7mm; }
+  #print-content-holder .doc-header { display: flex; justify-content: space-between; gap: 10mm; margin-bottom: 5mm; align-items: flex-start; page-break-inside: avoid; }
+  #print-content-holder .doc-header .left { flex: 1; min-width: 0; }
+  #print-content-holder .doc-header .right { width: 70mm; flex-shrink: 0; }
+  #print-content-holder .grand-total { page-break-inside: avoid; }
+  #print-content-holder .title { font-family: 'Yu Mincho','YuMincho','Hiragino Mincho ProN',serif; font-size: 22pt; font-weight: 600; letter-spacing: 0.5em; color: #1e3a8a; padding: 0 0 6px 0; margin: 0 0 10px 0; text-indent: 0.5em; border-bottom: 1.5px solid #3b82f6; }
+  #print-content-holder .client { font-size: 15pt; font-weight: 600; padding: 4px 4px 6px; color: #111827; border-bottom: 1px solid #93c5fd; letter-spacing: 0.05em; }
+  #print-content-holder .client .suffix { font-size: 10.5pt; font-weight: 400; margin-left: 8px; color: #3b82f6; }
+  #print-content-holder .greeting { font-size: 8.5pt; margin-top: 8px; padding-left: 2px; line-height: 1.7; color: #4b5563; }
+  #print-content-holder .issuer { font-size: 8.5pt; line-height: 1.4; border: 1px solid #bfdbfe; background: #f0f7ff; padding: 5px 8px; }
+  #print-content-holder .issuer .meta-table { width: 100%; border-collapse: collapse; margin-bottom: 4px; font-size: 8.5pt; }
+  #print-content-holder .issuer .meta-table td { padding: 2px 5px; border-bottom: 0.5px solid #dbeafe; }
+  #print-content-holder .issuer .meta-table td.label { color: #2563eb; width: 22mm; font-size: 8pt; font-weight: 600; }
+  #print-content-holder .issuer .meta-table td.value { text-align: right; font-weight: 600; color: #111827; }
+  #print-content-holder .issuer-info { padding: 4px 0 0; border-top: 1px solid #93c5fd; }
+  #print-content-holder .issuer-info .company { font-weight: 700; font-size: 10pt; color: #1e3a8a; margin-bottom: 1px; }
+  #print-content-holder .issuer-info .office { font-weight: 600; font-size: 9pt; color: #1e40af; margin-bottom: 2px; }
+  #print-content-holder .issuer-info .addr { font-size: 8pt; color: #4b5563; line-height: 1.4; margin: 0; }
+  #print-content-holder .issuer-info .addr.invoice-no { font-size: 7.5pt; color: #2563eb; font-weight: 600; margin-top: 1px; }
+  #print-content-holder .issuer-info .staff { font-size: 8.5pt; margin-top: 3px; padding-top: 3px; border-top: 0.5px dashed #bfdbfe; color: #1f2937; }
+  #print-content-holder .stamps { display: flex; justify-content: flex-end; gap: 4mm; margin-top: 4px; padding-top: 4px; border-top: 1px solid #dbeafe; }
+  #print-content-holder .stamp-box { text-align: center; }
+  #print-content-holder .stamp-label { font-size: 7pt; color: #3b82f6; font-weight: 600; margin-bottom: 2px; }
+  #print-content-holder .stamp-square { width: 19mm; height: 19mm; border: 1px solid #93c5fd; background: #fff; }
+  #print-content-holder .terms-small { margin: 6mm 0 0 0; max-width: 100mm; page-break-inside: avoid; }
+  #print-content-holder .terms-table-sm { width: 100%; border-collapse: collapse; font-size: 7.5pt; border: 0.5px solid #bfdbfe; }
+  #print-content-holder .terms-table-sm td { padding: 3px 6px; border-bottom: 0.5px solid #dbeafe; vertical-align: top; }
+  #print-content-holder .terms-table-sm td.label { color: #2563eb; font-size: 7pt; font-weight: 600; background: #f0f7ff; white-space: nowrap; width: 22mm; }
+  #print-content-holder .terms-table-sm td.value { color: #374151; white-space: pre-wrap; font-size: 7.5pt; }
+  #print-content-holder .group { margin-bottom: 7mm; }
+  #print-content-holder .group-title { font-size: 10.5pt; font-weight: 700; color: #1e3a8a; padding: 5px 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-bottom: none; letter-spacing: 0.1em; page-break-after: avoid; }
+  #print-content-holder .items-table { width: 100%; border-collapse: collapse; font-size: 10pt; border: 1px solid #bfdbfe; page-break-inside: auto; }
+  #print-content-holder .items-table thead { display: table-header-group; }
+  #print-content-holder .items-table tbody tr { page-break-inside: avoid; }
+  #print-content-holder .items-table th { background: #dbeafe; padding: 6px 8px; text-align: left; border-bottom: 1px solid #93c5fd; font-size: 8.5pt; font-weight: 600; color: #1e40af; }
+  #print-content-holder .items-table td { padding: 7px 8px; border-bottom: 0.5px solid #dbeafe; vertical-align: middle; font-size: 10pt; }
+  #print-content-holder .items-table tbody tr:nth-child(even) { background: #f8fbff; }
+  #print-content-holder .items-table tbody tr.highlighted, #print-content-holder .items-table tbody tr.highlighted:nth-child(even) { background: #fef08a; }
+  #print-content-holder .items-table tbody tr.highlighted td { background: #fef08a; color: #713f12; font-weight: 700; }
+  #print-content-holder .items-table th.num, #print-content-holder .items-table td.num, #print-content-holder .items-table th.price, #print-content-holder .items-table td.price, #print-content-holder .items-table th.unit-price, #print-content-holder .items-table td.unit-price { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #print-content-holder .items-table td.unit-price { color: #6b7280; font-size: 9pt; }
+  #print-content-holder .items-table td.pname { min-width: 50mm; }
+  #print-content-holder .items-table td.pname .name { font-weight: 600; color: #111827; }
+  #print-content-holder .items-table td.price.strong { font-weight: 700; font-size: 10.5pt; color: #1e3a8a; }
+  #print-content-holder .items-table td .unit { font-size: 8pt; color: #93c5fd; margin-left: 3px; }
+  #print-content-holder .grand-total { margin: 0 0 4mm 0; padding: 10px 16px; border: 1.5px solid #3b82f6; display: flex; justify-content: space-between; align-items: baseline; background: #eff6ff; }
+  #print-content-holder .grand-total .label { font-size: 9.5pt; font-weight: 600; letter-spacing: 0.3em; color: #1e3a8a; }
+  #print-content-holder .grand-total .amount { font-family: 'Yu Mincho',serif; font-size: 19pt; font-weight: 700; color: #1e3a8a; font-variant-numeric: tabular-nums; }
+  #print-content-holder .grand-total .amount .currency { font-size: 12pt; margin-right: 3px; }
+  #print-content-holder .grand-total .amount .suffix { font-size: 10pt; margin-left: 6px; color: #93c5fd; }
+  #print-content-holder .bottom-remarks { margin-top: 4mm; padding: 8px 12px; border: 1px solid #bfdbfe; background: #f8fbff; page-break-inside: avoid; }
+  #print-content-holder .bottom-remarks-label { font-size: 8pt; font-weight: 600; color: #2563eb; margin-bottom: 3px; }
+  #print-content-holder .bottom-remarks-text { font-size: 9pt; color: #1f2937; white-space: pre-wrap; line-height: 1.6; }
+</style>
+<div class="page">
+  <div class="doc-header">
+    <div class="left">
+      <div class="title">${escapeHTML(proposalTitle||'御見積書')}</div>
+      <div class="client">${escapeHTML(clientName||'　')}${clientName2 ? `<br/>${escapeHTML(clientName2)}` : ''}<span class="suffix">${escapeHTML(clientHonorific||'御中')}</span></div>
+      <div class="greeting">下記の通り、お見積り申し上げます。<br>ご検討のほど、よろしくお願い申し上げます。</div>
+      <div class="terms-small"><table class="terms-table-sm">
+        <tr><td class="label">見積有効期限</td><td class="value">${escapeHTML(validityPeriod||'—')}</td></tr>
+        <tr><td class="label">お支払条件</td><td class="value">${escapeHTML(paymentTerms||'—')}</td></tr>
+        <tr><td class="label">納期</td><td class="value">${escapeHTML(deliveryInfo||'—')}</td></tr>
+        ${remarks ? `<tr><td class="label">備考</td><td class="value">${escapeHTML(remarks)}</td></tr>` : ''}
+      </table></div>
+    </div>
+    <div class="right"><div class="issuer">
+      <table class="meta-table">
+        <tr><td class="label">見積番号</td><td class="value">${escapeHTML(proposalNumber||'—')}</td></tr>
+        <tr><td class="label">発行日</td><td class="value">${escapeHTML(displayDate||'—')}</td></tr>
+      </table>
+      <div class="issuer-info">
+        <div class="company">${escapeHTML(officeInfo.companyName||'')}</div>
+        ${officeInfo.officeName ? `<div class="office">${escapeHTML(officeInfo.officeName)}</div>` : ''}
+        ${officeInfo.postal ? `<div class="addr">〒${escapeHTML(officeInfo.postal)}</div>` : ''}
+        ${officeInfo.address ? `<div class="addr">${escapeHTML(officeInfo.address)}</div>` : ''}
+        ${officeInfo.phone ? `<div class="addr">TEL ${escapeHTML(officeInfo.phone)}</div>` : ''}
+        ${officeInfo.fax ? `<div class="addr">FAX ${escapeHTML(officeInfo.fax)}</div>` : ''}
+        <div class="addr invoice-no">登録番号　T1290001044462</div>
+        ${officeInfo.manager ? `<div class="staff">所長　<strong>${escapeHTML(officeInfo.manager)}</strong></div>` : ''}
+        ${officeInfo.staffName ? `<div class="staff">担当　<strong>${escapeHTML(officeInfo.staffName)}</strong></div>` : ''}
+      </div>
+      <div class="stamps">
+        <div class="stamp-box"><div class="stamp-label">所長印</div><div class="stamp-square"></div></div>
+        <div class="stamp-box"><div class="stamp-label">担当印</div><div class="stamp-square"></div></div>
+      </div>
+    </div></div>
+  </div>
+  ${(showGrandTotal && grandTotal > 0) ? `<div class="grand-total"><span class="label">御見積金額　合計${getTotalSuffix()}</span><span class="amount"><span class="currency">¥</span>${grandTotal.toLocaleString()}<span class="suffix">―</span></span></div>` : ''}
+  ${groupsHTML || '<div style="text-align:center;padding:40px;color:#b0b0b0;">商品データがありません</div>'}
+  ${bottomRemarks ? `<div class="bottom-remarks"><div class="bottom-remarks-label">備考</div><div class="bottom-remarks-text">${escapeHTML(bottomRemarks)}</div></div>` : ''}
+</div>`;
+
+    try {
+      const existing = document.getElementById('print-content-holder'); if (existing) existing.remove();
+      const existingStyle = document.getElementById('print-injected-style'); if (existingStyle) existingStyle.remove();
+      const holder = document.createElement('div'); holder.id = 'print-content-holder'; holder.innerHTML = html;
+      const styleEl = document.createElement('style'); styleEl.id = 'print-injected-style';
+      styleEl.textContent = `
+        #print-content-holder { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #f1f5f9; z-index: 99999; overflow: auto; padding: 0; }
+        #print-content-holder::before { content: ''; display: block; height: 60px; }
+        #print-content-holder .page { background: #fff; box-shadow: 0 0 20px rgba(0,0,0,0.15); margin: 0 auto 40px !important; max-width: 210mm !important; }
+        #print-toolbar { position: fixed; top: 0; left: 0; right: 0; background: #1e293b; color: #fff; padding: 10px 20px; z-index: 100000; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+        #print-toolbar .info { font-size: 13px; } #print-toolbar .info strong { color: #fbbf24; }
+        #print-toolbar .actions { display: flex; gap: 8px; }
+        #print-toolbar button { padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; }
+        #print-toolbar button.primary { background: #ef4444; color: #fff; } #print-toolbar button.primary:hover { background: #dc2626; }
+        #print-toolbar button.secondary { background: #475569; color: #fff; } #print-toolbar button.secondary:hover { background: #334155; }
+        @media print {
+          #print-toolbar { display: none !important; }
+          #print-content-holder { position: static !important; background: #fff !important; overflow: visible !important; padding: 0 !important; }
+          #print-content-holder::before { display: none !important; }
+          #print-content-holder .page { box-shadow: none !important; margin: 0 !important; max-width: 100% !important; }
+          body > *:not(#print-content-holder) { display: none !important; }
+          @page { size: A4; margin: 12mm 10mm; }
+          html, body { background: #fff !important; margin: 0 !important; padding: 0 !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        }
+      `;
+      const toolbar = document.createElement('div'); toolbar.id = 'print-toolbar';
+      toolbar.innerHTML = `<div class="info">📄 印刷プレビュー　<strong>「印刷する」</strong>を押すか、<strong>Ctrl+P</strong>で印刷できます</div><div class="actions"><button class="primary" id="print-toolbar-print">🖨 印刷する</button><button class="secondary" id="print-toolbar-close">✕ 閉じる</button></div>`;
+      document.head.appendChild(styleEl); document.body.appendChild(holder); document.body.appendChild(toolbar);
+      const cleanup = () => { holder.remove(); styleEl.remove(); toolbar.remove(); document.removeEventListener('keydown', escH); };
+      const escH = (e) => { if (e.key === 'Escape') cleanup(); };
+      document.addEventListener('keydown', escH);
+      document.getElementById('print-toolbar-print').onclick = () => { try { window.print(); } catch { alert('Ctrl+Pで印刷してください'); } };
+      document.getElementById('print-toolbar-close').onclick = cleanup;
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => { try { window.print(); } catch {} }, 500)));
+    } catch (err) { notify('印刷エラー: ' + err.message); }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-800 text-sm">
+      <style>{`@page { size: A4; margin: 12mm 10mm; } .item-table-input { height: 40px !important; box-sizing: border-box !important; line-height: 1.2 !important; } @media print { .no-print { display: none !important; } }`}</style>
+      <header className="no-print bg-gradient-to-r from-slate-800 to-slate-900 text-white shadow-lg sticky top-0 z-50">
+        <div className="max-w-[1400px] mx-auto px-4 py-3">
+          <div className="flex flex-col lg:flex-row justify-between items-center gap-3">
+            <div className="flex items-center gap-3 shrink-0">
+              <FileText className="w-7 h-7 text-amber-400" />
+              <div>
+                <h1 className="font-bold text-lg leading-tight">見積書・提案書作成システム</h1>
+                <span className="text-xs text-slate-300">{officeInfo.officeName || officeInfo.companyName}</span>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2 justify-center lg:justify-end items-center">
+              <button onClick={() => setIsPreviewMode(!isPreviewMode)} className={`flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-bold transition ${isPreviewMode ? 'bg-teal-500 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}>
+                {isPreviewMode ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />} プレビュー
+              </button>
+              <button onClick={() => handlePrint('print')} className="flex items-center gap-1 bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Printer className="w-4 h-4" /> 印刷/PDF</button>
+              <button onClick={() => setShowSaveModal(true)} className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Save className="w-4 h-4" /> 保存</button>
+              <button onClick={() => setShowLoadModal(true)} className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Archive className="w-4 h-4" /> 保存BOX{savedProposals.length > 0 && <span className="bg-white text-indigo-700 rounded-full px-1.5 text-[10px] ml-1">{savedProposals.length}</span>}</button>
+              <button onClick={() => setShowOfficeModal(true)} className="flex items-center gap-1 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><Building2 className="w-3.5 h-3.5" /> 営業所設定</button>
+              <button onClick={() => setShowGuideModal(true)} className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded text-xs font-bold transition border border-slate-600"><BookOpen className="w-3.5 h-3.5" /> 使い方</button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-[1100px] mx-auto w-full p-4">
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 mb-2 p-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <input value={proposalTitle} onChange={e => setProposalTitle(e.target.value)} className="text-base font-bold text-slate-900 outline-none bg-transparent border-b border-dashed border-slate-300 focus:border-blue-500 w-32" placeholder="御見積書" />
+            <div className="flex items-start gap-1.5">
+              <div className="flex flex-col gap-1">
+                <input value={clientName} onChange={e => setClientName(e.target.value)} placeholder="施設名（1段目）" className="text-base font-bold text-slate-800 border-b-2 border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] md:w-[340px] bg-transparent" />
+                <input value={clientName2} onChange={e => setClientName2(e.target.value)} placeholder="施設名（2段目・任意）" className="text-base font-bold text-slate-800 border-b border-dashed border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] md:w-[340px] bg-transparent" />
+              </div>
+              <select value={clientHonorific} onChange={e => setClientHonorific(e.target.value)} className="text-sm text-slate-600 font-bold border border-slate-300 rounded px-1.5 py-1 outline-none bg-white mt-1">
+                <option value="御中">御中</option><option value="様">様</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2 ml-auto text-slate-600">
+              <span className="text-sm font-bold">No.</span>
+              <input value={proposalNumber} onChange={e => setProposalNumber(e.target.value)} placeholder="見積番号" className="font-mono outline-none w-24 border-b border-dotted border-slate-300 text-sm px-1.5 py-1" />
+              <input type="date" value={proposalDate} onChange={handleDateChange} className="outline-none text-sm font-bold border-b border-dotted border-slate-300 px-2 py-1 cursor-pointer" />
+              <span className="text-sm font-bold text-slate-700">{proposalDateText || (() => { const p = (proposalDate||'').split('-'); return p.length===3 ? `${p[0]}年${parseInt(p[1],10)}月${parseInt(p[2],10)}日` : ''; })()}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-slate-50 rounded border border-slate-200 px-3 py-1.5 mb-3 no-print">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+            <span className="text-slate-400 font-bold">条件:</span>
+            <div className="flex items-center gap-1"><span className="text-slate-400">有効期限</span><input value={validityPeriod} onChange={e => setValidityPeriod(e.target.value)} className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-32 text-[11px]" /></div>
+            <div className="flex items-center gap-1"><span className="text-slate-400">支払</span><input value={paymentTerms} onChange={e => setPaymentTerms(e.target.value)} className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-32 text-[11px]" /></div>
+            <div className="flex items-center gap-1"><span className="text-slate-400">納期</span><input value={deliveryInfo} onChange={e => setDeliveryInfo(e.target.value)} className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-36 text-[11px]" /></div>
+            <div className="flex items-center gap-1"><span className="text-slate-400">備考</span><input value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="特記事項" className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-36 text-[11px]" /></div>
+          </div>
+        </div>
+
+        {computedGroups.map((group, gIdx) => {
+          const inp = newItems[group.id] || getEmptyItem();
+          return (
+            <div key={group.id} className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden mb-4">
+              {gIdx === 0 && (
+                <div className="bg-slate-100 border-b border-slate-200 no-print">
+                  <div className="px-4 py-2 flex flex-wrap items-center gap-2.5 border-b border-slate-200">
+                    <span className="text-xs font-bold text-slate-500 mr-1">【モード切替】</span>
+                    <div className="flex bg-white border border-slate-300 rounded overflow-hidden">
+                      <button onClick={() => setAppMode('quote')} className={`px-4 py-2 text-sm font-bold transition ${appMode === 'quote' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>見積作成モード</button>
+                      <button onClick={() => setAppMode('proposal')} className={`px-4 py-2 text-sm font-bold transition ${appMode === 'proposal' ? 'bg-purple-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>提案書作成モード</button>
+                    </div>
+                  </div>
+                  <div className="px-4 py-2 flex flex-wrap items-center gap-2.5">
+                    <span className="text-xs font-bold text-slate-500 mr-1">【設定】</span>
+                    <button onClick={() => setShowCost(!showCost)} className={`flex items-center gap-1.5 px-4 py-2 rounded text-sm font-bold transition ${showCost ? 'bg-orange-500 text-white' : 'bg-white text-slate-600 border border-slate-300'}`}><Coins className="w-4 h-4" /> 原価{showCost ? 'ON' : 'OFF'}</button>
+                    <div className="flex items-center gap-2 bg-white border border-slate-300 rounded px-3 py-2">
+                      <span className="text-sm font-bold text-slate-600">合計表示:</span>
+                      <label className="flex items-center cursor-pointer"><input type="checkbox" checked={showGrandTotal} onChange={e => setShowGrandTotal(e.target.checked)} className="sr-only peer" /><div className="w-9 h-5 bg-slate-300 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600 relative"></div></label>
+                    </div>
+                    <div className="flex items-center gap-2 bg-white border border-slate-300 rounded px-3 py-2">
+                      <span className="text-sm font-bold text-slate-600">税区分:</span>
+                      <select value={taxMode} onChange={e => setTaxMode(e.target.value)} className="bg-transparent outline-none text-sm font-bold text-slate-700"><option value="exclusive">税抜</option><option value="inclusive">税込</option><option value="nontax">非課税</option></select>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div className="px-4 py-3 border-b flex items-center justify-between gap-3 bg-slate-50">
+                <div className="flex items-center gap-3 flex-1">
+                  <PackagePlus className="w-6 h-6 text-slate-700" />
+                  <input value={group.title} onChange={e => updateGroupField(group.id, 'title', e.target.value)} placeholder="商品カテゴリ名 (例: ビニール手袋)" className="bg-white border border-slate-300 rounded px-2.5 py-1.5 font-bold text-slate-800 text-sm outline-none flex-1 max-w-[320px] focus:border-blue-500" />
+                </div>
+                <button onClick={() => removeGroup(group.id)} className={`p-1.5 rounded transition ${deleteConfirmMap[group.id] ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-red-500 hover:bg-red-50'}`}>{deleteConfirmMap[group.id] ? <AlertTriangle className="w-4 h-4" /> : <X className="w-4 h-4" />}</button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left">
+                  <thead className="text-xs text-slate-800 bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-bold min-w-[280px]">品目</th>
+                      {showCaseMode && <th className="px-2 py-2 text-right font-bold w-[90px]">ケース入数</th>}
+                      <th className="px-2 py-2 text-right font-bold w-[110px]">{appMode === 'proposal' ? '容量・枚数等' : '数量'}</th>
+                      {showCost && <th className="px-2 py-2 text-right font-semibold text-orange-600 bg-orange-50 w-[95px]">単価仕入</th>}
+                      <th className="px-2 py-2 text-right font-bold w-[100px]">単価</th>
+                      <th className="px-2 py-2 text-right font-bold w-[100px]">金額</th>
+                      {showCost && <th className="px-2 py-2 text-right font-semibold text-orange-600 bg-orange-50 w-[95px]">利益率</th>}
+                      <th className="px-2 py-2 text-center w-[80px]"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {group.items.map((item, idx) => {
+                      const factor = appMode === 'proposal' ? (Number(item.packSize)||0) : (Number(item.volume)||0);
+                      return (
+                        <tr key={item.id} className={item.isHighlighted ? 'bg-yellow-200' : 'hover:bg-slate-50'}>
+                          <td className="px-3 py-2">
+                            <div className="flex items-center gap-2">
+                              <input value={item.name} onChange={e => updateItem(group.id, item.id, 'name', e.target.value)} className="item-table-input flex-1 border rounded px-2.5 py-1.5 outline-none font-bold text-sm bg-white border-slate-300 focus:border-blue-500" />
+                              <button onClick={() => updateItem(group.id, item.id, 'isHighlighted', !item.isHighlighted)} className={`p-1.5 rounded ${item.isHighlighted ? 'bg-yellow-400 text-white' : 'bg-slate-100 text-slate-400'}`}><HighlighterIcon className="w-4 h-4" /></button>
+                            </div>
+                          </td>
+                          {showCaseMode && <td className="px-2 py-2 text-right"><input type="text" value={formatNumber(item.packSize)} onChange={e => updateItem(group.id, item.id, 'packSize', parseNumberInput(e.target.value))} className="item-table-input w-[80px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
+                          <td className="px-2 py-2 text-right"><input type="text" value={item.volume} onChange={e => updateItem(group.id, item.id, 'volume', e.target.value)} className="item-table-input w-[90px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none font-bold" /></td>
+                          {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" value={item.cost === 0 || item.cost === '' ? '' : formatNumber(item.cost)} onChange={e => updateItem(group.id, item.id, 'cost', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
+                          <td className="px-2 py-2 text-right"><input type="text" value={item.price === 0 || item.price === '' ? '' : formatNumber(item.price)} onChange={e => updateItem(group.id, item.id, 'price', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-slate-300 rounded px-2 py-1 text-right outline-none font-bold" /></td>
+                          <td className="px-2 py-2 text-right font-bold text-slate-800">¥{(factor*(Number(item.price)||0)).toLocaleString()}</td>
+                          {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" value={item.targetMargin} onChange={e => updateItem(group.id, item.id, 'targetMargin', e.target.value)} className="item-table-input w-[80px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none" placeholder={String(item.margin||0)} /></td>}
+                          <td className="px-2 py-2 text-center">
+                            <div className="flex items-center justify-center gap-0.5">
+                              <button onClick={() => moveItem(group.id, idx, -1)} disabled={idx === 0} className={idx > 0 ? 'text-slate-400 hover:text-blue-600' : 'text-slate-200'}><ChevronUp className="w-4 h-4" /></button>
+                              <button onClick={() => moveItem(group.id, idx, 1)} disabled={idx >= group.items.length - 1} className={idx < group.items.length - 1 ? 'text-slate-400 hover:text-blue-600' : 'text-slate-200'}><ChevronDown className="w-4 h-4" /></button>
+                              <button onClick={() => group.items.length > 1 && deleteItem(group.id, item.id)} disabled={group.items.length <= 1} className={group.items.length > 1 ? 'text-slate-300 hover:text-red-600' : 'text-slate-200'}><Trash2 className="w-4 h-4" /></button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    <tr className="bg-slate-50/50">
+                      <td className="px-3 py-2"><input placeholder="商品名 (例: 除菌液 500ml)" value={inp.name} onChange={e => handleInputChange(group.id, 'name', e.target.value)} className="item-table-input w-full border-2 rounded px-3 py-2 outline-none focus:border-blue-500 font-bold text-base bg-white border-slate-300" /></td>
+                      {showCaseMode && <td className="px-2 py-2 text-right"><input type="text" value={inp.packSize === '' ? '' : formatNumber(inp.packSize)} onChange={e => handleInputChange(group.id, 'packSize', parseNumberInput(e.target.value))} className="item-table-input w-[80px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
+                      <td className="px-2 py-2 text-right"><input type="text" placeholder="数量" value={inp.volume} onChange={e => handleInputChange(group.id, 'volume', e.target.value)} className="item-table-input w-[90px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none font-bold" /></td>
+                      {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" placeholder="単価仕入" value={inp.cost === '' ? '' : formatNumber(inp.cost)} onChange={e => handleInputChange(group.id, 'cost', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
+                      <td className="px-2 py-2 text-right"><input type="text" placeholder="単価" value={inp.price === '' ? '' : formatNumber(inp.price)} onChange={e => handleInputChange(group.id, 'price', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-slate-300 rounded px-2 py-1 text-right outline-none font-bold" /></td>
+                      <td className="px-2 py-2 text-right font-bold text-slate-700">¥{((appMode === 'proposal' ? Number(inp.packSize)||0 : Number(inp.volume)||0) * (Number(inp.price)||0)).toLocaleString()}</td>
+                      {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" placeholder="利益%" value={inp.targetMargin} onChange={e => handleInputChange(group.id, 'targetMargin', e.target.value)} className="item-table-input w-[80px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
+                      <td className="px-2 py-2 text-center"><button onClick={() => handleAddItem(group.id)} className="px-3 py-1.5 rounded text-xs font-bold bg-slate-800 text-white hover:bg-slate-700"><Plus className="w-3 h-3 inline" /> 追加</button></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })}
+
+        <button onClick={addGroup} className="w-full py-4 border-2 border-dashed border-slate-300 rounded-lg text-slate-400 hover:text-slate-700 hover:border-slate-500 hover:bg-slate-50 transition flex items-center justify-center gap-2 no-print mb-4">
+          <Plus className="w-5 h-5" /><span className="font-bold">新しい商品カテゴリを追加</span>
+        </button>
+
+        {showGrandTotal && grandTotal > 0 && (
+          <div className="bg-slate-800 text-white rounded px-5 py-3 flex items-center justify-between mb-3">
+            <span className="text-sm font-bold tracking-widest">御見積金額 合計{getTotalSuffix()}</span>
+            <span className="text-2xl font-bold">¥{grandTotal.toLocaleString()}<span className="text-sm font-normal ml-2">—</span></span>
+          </div>
+        )}
+
+        <div className="bg-white rounded-lg shadow-sm border border-blue-200 p-3 mt-4">
+          <label className="text-xs font-bold text-blue-700 mb-1 block">備考（見積書下部に印字）</label>
+          <textarea value={bottomRemarks} onChange={e => setBottomRemarks(e.target.value)} rows={2} className="w-full bg-slate-50 border border-slate-200 rounded px-3 py-1.5 text-sm outline-none focus:bg-white focus:border-blue-500 resize-none" />
+        </div>
+
+        <div className="pb-20"></div>
+      </main>
+
+      {notification && <div className="fixed bottom-4 right-4 bg-slate-900 text-white px-4 py-2.5 rounded-lg shadow-xl z-[100] text-sm font-bold no-print">{notification}</div>}
+
+      {showOfficeModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center p-4 border-b bg-amber-50"><h3 className="text-lg font-bold text-amber-800 flex items-center gap-2"><Building2 className="w-5 h-5" /> 営業所・会社情報の設定</h3><button onClick={() => setShowOfficeModal(false)}><X className="w-5 h-5" /></button></div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-3">
+              <div className="bg-amber-50 border border-amber-300 rounded-lg p-3">
+                <label className="text-xs font-bold text-amber-800 block mb-1.5">営業所マスタから選択（自動入力）</label>
+                <select onChange={e => { const s = OFFICE_MASTER.find(o => o.name === e.target.value); if (s) { setOfficeInfo({ ...officeInfo, companyName: '太陽シルバーサービス㈱', officeName: s.name, postal: s.postal, address: s.address, phone: s.phone, fax: s.fax, manager: s.manager }); notify(`${s.name}を選択しました`); } e.target.value = ''; }} defaultValue="" className="w-full p-2 border border-amber-300 rounded outline-none bg-white text-sm">
+                  <option value="" disabled>▼ 営業所を選んでください</option>
+                  {OFFICE_MASTER.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
+                </select>
+              </div>
+              {[{k:'companyName',l:'会社名'},{k:'officeName',l:'営業所名'},{k:'postal',l:'郵便番号'},{k:'address',l:'住所'},{k:'phone',l:'電話番号'},{k:'fax',l:'FAX'},{k:'email',l:'Email'},{k:'manager',l:'所長名'},{k:'staffName',l:'担当者名'}].map(f => (
+                <div key={f.k}><label className="text-xs font-bold text-slate-600 block mb-1">{f.l}</label><input value={officeInfo[f.k]||''} onChange={e => setOfficeInfo({ ...officeInfo, [f.k]: e.target.value })} className="w-full p-2 border border-slate-300 rounded outline-none focus:border-blue-500" /></div>
+              ))}
+            </div>
+            <div className="p-4 border-t flex justify-end gap-2 bg-slate-50"><button onClick={() => setShowOfficeModal(false)} className="px-5 py-2 bg-slate-200 font-bold rounded text-sm">閉じる</button><button onClick={() => { setShowOfficeModal(false); notify('保存しました'); }} className="px-5 py-2 bg-amber-500 text-white font-bold rounded text-sm">保存して閉じる</button></div>
+          </div>
+        </div>
+      )}
+
+      {showSaveModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white p-5 rounded-xl shadow-2xl max-w-md w-full">
+            <h3 className="text-lg font-bold mb-3">見積を保存</h3>
+            <input value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="例: A病院様 2026見積" className="w-full border border-slate-300 p-2 rounded mb-3 outline-none focus:border-blue-500" autoFocus />
+            <div className="flex justify-end gap-2"><button onClick={() => setShowSaveModal(false)} className="px-4 py-2 font-bold text-slate-600 hover:bg-slate-100 rounded text-sm">キャンセル</button><button onClick={handleSave} disabled={!saveName.trim()} className={`px-4 py-2 font-bold rounded text-sm text-white ${saveName.trim() ? 'bg-blue-600' : 'bg-slate-300'}`}><Save className="w-4 h-4 inline mr-1" /> 保存</button></div>
+          </div>
+        </div>
+      )}
+
+      {showLoadModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white p-5 rounded-xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col">
+            <div className="flex justify-between items-center mb-3"><h3 className="text-lg font-bold flex items-center gap-2"><Archive className="w-5 h-5" /> 保存BOX</h3><button onClick={() => setShowLoadModal(false)}><X className="w-5 h-5" /></button></div>
+            <div className="flex-1 overflow-y-auto space-y-2">
+              {savedProposals.length === 0 ? <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />保存されたデータはありません</div> :
+                savedProposals.map(p => (
+                  <div key={p.id} className="border border-slate-200 rounded p-3 flex justify-between items-center hover:bg-slate-50">
+                    <div className="min-w-0"><div className="font-bold truncate">{p.name}</div><div className="text-[11px] text-slate-500">{p.clientName && <span>{p.clientName}　</span>}{new Date(p.updatedAt).toLocaleString('ja-JP')}</div></div>
+                    <div className="flex gap-1"><button onClick={() => handleLoad(p)} className="px-3 py-1.5 bg-blue-100 text-blue-700 font-bold rounded text-xs">開く</button><button onClick={() => handleDeleteProposal(p.id)} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button></div>
+                  </div>
+                ))
+              }
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showGuideModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center p-4 border-b"><h3 className="text-lg font-bold flex items-center gap-2"><BookOpen className="w-5 h-5 text-blue-600" /> 使い方ガイド</h3><button onClick={() => setShowGuideModal(false)}><X className="w-5 h-5" /></button></div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50 text-sm">
+              <section className="bg-white p-4 rounded border"><h4 className="font-bold mb-2 flex items-center gap-2"><Printer className="w-4 h-4 text-red-500" /> 印刷・PDF出力</h4><p>右上「印刷/PDF」ボタンを押すとプレビューが開きます。ブラウザの印刷ダイアログで「PDFに保存」を選べばPDF化できます。Ctrl+P (Mac: Cmd+P) でも印刷できます。</p></section>
+              <section className="bg-white p-4 rounded border"><h4 className="font-bold mb-2 flex items-center gap-2"><Building2 className="w-4 h-4 text-amber-500" /> 営業所設定</h4><p>「営業所設定」から会社名・住所・電話・担当者を登録。営業所マスタから選択すれば一括入力されます。設定は自動保存され、見積書の右上に印字されます。</p></section>
+              <section className="bg-white p-4 rounded border"><h4 className="font-bold mb-2 flex items-center gap-2"><Save className="w-4 h-4 text-blue-500" /> 保存・呼び出し</h4><p>「保存」で現在の見積をlocalStorageに保存、「保存BOX」から呼び出し・削除ができます。データは各ブラウザに保存されます。</p></section>
+            </div>
+            <div className="p-3 border-t flex justify-end"><button onClick={() => setShowGuideModal(false)} className="px-6 py-2 bg-blue-600 text-white font-bold rounded text-sm">確認しました</button></div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+document.getElementById('loading').style.display = 'none';
+createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
