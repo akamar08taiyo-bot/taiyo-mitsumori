@@ -302,6 +302,7 @@ function App() {
   const [editingFolderId, setEditingFolderId] = useState(null);
   const [editingFolderName, setEditingFolderName] = useState('');
   const [folderEditMode, setFolderEditMode] = useState(false);
+  const [loadTab, setLoadTab] = useState('save'); // 'save' | 'manage'
   const [editingProposalId, setEditingProposalId] = useState(null);
   const [editingProposalName, setEditingProposalName] = useState('');
   const [favorites, setFavorites] = useState(() => loadStorage(STORAGE_KEYS.FAVORITES, []));
@@ -757,8 +758,8 @@ function App() {
                 {isPreviewMode ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />} プレビュー
               </button>
               <button onClick={() => handlePrint('print')} className="flex items-center gap-1 bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Printer className="w-4 h-4" /> 印刷/PDF</button>
-              <button onClick={() => setShowSaveModal(true)} className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Save className="w-4 h-4" /> 保存</button>
-              <button onClick={() => setShowLoadModal(true)} className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Archive className="w-4 h-4" /> 保存BOX{savedProposals.length > 0 && <span className="bg-white text-indigo-700 rounded-full px-1.5 text-[10px] ml-1">{savedProposals.length}</span>}</button>
+              <button onClick={() => { setLoadTab('save'); setShowLoadModal(true); }} className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Save className="w-4 h-4" /> 保存</button>
+              <button onClick={() => { setLoadTab('manage'); setShowLoadModal(true); }} className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Archive className="w-4 h-4" /> フォルダ管理{savedProposals.length > 0 && <span className="bg-white text-indigo-700 rounded-full px-1.5 text-[10px] ml-1">{savedProposals.length}</span>}</button>
               <button onClick={() => setShowOfficeModal(true)} className="flex items-center gap-1 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><Building2 className="w-3.5 h-3.5" /> 営業所設定</button>
               <button onClick={() => setShowGuideModal(true)} className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded text-xs font-bold transition border border-slate-600"><BookOpen className="w-3.5 h-3.5" /> 使い方</button>
               <button onClick={handleLogout} className="flex items-center gap-1 bg-slate-600 hover:bg-slate-500 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><X className="w-3.5 h-3.5" /> ログアウト</button>
@@ -795,7 +796,6 @@ function App() {
             <div className="flex items-center gap-1"><span className="text-slate-400">有効期限</span><input value={validityPeriod} onChange={e => setValidityPeriod(e.target.value)} className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-32 text-[11px]" /></div>
             <div className="flex items-center gap-1"><span className="text-slate-400">支払</span><input value={paymentTerms} onChange={e => setPaymentTerms(e.target.value)} className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-32 text-[11px]" /></div>
             <div className="flex items-center gap-1"><span className="text-slate-400">納期</span><input value={deliveryInfo} onChange={e => setDeliveryInfo(e.target.value)} className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-36 text-[11px]" /></div>
-            <div className="flex items-center gap-1"><span className="text-slate-400">備考</span><input value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="特記事項" className="bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none w-36 text-[11px]" /></div>
           </div>
         </div>
 
@@ -933,55 +933,54 @@ function App() {
         </div>
       )}
 
-      {showSaveModal && (() => {
+      {showLoadModal && (() => {
+        const proposalsInFolder = selectedFolderId === '__all__' ? savedProposals : savedProposals.filter(p => (p.folderId || null) === selectedFolderId);
         const matchedFolder = folders.find(f => clientName && f.name === clientName);
         const currentFolderId = saveFolderId !== null ? saveFolderId : (matchedFolder?.id ?? null);
         return (
         <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden">
-            <div className="p-4 border-b bg-blue-50 flex justify-between items-center"><h3 className="text-lg font-bold text-blue-800 flex items-center gap-2"><Save className="w-5 h-5" /> 見積を保存</h3><button onClick={() => { setShowSaveModal(false); setSaveFolderId(null); setNewFolderInputName(''); }}><X className="w-5 h-5" /></button></div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-4">
-              <div>
-                <label className="block text-sm font-bold text-slate-700 mb-2">📁 保存先フォルダ（施設）</label>
-                <div className="grid grid-cols-2 gap-1.5 max-h-40 overflow-y-auto border border-slate-200 rounded p-2 bg-slate-50">
-                  <button type="button" onClick={() => setSaveFolderId(null)} className={`text-left px-2.5 py-1.5 rounded text-xs font-bold border ${currentFolderId === null ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-600 border-slate-200 hover:bg-blue-50'}`}>📂 フォルダなし</button>
-                  {folders.map(f => (
-                    <button key={f.id} type="button" onClick={() => setSaveFolderId(f.id)} className={`text-left px-2.5 py-1.5 rounded text-xs font-bold border truncate ${currentFolderId === f.id ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-700 border-slate-200 hover:bg-blue-50'}`}>🏢 {f.name}</button>
-                  ))}
-                </div>
-                <div className="mt-2 flex items-center gap-2">
-                  <input value={newFolderInputName} onChange={e => { setNewFolderInputName(e.target.value); if (e.target.value.trim()) setSaveFolderId('__new__'); }} placeholder="または新しい施設フォルダ名を入力" className="flex-1 border border-slate-300 p-1.5 rounded text-sm outline-none focus:border-blue-500" />
-                  {clientName && !folders.find(f => f.name === clientName) && <button type="button" onClick={() => { setNewFolderInputName(clientName); setSaveFolderId('__new__'); }} className="text-xs bg-amber-100 text-amber-700 px-2 py-1.5 rounded font-bold whitespace-nowrap flex items-center gap-1"><Sparkles className="w-3 h-3" />「{clientName}」</button>}
-                </div>
-                {currentFolderId === '__new__' && newFolderInputName.trim() && <div className="text-[11px] text-green-700 font-bold mt-1">→ 新規フォルダ「{newFolderInputName.trim()}」を作成して保存</div>}
+          <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[88vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center px-4 pt-3 pb-0 border-b bg-slate-50">
+              <div className="flex items-center gap-1">
+                <button onClick={() => setLoadTab('save')} className={`px-5 py-2.5 text-sm font-bold rounded-t-lg flex items-center gap-2 transition ${loadTab === 'save' ? 'bg-white text-blue-700 border-x border-t border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}><Save className="w-4 h-4" /> 保存</button>
+                <button onClick={() => setLoadTab('manage')} className={`px-5 py-2.5 text-sm font-bold rounded-t-lg flex items-center gap-2 transition ${loadTab === 'manage' ? 'bg-white text-indigo-700 border-x border-t border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}><Archive className="w-4 h-4" /> フォルダ管理 <span className="text-[10px] bg-slate-200 text-slate-600 rounded-full px-1.5">{savedProposals.length}</span></button>
               </div>
-              <div>
-                <label className="block text-sm font-bold text-slate-700 mb-2">📝 この見積の名前</label>
-                <input value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="例: 2026年4月分 / 通常品 / 春の提案" className="w-full border-2 border-slate-300 p-2.5 rounded outline-none focus:border-blue-500" autoFocus />
-                <div className="flex gap-1 mt-1.5 flex-wrap">
-                  {clientName && <button type="button" onClick={() => setSaveName(`${clientName}_${proposalDate}`)} className="text-[10px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded">宛先+日付</button>}
-                  <button type="button" onClick={() => setSaveName(`${proposalDate}_${proposalTitle}`)} className="text-[10px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded">日付+タイトル</button>
+              <button onClick={() => { setShowLoadModal(false); setEditingFolderId(null); setEditingProposalId(null); setSaveFolderId(null); setNewFolderInputName(''); }} className="text-slate-500 hover:text-slate-700"><X className="w-5 h-5" /></button>
+            </div>
+            {loadTab === 'save' ? (
+              <>
+                <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                  <div className="bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-800"><strong>💾 現在編集中の見積を保存します。</strong>　保存先フォルダを選び、名前を付けて保存してください。</div>
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">📁 保存先フォルダ（施設）</label>
+                    <div className="grid grid-cols-2 gap-1.5 max-h-44 overflow-y-auto border border-slate-200 rounded p-2 bg-slate-50">
+                      <button type="button" onClick={() => setSaveFolderId(null)} className={`text-left px-2.5 py-1.5 rounded text-xs font-bold border ${currentFolderId === null ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-600 border-slate-200 hover:bg-blue-50'}`}>📂 フォルダなし</button>
+                      {folders.map(f => (
+                        <button key={f.id} type="button" onClick={() => setSaveFolderId(f.id)} className={`text-left px-2.5 py-1.5 rounded text-xs font-bold border truncate ${currentFolderId === f.id ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-700 border-slate-200 hover:bg-blue-50'}`}>🏢 {f.name}</button>
+                      ))}
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <input value={newFolderInputName} onChange={e => { setNewFolderInputName(e.target.value); if (e.target.value.trim()) setSaveFolderId('__new__'); }} placeholder="または新しい施設フォルダ名を入力" className="flex-1 border border-slate-300 p-1.5 rounded text-sm outline-none focus:border-blue-500" />
+                      {clientName && !folders.find(f => f.name === clientName) && <button type="button" onClick={() => { setNewFolderInputName(clientName); setSaveFolderId('__new__'); }} className="text-xs bg-amber-100 text-amber-700 px-2 py-1.5 rounded font-bold whitespace-nowrap flex items-center gap-1"><Sparkles className="w-3 h-3" />「{clientName}」</button>}
+                    </div>
+                    {currentFolderId === '__new__' && newFolderInputName.trim() && <div className="text-[11px] text-green-700 font-bold mt-1">→ 新規フォルダ「{newFolderInputName.trim()}」を作成して保存</div>}
+                    <div className="text-[10px] text-slate-500 mt-1.5">💡 「フォルダ管理」タブでフォルダだけの作成・編集もできます</div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">📝 この見積の名前</label>
+                    <input value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="例: 2026年4月分 / 通常品 / 春の提案" className="w-full border-2 border-slate-300 p-2.5 rounded outline-none focus:border-blue-500" />
+                    <div className="flex gap-1 mt-1.5 flex-wrap">
+                      {clientName && <button type="button" onClick={() => setSaveName(`${clientName}_${proposalDate}`)} className="text-[10px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded">宛先+日付</button>}
+                      <button type="button" onClick={() => setSaveName(`${proposalDate}_${proposalTitle}`)} className="text-[10px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded">日付+タイトル</button>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-            <div className="p-4 border-t bg-slate-50 flex justify-between items-center">
-              <div className="text-[11px] text-slate-500">保存先：<strong>{currentFolderId === null ? 'フォルダなし' : currentFolderId === '__new__' ? `🆕 ${newFolderInputName||'(名前未入力)'}` : folders.find(f => f.id === currentFolderId)?.name}</strong></div>
-              <div className="flex gap-2"><button onClick={() => { setShowSaveModal(false); setSaveFolderId(null); setNewFolderInputName(''); }} className="px-4 py-2 font-bold text-slate-600 hover:bg-slate-100 rounded text-sm">キャンセル</button><button onClick={handleSave} disabled={!saveName.trim()} className={`px-5 py-2 font-bold rounded text-sm text-white ${saveName.trim() ? 'bg-blue-600 hover:bg-blue-700' : 'bg-slate-300'}`}><Save className="w-4 h-4 inline mr-1" /> 保存</button></div>
-            </div>
-          </div>
-        </div>
-        );
-      })()}
-
-      {showLoadModal && (() => {
-        const proposalsInFolder = selectedFolderId === '__all__' ? savedProposals : savedProposals.filter(p => (p.folderId || null) === selectedFolderId);
-        return (
-        <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[85vh] flex flex-col overflow-hidden">
-            <div className="flex justify-between items-center p-4 border-b bg-indigo-50">
-              <h3 className="text-lg font-bold text-indigo-800 flex items-center gap-2"><Archive className="w-5 h-5" /> 保存BOX <span className="text-xs font-normal text-slate-500">（左：施設フォルダ／右：見積一覧）</span></h3>
-              <button onClick={() => { setShowLoadModal(false); setEditingFolderId(null); setEditingProposalId(null); }}><X className="w-5 h-5" /></button>
-            </div>
+                <div className="p-4 border-t bg-slate-50 flex justify-between items-center">
+                  <div className="text-[11px] text-slate-500">保存先：<strong>{currentFolderId === null ? 'フォルダなし' : currentFolderId === '__new__' ? `🆕 ${newFolderInputName||'(名前未入力)'}` : folders.find(f => f.id === currentFolderId)?.name}</strong></div>
+                  <div className="flex gap-2"><button onClick={() => { setShowLoadModal(false); setSaveFolderId(null); setNewFolderInputName(''); }} className="px-4 py-2 font-bold text-slate-600 hover:bg-slate-100 rounded text-sm">キャンセル</button><button onClick={handleSave} disabled={!saveName.trim()} className={`px-5 py-2 font-bold rounded text-sm text-white ${saveName.trim() ? 'bg-blue-600 hover:bg-blue-700' : 'bg-slate-300'}`}><Save className="w-4 h-4 inline mr-1" /> 保存</button></div>
+                </div>
+              </>
+            ) : (<>
             <div className="flex-1 flex overflow-hidden">
               <div className="w-64 border-r border-slate-200 bg-slate-50 flex flex-col">
                 <div className="px-3 py-2 border-b border-slate-200 bg-white text-xs font-bold text-slate-600 flex items-center justify-between gap-2">
@@ -1060,7 +1059,8 @@ function App() {
                 </div>
               </div>
             </div>
-            <div className="px-4 py-2 border-t bg-slate-50 text-[11px] text-slate-500 flex items-center gap-3"><span>💡 フォルダ横の <Settings className="w-3 h-3 inline" /> でリネーム、<Trash2 className="w-3 h-3 inline" /> で削除</span><span>各見積の 📁 で別フォルダへ移動</span></div>
+            <div className="px-4 py-2 border-t bg-slate-50 text-[11px] text-slate-500 flex items-center gap-3"><span>💡 「フォルダ編集」 で名前変更／削除</span><span>各見積の 📁 で別フォルダへ移動</span><span><strong>「開く」を押すと過去の見積を呼び戻せます</strong></span></div>
+            </>)}
           </div>
         </div>
         );
@@ -1068,14 +1068,114 @@ function App() {
 
       {showGuideModal && (
         <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden">
-            <div className="flex justify-between items-center p-4 border-b"><h3 className="text-lg font-bold flex items-center gap-2"><BookOpen className="w-5 h-5 text-blue-600" /> 使い方ガイド</h3><button onClick={() => setShowGuideModal(false)}><X className="w-5 h-5" /></button></div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50 text-sm">
-              <section className="bg-white p-4 rounded border"><h4 className="font-bold mb-2 flex items-center gap-2"><Printer className="w-4 h-4 text-red-500" /> 印刷・PDF出力</h4><p>右上「印刷/PDF」ボタンを押すとプレビューが開きます。ブラウザの印刷ダイアログで「PDFに保存」を選べばPDF化できます。Ctrl+P (Mac: Cmd+P) でも印刷できます。</p></section>
-              <section className="bg-white p-4 rounded border"><h4 className="font-bold mb-2 flex items-center gap-2"><Building2 className="w-4 h-4 text-amber-500" /> 営業所設定</h4><p>「営業所設定」から会社名・住所・電話・担当者を登録。営業所マスタから選択すれば一括入力されます。設定は自動保存され、見積書の右上に印字されます。</p></section>
-              <section className="bg-white p-4 rounded border"><h4 className="font-bold mb-2 flex items-center gap-2"><Save className="w-4 h-4 text-blue-500" /> 保存・呼び出し</h4><p>「保存」で現在の見積をlocalStorageに保存、「保存BOX」から呼び出し・削除ができます。データは各ブラウザに保存されます。</p></section>
+          <div className="bg-white rounded-xl shadow-2xl max-w-3xl w-full max-h-[92vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center p-4 border-b bg-blue-50"><h3 className="text-lg font-bold flex items-center gap-2 text-blue-800"><BookOpen className="w-5 h-5 text-blue-600" /> 使い方ガイド</h3><button onClick={() => setShowGuideModal(false)}><X className="w-5 h-5" /></button></div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50 text-sm leading-relaxed">
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <h4 className="font-bold text-base mb-2 flex items-center gap-2 text-slate-800"><Save className="w-5 h-5 text-blue-500" /> 1. 保存とフォルダ管理（2タブ式）</h4>
+                <p className="mb-2">画面右上には<strong>「保存」</strong>と<strong>「フォルダ管理」</strong>の2つのボタンがあり、どちらも同じウィンドウが開きます（タブで切替可能）。</p>
+                <div className="bg-blue-50 border border-blue-200 rounded p-3 mb-2">
+                  <div className="font-bold text-blue-800 mb-1">📑 「保存」タブ：現在編集中の見積を保存</div>
+                  <ol className="list-decimal pl-5 space-y-0.5 text-[13px]">
+                    <li>保存先フォルダを選択（既存フォルダのカードをクリック／または「フォルダなし」）</li>
+                    <li>下の入力欄から<strong>新規フォルダを作成</strong>することも可能</li>
+                    <li>宛先（施設名）と同名のフォルダが無い場合は「<Sparkles className="w-3 h-3 inline" />宛先名で作成」サジェストが出ます</li>
+                    <li>見積の名前を入力（例：「2026年4月分」「春の追加見積」など）</li>
+                    <li>「保存」ボタンで完了</li>
+                  </ol>
+                </div>
+                <div className="bg-indigo-50 border border-indigo-200 rounded p-3">
+                  <div className="font-bold text-indigo-800 mb-1">📁 「フォルダ管理」タブ：施設フォルダと過去の見積を管理</div>
+                  <ul className="list-disc pl-5 space-y-0.5 text-[13px]">
+                    <li><strong>左サイドバー：</strong>施設フォルダの一覧。「すべての見積」「フォルダなし」「各施設フォルダ」を切り替え</li>
+                    <li><strong>右ペイン：</strong>選択中フォルダ内の見積一覧。「開く」ボタンで<strong>過去の見積を呼び戻せます</strong>（編集中の内容は上書きされるので保存してから）</li>
+                    <li><strong>「フォルダ編集」ボタン：</strong>サイドバー上部のオレンジボタンをONにすると、フォルダ横の⚙（名前変更）と🗑（削除）が常時表示されます</li>
+                    <li><strong>新規施設フォルダ追加：</strong>左サイドバー下部の入力欄から、見積を保存せずにフォルダだけ作成可能</li>
+                    <li><strong>見積のリネーム：</strong>各見積の⚙ボタンでインライン編集</li>
+                    <li><strong>見積のフォルダ移動：</strong>各見積の📁プルダウンで別フォルダへ移動</li>
+                  </ul>
+                </div>
+                <div className="text-[11px] text-slate-500 mt-2">💾 データは各ブラウザのlocalStorageに保存されます。営業所間・PC間では共有されません。</div>
+              </section>
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <h4 className="font-bold text-base mb-2 flex items-center gap-2 text-slate-800"><Coins className="w-5 h-5 text-orange-500" /> 2. 原価入力と利益率の自動計算</h4>
+                <p className="mb-2">画面上部の<strong>「原価ON」</strong>ボタンを押すと、商品行に原価列（仕入額）と利益率列が追加されます。<span className="text-[11px] text-slate-500">（原価ON時の列は印刷時には非表示になります）</span></p>
+                <div className="bg-orange-50 border border-orange-200 rounded p-3 mb-2">
+                  <div className="font-bold text-orange-800 mb-1">💡 計算ロジック（自動連動）</div>
+                  <table className="w-full text-[12px] border-collapse">
+                    <thead className="bg-orange-100">
+                      <tr><th className="border border-orange-300 px-2 py-1 text-left">入力した項目</th><th className="border border-orange-300 px-2 py-1 text-left">自動で計算される項目</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr><td className="border border-orange-200 px-2 py-1"><strong>原価</strong>のみ入力</td><td className="border border-orange-200 px-2 py-1">利益率欄が空欄なら影響なし／販売価格も入っていれば <strong>利益率 = (販売価格 - 原価) ÷ 販売価格 × 100</strong> を自動表示</td></tr>
+                      <tr className="bg-white"><td className="border border-orange-200 px-2 py-1"><strong>原価＋利益率</strong>を入力</td><td className="border border-orange-200 px-2 py-1"><strong>販売価格 = 原価 ÷ (1 − 利益率÷100)</strong> を自動算出して単価欄にセット</td></tr>
+                      <tr><td className="border border-orange-200 px-2 py-1"><strong>販売価格＋原価</strong>を入力</td><td className="border border-orange-200 px-2 py-1">利益率を自動逆算して表示（小数1桁）</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="bg-slate-50 border border-slate-200 rounded p-3 text-[12px]">
+                  <div className="font-bold text-slate-700 mb-1">📘 入力例：除菌液 500ml</div>
+                  <ul className="list-disc pl-5 space-y-0.5">
+                    <li>原価に <code className="bg-white px-1 rounded">280</code> と入力</li>
+                    <li>目標利益率に <code className="bg-white px-1 rounded">30</code> と入力</li>
+                    <li>→ 単価欄に自動で <strong>¥400</strong> がセットされます（280 ÷ 0.7 = 400）</li>
+                    <li>逆に、原価<code className="bg-white px-1 rounded">280</code>＋単価<code className="bg-white px-1 rounded">400</code>を入力すれば利益率<strong>30.0%</strong>が表示されます</li>
+                  </ul>
+                </div>
+                <div className="text-[11px] text-slate-500 mt-2">⚠️ 利益率は0〜100の範囲で入力してください（100以上は無効）</div>
+              </section>
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <h4 className="font-bold text-base mb-2 flex items-center gap-2 text-slate-800"><FileText className="w-5 h-5 text-blue-600" /> 3. 見積書の入力例（実際の流れ）</h4>
+                <div className="bg-slate-50 border border-slate-200 rounded p-3 text-[12px] space-y-2">
+                  <div><strong className="text-slate-700">① 宛先の入力</strong><br/>「施設名（1段目）」に <code className="bg-white px-1 rounded">○○病院</code>、「敬称」で <code className="bg-white px-1 rounded">御中</code> を選択<br/>2段目（任意）に「介護事業部 御担当者様」など</div>
+                  <div><strong className="text-slate-700">② 発行日</strong><br/>カレンダーから選ぶと右側に「2026年5月16日」のように自動表示</div>
+                  <div><strong className="text-slate-700">③ モード選択</strong><br/>・<strong>見積作成モード</strong>：数量×単価で金額計算<br/>・<strong>提案書作成モード</strong>：ケース入数×単価で計算＋容量・単位表示</div>
+                  <div><strong className="text-slate-700">④ 商品カテゴリの追加</strong><br/>「新しい商品カテゴリを追加」ボタンでカテゴリ枠を作成<br/>カテゴリ名例：<code className="bg-white px-1 rounded">ビニール手袋</code> <code className="bg-white px-1 rounded">トイレットペーパー</code> <code className="bg-white px-1 rounded">アルコール除菌液</code></div>
+                  <div><strong className="text-slate-700">⑤ 商品の入力</strong>（1行目は自動的に「現状品」、2行目以降が提案品）<br/>例：<br/>・1行目（現状品）：プラスチック手袋 100枚入　数量100　単価¥350<br/>・2行目（提案品）：ニトリル手袋 100枚入　数量100　単価¥280　原価¥210（利益率25%自動表示）</div>
+                  <div><strong className="text-slate-700">⑥ 並び替え・マーカー</strong><br/>各行の⬆⬇で並び替え、🖍ボタンで黄色マーカー強調</div>
+                  <div><strong className="text-slate-700">⑦ 保存</strong><br/>右上「保存」→ フォルダ「○○病院」を作成 → 名前「2026年5月分_通常品」で保存</div>
+                  <div><strong className="text-slate-700">⑧ 印刷／PDF</strong><br/>右上「印刷/PDF」 → A4縦のプレビュー表示 → ブラウザの印刷ダイアログで「PDFに保存」も選択可能</div>
+                </div>
+              </section>
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <h4 className="font-bold text-base mb-2 flex items-center gap-2 text-slate-800"><Printer className="w-5 h-5 text-red-500" /> 4. 印刷・PDF出力</h4>
+                <ul className="list-disc pl-5 space-y-1 text-[13px]">
+                  <li>右上「印刷/PDF」ボタン → 自動でプレビュー画面とブラウザ印刷ダイアログが開きます</li>
+                  <li>用紙サイズはA4縦に最適化、余白12mm/10mm、印刷時にヘッダー・操作ボタンは自動で非表示</li>
+                  <li><strong>Ctrl+P</strong>（Mac は <strong>Cmd+P</strong>）でも印刷できます</li>
+                  <li>PDF保存：印刷ダイアログの「送信先」欄で「<strong>PDFに保存</strong>」を選択</li>
+                  <li>ページ跨ぎ時はテーブルヘッダーが各ページに繰り返し表示されます</li>
+                </ul>
+              </section>
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <h4 className="font-bold text-base mb-2 flex items-center gap-2 text-slate-800"><Building2 className="w-5 h-5 text-amber-500" /> 5. 営業所・担当者情報の設定</h4>
+                <ul className="list-disc pl-5 space-y-1 text-[13px]">
+                  <li>初回ログイン時に営業所＋担当者名を選んだ内容が自動セットされます</li>
+                  <li>「営業所設定」ボタンで会社名・住所・電話・FAX・所長名・担当者名を後から編集可能</li>
+                  <li>「営業所マスタから選択（自動入力）」プルダウンで19拠点いずれかを選ぶと住所等が一括反映</li>
+                  <li>設定内容は見積書の右上に印字されます（所長印・担当印の枠も自動配置）</li>
+                </ul>
+              </section>
+
+              <section className="bg-white p-4 rounded border border-slate-200">
+                <h4 className="font-bold text-base mb-2 flex items-center gap-2 text-slate-800"><Settings className="w-5 h-5 text-slate-500" /> 6. その他の便利機能</h4>
+                <ul className="list-disc pl-5 space-y-1 text-[13px]">
+                  <li><strong>税区分：</strong>税抜／税込／非課税を切替。下部備考と合計金額のサフィックスが連動して切替</li>
+                  <li><strong>合計表示：</strong>ON/OFFで合計金額の表示／非表示を切替（一部商品のみの提案時に便利）</li>
+                  <li><strong>プレビュー：</strong>入力欄を隠して完成イメージを画面で確認</li>
+                  <li><strong>マーカー強調：</strong>各行の🖍ボタンで黄色ハイライト（おすすめ商品の強調表示に）</li>
+                  <li><strong>自動下書き保存：</strong>入力中の内容は500ms間隔で自動保存され、ブラウザを閉じても復元されます</li>
+                  <li><strong>ログアウト：</strong>右上「ログアウト」で再ログイン可能（保存済データ・下書きは残ります）</li>
+                </ul>
+              </section>
+
             </div>
-            <div className="p-3 border-t flex justify-end"><button onClick={() => setShowGuideModal(false)} className="px-6 py-2 bg-blue-600 text-white font-bold rounded text-sm">確認しました</button></div>
+            <div className="p-3 border-t flex justify-end bg-slate-50"><button onClick={() => setShowGuideModal(false)} className="px-6 py-2 bg-blue-600 text-white font-bold rounded text-sm hover:bg-blue-700">確認しました</button></div>
           </div>
         </div>
       )}
