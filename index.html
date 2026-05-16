@@ -952,19 +952,29 @@ function App() {
                 <div className="flex-1 overflow-y-auto p-5 space-y-4">
                   <div className="bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-800"><strong>💾 現在編集中の見積を保存します。</strong>　保存先フォルダを選び、名前を付けて保存してください。</div>
                   <div>
-                    <label className="block text-sm font-bold text-slate-700 mb-2">📁 保存先フォルダ（施設）</label>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">📁 保存先フォルダ（施設）を選択してください</label>
+                    <div className="text-[11px] text-slate-500 mb-2">クリックで保存先を選択／ダブルクリックでフォルダ名を編集できます</div>
                     <div className="grid grid-cols-2 gap-1.5 max-h-44 overflow-y-auto border border-slate-200 rounded p-2 bg-slate-50">
                       <button type="button" onClick={() => setSaveFolderId(null)} className={`text-left px-2.5 py-1.5 rounded text-xs font-bold border ${currentFolderId === null ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-600 border-slate-200 hover:bg-blue-50'}`}>📂 フォルダなし</button>
                       {folders.map(f => (
-                        <button key={f.id} type="button" onClick={() => setSaveFolderId(f.id)} className={`text-left px-2.5 py-1.5 rounded text-xs font-bold border truncate ${currentFolderId === f.id ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-700 border-slate-200 hover:bg-blue-50'}`}>🏢 {f.name}</button>
+                        editingFolderId === f.id ? (
+                          <div key={f.id} className="flex items-center gap-1 col-span-1">
+                            <input value={editingFolderName} onChange={e => setEditingFolderName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { renameFolder(f.id, editingFolderName); setEditingFolderId(null); notify('名前を変更しました'); } if (e.key === 'Escape') setEditingFolderId(null); }} onBlur={() => { renameFolder(f.id, editingFolderName); setEditingFolderId(null); }} className="flex-1 text-xs px-2 py-1.5 border-2 border-blue-500 rounded outline-none" autoFocus />
+                          </div>
+                        ) : (
+                          <button key={f.id} type="button" onClick={() => setSaveFolderId(f.id)} onDoubleClick={(e) => { e.stopPropagation(); setEditingFolderId(f.id); setEditingFolderName(f.name); }} title="クリックで選択、ダブルクリックで名前を編集" className={`text-left px-2.5 py-1.5 rounded text-xs font-bold border truncate ${currentFolderId === f.id ? 'bg-blue-600 text-white border-blue-700' : 'bg-white text-slate-700 border-slate-200 hover:bg-blue-50'}`}>🏢 {f.name}</button>
+                        )
                       ))}
                     </div>
-                    <div className="mt-2 flex items-center gap-2">
-                      <input value={newFolderInputName} onChange={e => { setNewFolderInputName(e.target.value); if (e.target.value.trim()) setSaveFolderId('__new__'); }} placeholder="または新しい施設フォルダ名を入力" className="flex-1 border border-slate-300 p-1.5 rounded text-sm outline-none focus:border-blue-500" />
-                      {clientName && !folders.find(f => f.name === clientName) && <button type="button" onClick={() => { setNewFolderInputName(clientName); setSaveFolderId('__new__'); }} className="text-xs bg-amber-100 text-amber-700 px-2 py-1.5 rounded font-bold whitespace-nowrap flex items-center gap-1"><Sparkles className="w-3 h-3" />「{clientName}」</button>}
+                    <div className="mt-3">
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">＋ 新しい施設フォルダを作成する場合</label>
+                      <div className="flex items-center gap-2">
+                        <input value={newFolderInputName} onChange={e => { setNewFolderInputName(e.target.value); if (e.target.value.trim()) setSaveFolderId('__new__'); }} placeholder="ここに施設名を入力（例：○○病院、○○介護施設）" className="flex-1 border border-slate-300 p-1.5 rounded text-sm outline-none focus:border-blue-500" />
+                        {clientName && !folders.find(f => f.name === clientName) && <button type="button" onClick={() => { setNewFolderInputName(clientName); setSaveFolderId('__new__'); }} className="text-xs bg-amber-100 text-amber-700 px-2 py-1.5 rounded font-bold whitespace-nowrap flex items-center gap-1"><Sparkles className="w-3 h-3" />宛先「{clientName}」で作成</button>}
+                      </div>
                     </div>
-                    {currentFolderId === '__new__' && newFolderInputName.trim() && <div className="text-[11px] text-green-700 font-bold mt-1">→ 新規フォルダ「{newFolderInputName.trim()}」を作成して保存</div>}
-                    <div className="text-[10px] text-slate-500 mt-1.5">💡 「フォルダ管理」タブでフォルダだけの作成・編集もできます</div>
+                    {currentFolderId === '__new__' && newFolderInputName.trim() && <div className="text-[11px] text-green-700 font-bold mt-1.5 bg-green-50 border border-green-200 rounded px-2 py-1">✓ 新規フォルダ「{newFolderInputName.trim()}」を作成して、その中に保存します</div>}
+                    <div className="text-[10px] text-slate-500 mt-2">💡 既存フォルダ名を変更するには、上のフォルダカードをダブルクリック／または「フォルダ管理」タブから編集できます</div>
                   </div>
                   <div>
                     <label className="block text-sm font-bold text-slate-700 mb-2">📝 この見積の名前</label>
@@ -1032,8 +1042,8 @@ function App() {
                           </div>
                         ) : (
                           <div className="flex justify-between items-start gap-2 mb-1">
-                            <div className="min-w-0 flex-1" onDoubleClick={() => { setEditingProposalId(p.id); setEditingProposalName(p.name); }} title="ダブルクリックで名前変更">
-                              <div className="font-bold truncate cursor-pointer hover:text-blue-700">{p.name}</div>
+                            <div className="min-w-0 flex-1 cursor-text" onDoubleClick={() => { setEditingProposalId(p.id); setEditingProposalName(p.name); }} title="ダブルクリックで名前を編集">
+                              <div className="font-bold truncate hover:text-blue-700 hover:underline decoration-dotted underline-offset-4">{p.name} <span className="text-[10px] text-slate-400 font-normal ml-1">✏ダブルクリックで編集</span></div>
                               <div className="text-[11px] text-slate-500">{p.clientName && <span>宛先: {p.clientName}　</span>}{new Date(p.updatedAt).toLocaleString('ja-JP')}</div>
                             </div>
                             <div className="flex gap-1 shrink-0">
@@ -1043,12 +1053,13 @@ function App() {
                             </div>
                           </div>
                         )}
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="text-[10px] text-slate-500">📁</span>
-                          <select value={p.folderId || ''} onChange={e => { moveProposal(p.id, e.target.value || null); notify('移動しました'); }} className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white outline-none focus:border-blue-500">
+                        <div className="flex items-center gap-2 mt-1.5 bg-slate-50 px-2 py-1 rounded">
+                          <span className="text-[10px] text-slate-500 font-bold">📁 移動先フォルダ:</span>
+                          <select value={p.folderId || ''} onChange={e => { moveProposal(p.id, e.target.value || null); notify('移動しました'); }} className="text-[11px] border border-slate-300 rounded px-2 py-0.5 bg-white outline-none focus:border-blue-500 font-medium">
                             <option value="">（フォルダなし）</option>
-                            {folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                            {folders.map(f => <option key={f.id} value={f.id}>🏢 {f.name}</option>)}
                           </select>
+                          <span className="text-[10px] text-slate-400">← 別の施設フォルダへ移動</span>
                         </div>
                       </div>
                     ))
