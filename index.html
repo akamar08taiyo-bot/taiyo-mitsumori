@@ -158,6 +158,12 @@ const parseNumberInput = (raw) => {
   if (raw === null || raw === undefined) return '';
   return String(raw).replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)).replace(/[,，\s]/g, '');
 };
+// 氏名を「苗字 名前」(半角スペース1個区切り)に正規化する
+// 全角スペース・連続スペース・前後の空白を半角スペース1個にまとめる
+const normalizeName = (raw) => {
+  if (!raw) return '';
+  return String(raw).trim().replace(/[\s　]+/g, ' ');
+};
 
 function LoginScreen({ onLogin }) {
   const [office, setOffice] = useState('');
@@ -167,7 +173,7 @@ function LoginScreen({ onLogin }) {
     e?.preventDefault();
     if (!office) { setError('営業所を選択してください'); return; }
     if (!userName.trim()) { setError('ログイン名（担当者名）を入力してください'); return; }
-    onLogin({ office, userName: userName.trim(), loggedInAt: Date.now() });
+    onLogin({ office, userName: normalizeName(userName), loggedInAt: Date.now() });
   };
   return (
     <div className="min-h-screen bg-stone-100 flex items-center justify-center p-4">
@@ -627,7 +633,9 @@ function App() {
   #print-content-holder .issuer-info .office { font-weight: 600; font-size: 9pt; color: #1e40af; margin-bottom: 2px; }
   #print-content-holder .issuer-info .addr { font-size: 8pt; color: #4b5563; line-height: 1.4; margin: 0; }
   #print-content-holder .issuer-info .addr.invoice-no { font-size: 7.5pt; color: #2563eb; font-weight: 600; margin-top: 1px; }
-  #print-content-holder .issuer-info .staff { font-size: 8.5pt; margin-top: 3px; padding-top: 3px; border-top: 0.5px dashed #bfdbfe; color: #1f2937; }
+  #print-content-holder .issuer-info .staff { font-size: 8.5pt; margin-top: 2px; padding-top: 2px; color: #1f2937; display: flex; align-items: baseline; }
+  #print-content-holder .issuer-info .staff:first-of-type { margin-top: 3px; padding-top: 3px; border-top: 0.5px dashed #bfdbfe; }
+  #print-content-holder .issuer-info .staff .staff-label { display: inline-block; width: 30px; color: #6b7280; font-size: 8pt; letter-spacing: 0.3em; flex-shrink: 0; }
   #print-content-holder .stamps { display: flex; justify-content: flex-end; gap: 4mm; margin-top: 4px; padding-top: 4px; border-top: 1px solid #dbeafe; }
   #print-content-holder .stamp-box { text-align: center; }
   #print-content-holder .stamp-label { font-size: 7pt; color: #3b82f6; font-weight: 600; margin-bottom: 2px; }
@@ -688,8 +696,8 @@ function App() {
         ${officeInfo.phone ? `<div class="addr">TEL ${escapeHTML(officeInfo.phone)}</div>` : ''}
         ${officeInfo.fax ? `<div class="addr">FAX ${escapeHTML(officeInfo.fax)}</div>` : ''}
         <div class="addr invoice-no">登録番号　T1290001044462</div>
-        ${officeInfo.manager ? `<div class="staff">所長　<strong>${escapeHTML(officeInfo.manager)}</strong></div>` : ''}
-        ${officeInfo.staffName ? `<div class="staff">担当　<strong>${escapeHTML(officeInfo.staffName)}</strong></div>` : ''}
+        ${officeInfo.manager ? `<div class="staff"><span class="staff-label">所長</span><strong>${escapeHTML(normalizeName(officeInfo.manager))}</strong></div>` : ''}
+        ${officeInfo.staffName ? `<div class="staff"><span class="staff-label">担当</span><strong>${escapeHTML(normalizeName(officeInfo.staffName))}</strong></div>` : ''}
       </div>
       <div class="stamps">
         <div class="stamp-box"><div class="stamp-label">所長印</div><div class="stamp-square"></div></div>
