@@ -983,13 +983,10 @@ function App() {
             ) : (<>
             <div className="flex-1 flex overflow-hidden">
               <div className="w-64 border-r border-slate-200 bg-slate-50 flex flex-col">
-                <div className="px-3 py-2 border-b border-slate-200 bg-white text-xs font-bold text-slate-600 flex items-center justify-between gap-2">
+                <div className="px-3 py-2 border-b border-slate-200 bg-white text-xs font-bold text-slate-600 flex items-center justify-between">
                   <span>📁 施設フォルダ <span className="text-[10px] text-slate-400 font-normal">({folders.length}件)</span></span>
-                  <button onClick={() => setFolderEditMode(!folderEditMode)} className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold transition ${folderEditMode ? 'bg-orange-500 text-white hover:bg-orange-600' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}`}>
-                    <Settings className="w-3 h-3" /> {folderEditMode ? '編集中' : 'フォルダ編集'}
-                  </button>
+                  <span className="text-[10px] text-slate-400 font-normal">⚙=名前変更 / ダブルクリックでも編集</span>
                 </div>
-                {folderEditMode && <div className="px-3 py-1.5 bg-orange-50 border-b border-orange-200 text-[10px] text-orange-800 font-bold">編集モード：各フォルダの ⚙ で名前変更、🗑 で削除できます</div>}
                 <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
                   <button onClick={() => setSelectedFolderId('__all__')} className={`w-full text-left px-2.5 py-1.5 rounded text-xs font-bold ${selectedFolderId === '__all__' ? 'bg-indigo-600 text-white' : 'hover:bg-slate-200 text-slate-700'}`}>📋 すべての見積 <span className="text-[10px] opacity-70">({savedProposals.length})</span></button>
                   <button onClick={() => setSelectedFolderId(null)} className={`w-full text-left px-2.5 py-1.5 rounded text-xs font-bold ${selectedFolderId === null ? 'bg-indigo-600 text-white' : 'hover:bg-slate-200 text-slate-700'}`}>📂 フォルダなし <span className="text-[10px] opacity-70">({savedProposals.filter(p => !p.folderId).length})</span></button>
@@ -1005,9 +1002,9 @@ function App() {
                         </div>
                       ) : (
                         <div className="flex items-center">
-                          <button onClick={() => setSelectedFolderId(f.id)} className={`flex-1 text-left px-2.5 py-1.5 rounded-l text-xs font-bold truncate ${selectedFolderId === f.id ? 'text-white' : 'hover:bg-slate-200 text-slate-700'}`}>🏢 {f.name} <span className="text-[10px] opacity-70">({savedProposals.filter(p => p.folderId === f.id).length})</span></button>
-                          <button onClick={(e) => { e.stopPropagation(); setEditingFolderId(f.id); setEditingFolderName(f.name); }} title="名前を変更" className={`p-1 ${folderEditMode ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} ${selectedFolderId === f.id ? 'text-white hover:bg-indigo-700' : 'text-orange-600 hover:bg-orange-100'} rounded`}><Settings className="w-3.5 h-3.5" /></button>
-                          <button onClick={(e) => { e.stopPropagation(); deleteFolder(f.id); }} title="削除" className={`p-1 ${folderEditMode ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} ${selectedFolderId === f.id ? 'text-white hover:bg-indigo-700' : 'text-red-500 hover:text-red-700 hover:bg-red-50'} rounded mr-1`}><Trash2 className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setSelectedFolderId(f.id)} onDoubleClick={(e) => { e.stopPropagation(); setEditingFolderId(f.id); setEditingFolderName(f.name); }} title="クリックで選択、ダブルクリックで名前変更" className={`flex-1 text-left px-2.5 py-1.5 rounded-l text-xs font-bold truncate ${selectedFolderId === f.id ? 'text-white' : 'hover:bg-slate-200 text-slate-700'}`}>🏢 {f.name} <span className="text-[10px] opacity-70">({savedProposals.filter(p => p.folderId === f.id).length})</span></button>
+                          <button onClick={(e) => { e.stopPropagation(); setEditingFolderId(f.id); setEditingFolderName(f.name); }} title="名前を変更" className={`p-1 ${selectedFolderId === f.id ? 'text-white hover:bg-indigo-700' : 'text-orange-600 hover:bg-orange-100'} rounded`}><Settings className="w-3.5 h-3.5" /></button>
+                          <button onClick={(e) => { e.stopPropagation(); deleteFolder(f.id); }} title="削除" className={`p-1 ${selectedFolderId === f.id ? 'text-white hover:bg-indigo-700' : 'text-red-500 hover:text-red-700 hover:bg-red-50'} rounded mr-1`}><Trash2 className="w-3.5 h-3.5" /></button>
                         </div>
                       )}
                     </div>
@@ -1035,8 +1032,8 @@ function App() {
                           </div>
                         ) : (
                           <div className="flex justify-between items-start gap-2 mb-1">
-                            <div className="min-w-0 flex-1">
-                              <div className="font-bold truncate">{p.name}</div>
+                            <div className="min-w-0 flex-1" onDoubleClick={() => { setEditingProposalId(p.id); setEditingProposalName(p.name); }} title="ダブルクリックで名前変更">
+                              <div className="font-bold truncate cursor-pointer hover:text-blue-700">{p.name}</div>
                               <div className="text-[11px] text-slate-500">{p.clientName && <span>宛先: {p.clientName}　</span>}{new Date(p.updatedAt).toLocaleString('ja-JP')}</div>
                             </div>
                             <div className="flex gap-1 shrink-0">
