@@ -301,7 +301,6 @@ function App() {
   const [newFolderInputName, setNewFolderInputName] = useState('');
   const [editingFolderId, setEditingFolderId] = useState(null);
   const [editingFolderName, setEditingFolderName] = useState('');
-  const [folderEditMode, setFolderEditMode] = useState(false);
   const [loadTab, setLoadTab] = useState('save'); // 'save' | 'manage'
   const [editingProposalId, setEditingProposalId] = useState(null);
   const [editingProposalName, setEditingProposalName] = useState('');
@@ -1067,7 +1066,7 @@ function App() {
                 </div>
               </div>
             </div>
-            <div className="px-4 py-2 border-t bg-slate-50 text-[11px] text-slate-500 flex items-center gap-3"><span>💡 「フォルダ編集」 で名前変更／削除</span><span>各見積の 📁 で別フォルダへ移動</span><span><strong>「開く」を押すと過去の見積を呼び戻せます</strong></span></div>
+            <div className="px-4 py-2 border-t bg-slate-50 text-[11px] text-slate-500 flex items-center gap-3"><span>💡 フォルダ名／見積名は<strong>ダブルクリック</strong>で編集できます</span><span>📁プルダウンで別フォルダへ移動</span><span><strong>「開く」で過去の見積を呼び戻せます</strong></span></div>
             </>)}
           </div>
         </div>
@@ -1098,7 +1097,7 @@ function App() {
                   <ul className="list-disc pl-5 space-y-0.5 text-[13px]">
                     <li><strong>左サイドバー：</strong>施設フォルダの一覧。「すべての見積」「フォルダなし」「各施設フォルダ」を切り替え</li>
                     <li><strong>右ペイン：</strong>選択中フォルダ内の見積一覧。「開く」ボタンで<strong>過去の見積を呼び戻せます</strong>（編集中の内容は上書きされるので保存してから）</li>
-                    <li><strong>「フォルダ編集」ボタン：</strong>サイドバー上部のオレンジボタンをONにすると、フォルダ横の⚙（名前変更）と🗑（削除）が常時表示されます</li>
+                    <li><strong>名前の編集：</strong>フォルダ名・見積名はいずれも<strong>ダブルクリック</strong>でその場編集できます（Enterで確定、Escで取消）。⚙ボタンでも編集できます</li>
                     <li><strong>新規施設フォルダ追加：</strong>左サイドバー下部の入力欄から、見積を保存せずにフォルダだけ作成可能</li>
                     <li><strong>見積のリネーム：</strong>各見積の⚙ボタンでインライン編集</li>
                     <li><strong>見積のフォルダ移動：</strong>各見積の📁プルダウンで別フォルダへ移動</li>
