@@ -584,7 +584,7 @@ function App() {
     };
     const displayDate = (proposalDateText && proposalDateText.trim()) ? proposalDateText.trim() : formatDate(proposalDate);
 
-    const groupsHTML = computedGroups.map((group) => {
+    const groupsHTML = computedGroups.filter(g => g.items.length > 0).map((group) => {
       const baseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
       const rows = group.items.map((item) => {
         const trClass = item.isHighlighted ? ' class="highlighted"' : '';
@@ -809,7 +809,7 @@ function App() {
           </div>
         </div>
 
-        {computedGroups.map((group, gIdx) => {
+        {(isPreviewMode ? computedGroups.filter(g => g.items.length > 0) : computedGroups).map((group, gIdx) => {
           const inp = newItems[group.id] || getEmptyItem();
           return (
             <div key={group.id} className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden mb-4">
