@@ -46,6 +46,18 @@ const STORAGE_KEYS = {
   DRAFT: 'taiyo_draft_v1',
   LOGIN: 'taiyo_login_v1',
   FOLDERS: 'taiyo_folders_v1',
+  USERS: 'taiyo_users_v1',
+};
+
+// パスワードを保存する用の簡易ハッシュ (FNV-1a 32bit + salt)
+const simpleHash = (str) => {
+  const salted = 'taiyo_salt_' + String(str);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < salted.length; i++) {
+    h ^= salted.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36) + '_' + (salted.length * 31).toString(36);
 };
 
 const OFFICE_MASTER = [
@@ -166,41 +178,77 @@ const normalizeName = (raw) => {
 };
 
 function LoginScreen({ onLogin }) {
-  const [office, setOffice] = useState('');
+  const [officeCode, setOfficeCode] = useState('');
   const [userName, setUserName] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [mode, setMode] = useState('login');
+  const users = loadStorage(STORAGE_KEYS.USERS, []);
+
+  const findMatchingOffice = (code) => {
+    const c = code.trim();
+    if (!c) return null;
+    return OFFICE_MASTER.find(o => o.name === c || o.name === c + '営業所' || o.name.startsWith(c));
+  };
+
   const submit = (e) => {
     e?.preventDefault();
-    if (!office) { setError('営業所を選択してください'); return; }
-    if (!userName.trim()) { setError('ログイン名（担当者名）を入力してください'); return; }
-    onLogin({ office, userName: normalizeName(userName), loggedInAt: Date.now() });
+    const code = officeCode.trim();
+    const n = normalizeName(userName);
+    if (!code) { setError('営業所コードを入力してください'); return; }
+    if (!n) { setError('名前を入力してください'); return; }
+    if (!password || password.length < 4) { setError('パスワードは4文字以上で入力してください'); return; }
+
+    const key = `${code}__${n}`;
+    const existing = users.find(u => u.key === key);
+    const inputHash = simpleHash(password);
+
+    if (mode === 'login') {
+      if (!existing) { setError('登録されていません。「新規登録」タブで登録してください'); return; }
+      if (existing.hash !== inputHash) { setError('パスワードが違います'); return; }
+    } else {
+      if (existing) { setError('このコード+名前は既に登録済みです。「ログイン」タブから入ってください'); return; }
+      const newUser = { key, officeCode: code, name: n, hash: inputHash, createdAt: Date.now() };
+      saveStorage(STORAGE_KEYS.USERS, [...users, newUser]);
+    }
+
+    const master = findMatchingOffice(code);
+    const officeName = master ? master.name : code + '営業所';
+    onLogin({ office: officeName, officeCode: code, userName: n, masterFound: !!master, loggedInAt: Date.now() });
   };
+
+  const canSubmit = officeCode.trim() && userName.trim() && password.length >= 4;
+
   return (
     <div className="min-h-screen bg-stone-100 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full overflow-hidden border border-stone-200">
-        <div className="bg-white border-b border-stone-200 p-6 text-center">
-          <FileText className="w-11 h-11 mx-auto mb-2 text-amber-500" />
-          <h1 className="text-xl font-bold text-stone-800">太陽シルバーサービス㈱</h1>
-          <p className="text-sm text-stone-500 mt-1">見積書・提案書作成システム</p>
+      <div className="bg-white rounded-2xl shadow-lg max-w-sm w-full overflow-hidden border border-stone-200">
+        <div className="bg-white border-b border-stone-200 px-6 pt-6 pb-4 text-center">
+          <FileText className="w-10 h-10 mx-auto mb-2 text-amber-500" />
+          <h1 className="text-base font-bold text-stone-800">太陽シルバーサービス㈱</h1>
+          <p className="text-xs text-stone-500 mt-0.5">見積書・提案書作成システム</p>
         </div>
-        <form onSubmit={submit} className="p-6 space-y-4 bg-white">
+        <div className="flex border-b border-stone-200 bg-stone-50">
+          <button type="button" onClick={() => { setMode('login'); setError(''); }} className={`flex-1 py-2.5 text-sm font-bold transition ${mode === 'login' ? 'bg-white text-stone-800 border-b-2 border-amber-500' : 'text-stone-500 hover:text-stone-700'}`}>ログイン</button>
+          <button type="button" onClick={() => { setMode('register'); setError(''); }} className={`flex-1 py-2.5 text-sm font-bold transition ${mode === 'register' ? 'bg-white text-stone-800 border-b-2 border-amber-500' : 'text-stone-500 hover:text-stone-700'}`}>新規登録</button>
+        </div>
+        <form onSubmit={submit} className="p-5 space-y-3 bg-white">
           <div>
-            <label className="block text-sm font-bold text-stone-700 mb-1.5">営業所を選択 <span className="text-rose-500">*</span></label>
-            <select value={office} onChange={e => { setOffice(e.target.value); setError(''); }} className="w-full p-2.5 border border-stone-300 rounded-lg outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-200 bg-white text-sm font-medium" autoFocus>
-              <option value="">▼ 営業所を選んでください</option>
-              {OFFICE_MASTER.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
-            </select>
+            <label className="block text-xs font-bold text-stone-600 mb-1">コード(営業所名)</label>
+            <input type="text" value={officeCode} onChange={e => { setOfficeCode(e.target.value); setError(''); }} placeholder="例: 行橋" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" autoFocus />
           </div>
           <div>
-            <label className="block text-sm font-bold text-stone-700 mb-1.5">ログイン名（担当者名） <span className="text-rose-500">*</span></label>
-            <input type="text" value={userName} onChange={e => { setUserName(e.target.value); setError(''); }} placeholder="例: 山田 太郎" className="w-full p-2.5 border border-stone-300 rounded-lg outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-200 text-sm" />
-            <p className="text-[11px] text-stone-500 mt-1">※ 入力した名前は見積書の担当者欄に自動セットされます</p>
+            <label className="block text-xs font-bold text-stone-600 mb-1">名前</label>
+            <input type="text" value={userName} onChange={e => { setUserName(e.target.value); setError(''); }} placeholder="例: 山田 太郎" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" />
           </div>
-          {error && <div className="bg-rose-50 border border-rose-200 text-rose-700 text-sm font-bold p-2.5 rounded">{error}</div>}
-          <button type="submit" className="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-3 rounded-lg transition shadow">ログインしてはじめる →</button>
+          <div>
+            <label className="block text-xs font-bold text-stone-600 mb-1">パスワード <span className="text-stone-400 font-normal">(4文字以上)</span></label>
+            <input type="password" value={password} onChange={e => { setPassword(e.target.value); setError(''); }} placeholder={mode === 'register' ? '初回はパスワードを決めて入力' : 'パスワードを入力'} className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" />
+          </div>
+          {error && <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold p-2 rounded">{error}</div>}
+          <button type="submit" disabled={!canSubmit} className={`w-full font-bold py-2.5 rounded-md transition text-sm ${canSubmit ? 'bg-amber-500 hover:bg-amber-600 text-white shadow' : 'bg-stone-200 text-stone-400 cursor-not-allowed'}`}>{mode === 'register' ? '登録してはじめる' : 'ログイン'}</button>
         </form>
-        <div className="bg-stone-50 border-t border-stone-200 px-6 py-3 text-center text-[11px] text-stone-500">
-          ログイン情報はこのブラウザに保存されます
+        <div className="bg-stone-50 border-t border-stone-200 px-5 py-2.5 text-center text-[10px] text-stone-500">
+          {mode === 'login' ? 'はじめての方は「新規登録」タブで登録してください' : '※ パスワードは暗号化してこの端末に保存されます'}
         </div>
       </div>
     </div>
@@ -310,6 +358,61 @@ function App() {
   const [loadTab, setLoadTab] = useState('save'); // 'save' | 'manage'
   const [addingFolderName, setAddingFolderName] = useState('');
   const [showAddFolderInput, setShowAddFolderInput] = useState(false);
+  const [showImportShareModal, setShowImportShareModal] = useState(false);
+  const [importCode, setImportCode] = useState('');
+  const [importName, setImportName] = useState('');
+  const [importPassword, setImportPassword] = useState('');
+  const [importError, setImportError] = useState('');
+  const importFileRef = useRef(null);
+
+  const handleExportShare = () => {
+    if (savedProposals.length === 0 && folders.length === 0) { notify('共有できる見積がありません'); return; }
+    const payload = {
+      _type: 'taiyo-share',
+      version: 1,
+      from: { officeCode: loginInfo?.officeCode || '', name: loginInfo?.userName || '', hash: (loadStorage(STORAGE_KEYS.USERS, []).find(u => u.key === `${loginInfo?.officeCode}__${loginInfo?.userName}`)?.hash) || '' },
+      exportedAt: Date.now(),
+      folders, savedProposals,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `共有見積_${loginInfo?.officeCode||''}_${loginInfo?.userName||''}_${new Date().toISOString().slice(0,10)}.json`;
+    a.click(); URL.revokeObjectURL(url);
+    notify(`共有用ファイルを保存しました（${savedProposals.length}件）`);
+  };
+
+  const handleImportShareFile = (file) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (data._type !== 'taiyo-share') { setImportError('共有ファイルの形式が違います'); return; }
+        if (importCode.trim() && data.from.officeCode !== importCode.trim()) { setImportError(`共有元の営業所コード「${data.from.officeCode}」と一致しません`); return; }
+        if (importName.trim() && data.from.name !== normalizeName(importName)) { setImportError(`共有元の名前「${data.from.name}」と一致しません`); return; }
+        if (importPassword && simpleHash(importPassword) !== data.from.hash) { setImportError('共有元のパスワードが違います'); return; }
+        const importedFolders = Array.isArray(data.folders) ? data.folders : [];
+        const importedProposals = Array.isArray(data.savedProposals) ? data.savedProposals : [];
+        const existingFolderNames = new Set(folders.map(f => f.name));
+        const newFolders = importedFolders.filter(f => !existingFolderNames.has(f.name)).map(f => ({ ...f, id: genId('fld') }));
+        const nameToNewId = {};
+        importedFolders.forEach(f => {
+          const ex = folders.find(x => x.name === f.name);
+          if (ex) nameToNewId[f.id] = ex.id;
+          else { const nf = newFolders.find(x => x.name === f.name); if (nf) nameToNewId[f.id] = nf.id; }
+        });
+        const remappedProposals = importedProposals.map(p => ({ ...p, id: genId('prop'), folderId: p.folderId ? (nameToNewId[p.folderId] || null) : null, _importedFrom: `${data.from.officeCode}/${data.from.name}` }));
+        setFolders(prev => [...newFolders, ...prev]);
+        setSavedProposals(prev => [...remappedProposals, ...prev]);
+        notify(`${remappedProposals.length}件の見積を取り込みました`);
+        setShowImportShareModal(false);
+        setImportCode(''); setImportName(''); setImportPassword(''); setImportError('');
+      } catch (err) {
+        setImportError('ファイルが読み込めません: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  };
   const [editingProposalId, setEditingProposalId] = useState(null);
   const [editingProposalName, setEditingProposalName] = useState('');
   const [favorites, setFavorites] = useState(() => loadStorage(STORAGE_KEYS.FAVORITES, []));
@@ -1084,12 +1187,44 @@ function App() {
                 </div>
               </div>
             </div>
-            <div className="px-4 py-2 border-t bg-slate-50 text-[11px] text-slate-500 flex items-center gap-3"><span>💡 フォルダ名／見積名は<strong>ダブルクリック</strong>で編集できます</span><span>📁プルダウンで別フォルダへ移動</span><span><strong>「開く」で過去の見積を呼び戻せます</strong></span></div>
+            <div className="px-4 py-2 border-t bg-slate-50 text-[11px] text-slate-500 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3"><span>💡 フォルダ名／見積名は<strong>ダブルクリック</strong>で編集</span><span>📁で別フォルダへ移動</span></div>
+              <div className="flex items-center gap-1.5">
+                <button onClick={handleExportShare} className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 rounded text-[10px] font-bold"><Upload className="w-3 h-3" /> 見積を共有</button>
+                <button onClick={() => setShowImportShareModal(true)} className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-2.5 py-1 rounded text-[10px] font-bold"><Download className="w-3 h-3" /> 共有見積を取込</button>
+              </div>
+            </div>
             </>)}
           </div>
         </div>
         );
       })()}
+
+      {showImportShareModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[90] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="p-4 border-b bg-indigo-50 flex justify-between items-center"><h3 className="text-base font-bold text-indigo-800 flex items-center gap-2"><Download className="w-5 h-5" /> 共有された見積を取り込む</h3><button onClick={() => { setShowImportShareModal(false); setImportError(''); }}><X className="w-5 h-5" /></button></div>
+            <div className="p-5 space-y-3">
+              <p className="text-xs text-slate-600 bg-amber-50 border border-amber-200 rounded p-2.5 leading-relaxed">📥 共有元から受け取った <strong>JSONファイル</strong>を選択してください。共有元の<strong>営業所コード／名前／パスワード</strong>を入力すると、その情報と一致した場合のみ取り込まれます（空欄なら検証スキップ）。</p>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">共有元の営業所コード <span className="text-slate-400 font-normal">(任意)</span></label>
+                <input value={importCode} onChange={e => { setImportCode(e.target.value); setImportError(''); }} placeholder="例: 行橋" className="w-full px-3 py-2 border border-slate-300 rounded outline-none focus:border-indigo-500 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">共有元の名前 <span className="text-slate-400 font-normal">(任意)</span></label>
+                <input value={importName} onChange={e => { setImportName(e.target.value); setImportError(''); }} placeholder="例: 山田 太郎" className="w-full px-3 py-2 border border-slate-300 rounded outline-none focus:border-indigo-500 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">共有元のパスワード <span className="text-slate-400 font-normal">(任意)</span></label>
+                <input type="password" value={importPassword} onChange={e => { setImportPassword(e.target.value); setImportError(''); }} placeholder="共有元が設定したパスワード" className="w-full px-3 py-2 border border-slate-300 rounded outline-none focus:border-indigo-500 text-sm" />
+              </div>
+              {importError && <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold p-2 rounded">{importError}</div>}
+              <input ref={importFileRef} type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleImportShareFile(f); e.target.value=''; }} />
+              <button onClick={() => importFileRef.current?.click()} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded text-sm flex items-center justify-center gap-2"><Paperclip className="w-4 h-4" /> 共有ファイル(.json)を選択して取込</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showGuideModal && (
         <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
