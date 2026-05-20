@@ -687,7 +687,38 @@ function App() {
     };
     const displayDate = (proposalDateText && proposalDateText.trim()) ? proposalDateText.trim() : formatDate(proposalDate);
 
-    const groupsHTML = computedGroups.filter(g => g.items.length > 0).map((group) => {
+    // 印刷前に「入力行に何か書き込んだが追加ボタン未押下」のデータを自動的に取り込む
+    const groupsForPrint = computedGroups.map(g => {
+      const inp = newItems[g.id];
+      const hasPending = inp && (
+        (inp.name && String(inp.name).trim()) ||
+        (inp.volume !== '' && inp.volume !== undefined && inp.volume !== null) ||
+        (inp.price !== '' && inp.price !== undefined && inp.price !== null)
+      );
+      if (!hasPending) return g;
+      const vol = Number(inp.volume) || 0;
+      const pri = Number(inp.price) || 0;
+      const unitPrice = vol > 0 ? (pri / vol) * (g.baseScale || 1) : 0;
+      const tempItem = {
+        id: 'pending-' + g.id,
+        name: inp.name || '',
+        memo: inp.memo || '',
+        volume: inp.volume,
+        packSize: Number(inp.packSize) || 1,
+        price: pri,
+        casePrice: Number(inp.casePrice) || 0,
+        cost: Number(inp.cost) || 0,
+        caseCost: Number(inp.caseCost) || 0,
+        targetMargin: inp.targetMargin || '',
+        unitPrice: Math.round(unitPrice*10)/10,
+        unitPriceRaw: unitPrice,
+        profit: 0, margin: 0, monthlyCost: 0, yearlyCost: 0,
+        isHighlighted: !!inp.isHighlighted,
+        unitOverride: inp.unitOverride,
+      };
+      return { ...g, items: [...g.items, tempItem] };
+    });
+    const groupsHTML = groupsForPrint.filter(g => g.items.length > 0 || (g.title && g.title.trim())).map((group) => {
       const baseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
       const rows = group.items.map((item) => {
         const trClass = item.isHighlighted ? ' class="highlighted"' : '';
