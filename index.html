@@ -231,18 +231,18 @@ function LoginScreen({ onLogin }) {
           <button type="button" onClick={() => { setMode('login'); setError(''); }} className={`flex-1 py-2.5 text-sm font-bold transition ${mode === 'login' ? 'bg-white text-stone-800 border-b-2 border-amber-500' : 'text-stone-500 hover:text-stone-700'}`}>ログイン</button>
           <button type="button" onClick={() => { setMode('register'); setError(''); }} className={`flex-1 py-2.5 text-sm font-bold transition ${mode === 'register' ? 'bg-white text-stone-800 border-b-2 border-amber-500' : 'text-stone-500 hover:text-stone-700'}`}>新規登録</button>
         </div>
-        <form onSubmit={submit} className="p-5 space-y-3 bg-white">
+        <form onSubmit={submit} className="p-5 space-y-3 bg-white" autoComplete="off">
           <div>
             <label className="block text-xs font-bold text-stone-600 mb-1">コード(営業所名)</label>
-            <input type="text" value={officeCode} onChange={e => { setOfficeCode(e.target.value); setError(''); }} placeholder="行橋" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" autoFocus />
+            <input type="text" value={officeCode} onChange={e => { setOfficeCode(e.target.value); setError(''); }} placeholder="行橋" autoComplete="off" name="office-code-no-fill" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white placeholder:text-stone-300 placeholder:font-normal" autoFocus />
           </div>
           <div>
             <label className="block text-xs font-bold text-stone-600 mb-1">名前</label>
-            <input type="text" value={userName} onChange={e => { setUserName(e.target.value); setError(''); }} placeholder="山田 太郎" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" />
+            <input type="text" value={userName} onChange={e => { setUserName(e.target.value); setError(''); }} placeholder="山田 太郎" autoComplete="off" name="user-name-no-fill" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white placeholder:text-stone-300 placeholder:font-normal" />
           </div>
           <div>
             <label className="block text-xs font-bold text-stone-600 mb-1">パスワード <span className="text-stone-400 font-normal">(6文字以上)</span></label>
-            <input type="password" value={password} onChange={e => { setPassword(e.target.value); setError(''); }} placeholder="6文字以上" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" />
+            <input type="password" value={password} onChange={e => { setPassword(e.target.value); setError(''); }} placeholder="6文字以上" autoComplete="new-password" name="user-pw-no-fill" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white placeholder:text-stone-300 placeholder:font-normal" />
           </div>
           {error && <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold p-2 rounded">{error}</div>}
           <button type="submit" disabled={!canSubmit} className={`w-full font-bold py-2.5 rounded-md transition text-sm ${canSubmit ? 'bg-amber-500 hover:bg-amber-600 text-white shadow' : 'bg-stone-200 text-stone-400 cursor-not-allowed'}`}>{mode === 'register' ? '登録してはじめる' : 'ログイン'}</button>
