@@ -197,7 +197,7 @@ function LoginScreen({ onLogin }) {
     const n = normalizeName(userName);
     if (!code) { setError('営業所コードを入力してください'); return; }
     if (!n) { setError('名前を入力してください'); return; }
-    if (!password || password.length < 4) { setError('パスワードは4文字以上で入力してください'); return; }
+    if (!password || password.length < 6) { setError('パスワードは6文字以上で入力してください'); return; }
 
     const key = `${code}__${n}`;
     const existing = users.find(u => u.key === key);
@@ -217,7 +217,7 @@ function LoginScreen({ onLogin }) {
     onLogin({ office: officeName, officeCode: code, userName: n, masterFound: !!master, loggedInAt: Date.now() });
   };
 
-  const canSubmit = officeCode.trim() && userName.trim() && password.length >= 4;
+  const canSubmit = officeCode.trim() && userName.trim() && password.length >= 6;
 
   return (
     <div className="min-h-screen bg-stone-100 flex items-center justify-center p-4">
@@ -234,15 +234,15 @@ function LoginScreen({ onLogin }) {
         <form onSubmit={submit} className="p-5 space-y-3 bg-white">
           <div>
             <label className="block text-xs font-bold text-stone-600 mb-1">コード(営業所名)</label>
-            <input type="text" value={officeCode} onChange={e => { setOfficeCode(e.target.value); setError(''); }} placeholder="例: 行橋" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" autoFocus />
+            <input type="text" value={officeCode} onChange={e => { setOfficeCode(e.target.value); setError(''); }} placeholder="行橋" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" autoFocus />
           </div>
           <div>
             <label className="block text-xs font-bold text-stone-600 mb-1">名前</label>
-            <input type="text" value={userName} onChange={e => { setUserName(e.target.value); setError(''); }} placeholder="例: 山田 太郎" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" />
+            <input type="text" value={userName} onChange={e => { setUserName(e.target.value); setError(''); }} placeholder="山田 太郎" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" />
           </div>
           <div>
-            <label className="block text-xs font-bold text-stone-600 mb-1">パスワード <span className="text-stone-400 font-normal">(4文字以上)</span></label>
-            <input type="password" value={password} onChange={e => { setPassword(e.target.value); setError(''); }} placeholder={mode === 'register' ? '初回はパスワードを決めて入力' : 'パスワードを入力'} className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" />
+            <label className="block text-xs font-bold text-stone-600 mb-1">パスワード <span className="text-stone-400 font-normal">(6文字以上)</span></label>
+            <input type="password" value={password} onChange={e => { setPassword(e.target.value); setError(''); }} placeholder="6文字以上" className="w-full px-3 py-2 border border-stone-300 rounded-md outline-none focus:border-amber-500 text-sm bg-stone-50 focus:bg-white" />
           </div>
           {error && <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold p-2 rounded">{error}</div>}
           <button type="submit" disabled={!canSubmit} className={`w-full font-bold py-2.5 rounded-md transition text-sm ${canSubmit ? 'bg-amber-500 hover:bg-amber-600 text-white shadow' : 'bg-stone-200 text-stone-400 cursor-not-allowed'}`}>{mode === 'register' ? '登録してはじめる' : 'ログイン'}</button>
@@ -1018,8 +1018,13 @@ function App() {
                         </tr>
                       );
                     })}
-                    <tr className="bg-slate-50/50">
-                      <td className="px-3 py-2"><input placeholder="商品名 (例: 除菌液 500ml)" value={inp.name} onChange={e => handleInputChange(group.id, 'name', e.target.value)} className="item-table-input w-full border-2 rounded px-3 py-2 outline-none focus:border-blue-500 font-bold text-base bg-white border-slate-300" /></td>
+                    <tr className={inp.isHighlighted ? 'bg-yellow-200' : 'bg-slate-50/50'}>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <input placeholder="商品名 (例: 除菌液 500ml)" value={inp.name} onChange={e => handleInputChange(group.id, 'name', e.target.value)} className={`item-table-input flex-1 border-2 rounded px-3 py-2 outline-none focus:border-blue-500 font-bold text-base ${inp.isHighlighted ? 'bg-yellow-100 border-yellow-300' : 'bg-white border-slate-300'}`} />
+                          <button type="button" onClick={() => handleInputChange(group.id, 'isHighlighted', !inp.isHighlighted)} title="マーカー(強調表示) — 印刷物にも反映されます" className={`p-1.5 rounded transition ${inp.isHighlighted ? 'bg-yellow-400 text-white' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}><HighlighterIcon className="w-4 h-4" /></button>
+                        </div>
+                      </td>
                       {showCaseMode && <td className="px-2 py-2 text-right"><input type="text" value={inp.packSize === '' ? '' : formatNumber(inp.packSize)} onChange={e => handleInputChange(group.id, 'packSize', parseNumberInput(e.target.value))} className="item-table-input w-[80px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
                       <td className="px-2 py-2 text-right"><input type="text" placeholder="数量" value={inp.volume} onChange={e => handleInputChange(group.id, 'volume', e.target.value)} className="item-table-input w-[90px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none font-bold" /></td>
                       {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" placeholder="単価仕入" value={inp.cost === '' ? '' : formatNumber(inp.cost)} onChange={e => handleInputChange(group.id, 'cost', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
