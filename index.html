@@ -84,12 +84,25 @@
 </div>
 <div id="root"></div>
 <script type="text/babel" data-type="module" data-presets="react">
+// === すべての import を最上部に集約（ESM 仕様遵守 + Babel 互換） ===
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import { getDatabase, ref as dbRef, onValue, set as dbSet, get as dbGet, off as dbOff } from 'firebase/database';
+import {
+  Trash2, TrendingDown, Plus, Calculator, FileText, BarChart3,
+  X as MultiplyIcon, PackagePlus, Percent, LayoutTemplate, ArrowUpDown,
+  X as CloseIcon, AlertTriangle, Eye, EyeOff, Coins, Package, Save, Archive,
+  Paperclip, FileSpreadsheet, Loader2, ExternalLink, Info, Sparkles,
+  ShieldCheck, BookOpen, CheckCircle2, Star, Printer, Building2,
+  Download, Upload, Settings, ToggleLeft, ToggleRight,
+  ChevronDown, ChevronUp, Highlighter as HighlighterIcon
+} from 'lucide-react';
 
-// === Firebase 初期化 ===
+// 旧来のコードが <X /> で使っていたため、CloseIcon を X として再エクスポート
+const X = CloseIcon;
+
+// === Firebase 初期化（失敗してもアプリは起動できるようガード） ===
 // プロジェクト: taiyo-mitsumori-03724 (永久無料 Spark プラン)
 const firebaseConfig = {
   apiKey: "AIzaSyDK_GUIfrs_8qHiGjZavcb9EgD1DKjYQAY",
@@ -100,18 +113,13 @@ const firebaseConfig = {
   messagingSenderId: "838108820514",
   appId: "1:838108820514:web:8435818e15053c2b2f867b"
 };
-const firebaseApp = initializeApp(firebaseConfig);
-const firebaseDB = getDatabase(firebaseApp);
-
-import {
-  Trash2, TrendingDown, Plus, Calculator, FileText, BarChart3,
-  X as MultiplyIcon, PackagePlus, Percent, LayoutTemplate, ArrowUpDown,
-  X, AlertTriangle, Eye, EyeOff, Coins, Package, Save, Archive,
-  Paperclip, FileSpreadsheet, Loader2, ExternalLink, Info, Sparkles,
-  ShieldCheck, BookOpen, CheckCircle2, Star, Printer, Building2,
-  Download, Upload, Settings, ToggleLeft, ToggleRight,
-  ChevronDown, ChevronUp, Highlighter as HighlighterIcon
-} from 'lucide-react';
+let firebaseDB = null;
+try {
+  const firebaseApp = initializeApp(firebaseConfig);
+  firebaseDB = getDatabase(firebaseApp);
+} catch (e) {
+  console.warn('[Firebase] 初期化失敗（クラウド同期は無効化されますがアプリは起動します）', e);
+}
 
 const STORAGE_KEYS = {
   PROPOSALS: 'taiyo_proposals_v1',
@@ -620,6 +628,7 @@ function App() {
       setSyncStatus('idle');
       return;
     }
+    if (!firebaseDB) { setSyncStatus('error'); return; }
     const syncKey = getSyncKey();
     if (!syncKey) { setSyncStatus('error'); return; }
     setSyncStatus('connecting');
@@ -653,6 +662,7 @@ function App() {
   useEffect(() => {
     if (!loginInfo) return;
     if (suppressNextWriteRef.current) { suppressNextWriteRef.current = false; return; }
+    if (!firebaseDB) return;
     const syncKey = getSyncKey(); if (!syncKey) return;
     if (syncWriteTimerRef.current) clearTimeout(syncWriteTimerRef.current);
     syncWriteTimerRef.current = setTimeout(() => {
