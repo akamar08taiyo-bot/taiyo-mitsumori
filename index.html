@@ -344,6 +344,10 @@ function App() {
     } else {
       setOfficeInfo(prev => ({ ...prev, staffName: info.userName }));
     }
+    // 初回ログイン時（保存済みデータ0件）は使い方ガイドを自動表示
+    if (savedProposals.length === 0 && folders.length === 0) {
+      setTimeout(() => setShowGuideModal(true), 800);
+    }
   };
   const handleLogout = () => {
     if (!confirm('ログアウトしますか？\n（入力中のデータはブラウザに残ります）')) return;
@@ -514,6 +518,11 @@ function App() {
   const lastSyncedJsonRef = useRef('');
   const syncWriteTimerRef = useRef(null);
   const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'connecting' | 'synced' | 'error'
+  const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const [showSyncPopover, setShowSyncPopover] = useState(false);
+  const [showShareMenu, setShowShareMenu] = useState(false);
+  const [showUtilMenu, setShowUtilMenu] = useState(false);
+  const [proposalSearchQuery, setProposalSearchQuery] = useState('');
 
   const getSyncKey = () => {
     if (!loginInfo) return null;
@@ -544,7 +553,7 @@ function App() {
         if (Array.isArray(remote.savedProposals)) setSavedProposals(remote.savedProposals);
         lastSyncedJsonRef.current = JSON.stringify({ folders: remote.folders||[], savedProposals: remote.savedProposals||[] });
       }
-      setSyncStatus('synced');
+      setSyncStatus('synced'); setLastSyncedAt(Date.now());
     }).catch(err => { console.warn('sync get error', err); setSyncStatus('error'); });
     // リアルタイム購読：他PCから更新が来たら自動で取り込む
     onValue(r, (snap) => {
@@ -571,7 +580,7 @@ function App() {
       if (json === lastSyncedJsonRef.current) return;
       lastSyncedJsonRef.current = json;
       const r = dbRef(firebaseDB, `users/${syncKey}/data`);
-      dbSet(r, payload).then(() => { setSyncStatus('synced'); }).catch(err => { console.warn('sync write error', err); setSyncStatus('error'); });
+      dbSet(r, payload).then(() => { setSyncStatus('synced'); setLastSyncedAt(Date.now()); }).catch(err => { console.warn('sync write error', err); setSyncStatus('error'); });
     }, 500);
     return () => { if (syncWriteTimerRef.current) clearTimeout(syncWriteTimerRef.current); };
   }, [folders, savedProposals, loginInfo]);
@@ -807,7 +816,7 @@ function App() {
     }));
   };
   const handleClearAll = () => {
-    if (confirmClearAll) { setGroups([]); setNewItems({}); setAttachments([]); setConfirmClearAll(false); notify('全データをリセットしました'); }
+    if (confirmClearAll) { setGroups([]); setNewItems({}); setAttachments([]); setCurrentProposalId(null); setConfirmClearAll(false); notify('全データをリセットしました'); }
     else { setConfirmClearAll(true); setTimeout(() => setConfirmClearAll(false), 3000); }
   };
 
@@ -829,7 +838,8 @@ function App() {
       validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal,
       groups, attachments, updatedAt: Date.now(),
     } : p));
-    notify('上書き保存しました');
+    const target = savedProposals.find(p => p.id === currentProposalId);
+    notify(target ? `「${target.name}」を上書き保存しました` : '上書き保存しました');
   };
   // メール送信で見積データを共有（mailtoスキーム）
   // URLリンクで共有：データを圧縮してURLハッシュに含め、クリップボードへコピー
@@ -1148,25 +1158,72 @@ function App() {
               <div>
                 <h1 className="font-bold text-lg leading-tight">見積書・提案書作成システム</h1>
                 <span className="text-xs text-slate-300">{loginInfo.office}　/　担当: <strong className="text-amber-200">{loginInfo.userName}</strong>
-                  <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold ${syncStatus === 'synced' ? 'bg-green-600 text-white' : syncStatus === 'connecting' ? 'bg-amber-500 text-white animate-pulse' : syncStatus === 'error' ? 'bg-rose-600 text-white' : 'bg-slate-600 text-slate-300'}`} title="クラウド同期ステータス">
+                  <button onClick={() => setShowSyncPopover(!showSyncPopover)} className={`ml-2 px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${syncStatus === 'synced' ? 'bg-green-600 text-white hover:bg-green-700' : syncStatus === 'connecting' ? 'bg-amber-500 text-white animate-pulse' : syncStatus === 'error' ? 'bg-rose-600 text-white hover:bg-rose-700' : 'bg-slate-600 text-slate-300 hover:bg-slate-700'}`} title="クリックで同期の詳細を表示">
                     {syncStatus === 'synced' ? '☁ 同期OK' : syncStatus === 'connecting' ? '⏳ 接続中' : syncStatus === 'error' ? '⚠ 同期エラー' : '○ 未接続'}
-                  </span>
+                  </button>
                 </span>
               </div>
             </div>
-            <div className="flex flex-wrap gap-2 justify-center lg:justify-end items-center">
-              <button onClick={() => setIsPreviewMode(!isPreviewMode)} className={`flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-bold transition ${isPreviewMode ? 'bg-teal-500 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}>
+            <div className="flex flex-wrap gap-1.5 justify-center lg:justify-end items-center">
+              {/* === 主要アクション === */}
+              <button onClick={() => setIsPreviewMode(!isPreviewMode)} className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-bold transition ${isPreviewMode ? 'bg-teal-500 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}>
                 {isPreviewMode ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />} プレビュー
               </button>
-              <button onClick={() => handlePrint('print')} className="flex items-center gap-1 bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Printer className="w-4 h-4" /> 印刷/PDF</button>
-              <button onClick={() => { setCurrentProposalId(null); setLoadTab('save'); setShowLoadModal(true); }} title="新規保存：新しいフォルダを選んで別名で保存" className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Save className="w-4 h-4" /> 新規保存</button>
-              <button onClick={handleOverwriteSave} disabled={!currentProposalId} title={currentProposalId ? '上書き保存：開いている見積を上書き' : '上書き対象なし。先に保存済み見積を開いてください'} className={`flex items-center gap-1 px-3 py-2 rounded shadow text-sm font-bold transition ${currentProposalId ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-300 text-slate-500 cursor-not-allowed'}`}><CheckCircle2 className="w-4 h-4" /> 上書き保存</button>
-              <button onClick={() => { setLoadTab('manage'); setShowLoadModal(true); }} className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Archive className="w-4 h-4" /> フォルダ管理{savedProposals.length > 0 && <span className="bg-white text-indigo-700 rounded-full px-1.5 text-[10px] ml-1">{savedProposals.length}</span>}</button>
-              <button onClick={handleCopyShareLink} title="共有リンクをクリップボードへ。送信先のPCで開くだけで自動取込" className="flex items-center gap-1 bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><ExternalLink className="w-3.5 h-3.5" /> 共有リンク</button>
-              <button onClick={handleEmailShare} title="メールで共有：mailtoでJSONデータを本文に貼り付け" className="flex items-center gap-1 bg-cyan-700 hover:bg-cyan-600 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><Upload className="w-3.5 h-3.5" /> メール共有</button>
-              <button onClick={() => setShowOfficeModal(true)} className="flex items-center gap-1 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><Building2 className="w-3.5 h-3.5" /> 営業所設定</button>
-              <button onClick={() => setShowGuideModal(true)} className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded text-xs font-bold transition border border-slate-600"><BookOpen className="w-3.5 h-3.5" /> 使い方</button>
-              <button onClick={handleLogout} className="flex items-center gap-1 bg-slate-600 hover:bg-slate-500 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><X className="w-3.5 h-3.5" /> ログアウト</button>
+              <button onClick={() => handlePrint('print')} className="flex items-center gap-1 bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded-md shadow text-sm font-bold transition"><Printer className="w-4 h-4" /> 印刷/PDF</button>
+              <span className="w-px h-6 bg-slate-600 mx-0.5" />
+              {/* === 保存ボタン群 === */}
+              <button onClick={() => {
+                if (currentProposalId) { if (!confirm('現在開いている見積をベースに『別名で複製保存』します。よろしいですか？\n（既存の見積はそのまま残ります）')) return; }
+                setCurrentProposalId(null);
+                // 見積名が空なら自動入力
+                if (!saveName.trim() && clientName) setSaveName(`${clientName}_${proposalDate || new Date().toISOString().slice(0,10)}`);
+                setLoadTab('save');
+                setShowLoadModal(true);
+              }} title={currentProposalId ? '新規保存：別名で複製保存（既存はそのまま）' : '新規保存：フォルダを選んで保存'} className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded-md shadow text-sm font-bold transition"><Save className="w-4 h-4" /> 新規保存</button>
+              {currentProposalId && (
+                <button onClick={handleOverwriteSave} title="上書き保存：開いている見積を上書き" className="flex items-center gap-1 px-3 py-2 rounded-md shadow text-sm font-bold transition bg-emerald-600 hover:bg-emerald-500 text-white"><CheckCircle2 className="w-4 h-4" /> 上書き保存</button>
+              )}
+              <button onClick={() => { setLoadTab('manage'); setShowLoadModal(true); }} className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded-md shadow text-sm font-bold transition"><Archive className="w-4 h-4" /> フォルダ管理{savedProposals.length > 0 && <span className="bg-white text-indigo-700 rounded-full px-1.5 text-[10px] ml-1">{savedProposals.length}</span>}</button>
+              <span className="w-px h-6 bg-slate-600 mx-0.5" />
+              {/* === 共有ドロップダウン === */}
+              <div className="relative">
+                <button onClick={() => { setShowShareMenu(!showShareMenu); setShowUtilMenu(false); }} className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded-md text-xs font-bold transition border border-slate-600">
+                  <ExternalLink className="w-3.5 h-3.5" /> 共有 <ChevronDown className="w-3 h-3" />
+                </button>
+                {showShareMenu && (
+                  <div className="absolute right-0 top-full mt-1 bg-white text-slate-800 rounded-lg shadow-2xl border border-slate-200 w-72 z-50 overflow-hidden">
+                    <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[10px] text-slate-500">
+                      <strong>※ 同じ営業所コード＋名前＋パスワードの自分の他PCには ☁ 自動同期されます。</strong><br/>
+                      下記は<strong>他人</strong>と共有する場合のみご利用ください。
+                    </div>
+                    <button onClick={() => { setShowShareMenu(false); handleCopyShareLink(); }} className="w-full text-left px-3 py-2.5 hover:bg-teal-50 border-b border-slate-100 flex items-start gap-2">
+                      <ExternalLink className="w-4 h-4 mt-0.5 text-teal-600 shrink-0" />
+                      <div className="text-xs"><div className="font-bold text-slate-800">🔗 共有リンクをコピー</div><div className="text-slate-500 mt-0.5">チャット・メールに貼って送信</div></div>
+                    </button>
+                    <button onClick={() => { setShowShareMenu(false); handleEmailShare(); }} className="w-full text-left px-3 py-2.5 hover:bg-cyan-50 border-b border-slate-100 flex items-start gap-2">
+                      <Upload className="w-4 h-4 mt-0.5 text-cyan-700 shrink-0" />
+                      <div className="text-xs"><div className="font-bold text-slate-800">✉ メールで送信</div><div className="text-slate-500 mt-0.5">メーラーが起動・本文に貼付済み</div></div>
+                    </button>
+                    <button onClick={() => { setShowShareMenu(false); setShowImportShareModal(true); }} className="w-full text-left px-3 py-2.5 hover:bg-indigo-50 flex items-start gap-2">
+                      <Download className="w-4 h-4 mt-0.5 text-indigo-600 shrink-0" />
+                      <div className="text-xs"><div className="font-bold text-slate-800">📥 共有データを取込</div><div className="text-slate-500 mt-0.5">受け取ったリンク/ファイルから取込</div></div>
+                    </button>
+                  </div>
+                )}
+              </div>
+              {/* === ユーティリティドロップダウン === */}
+              <div className="relative">
+                <button onClick={() => { setShowUtilMenu(!showUtilMenu); setShowShareMenu(false); }} className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 px-2.5 py-1.5 rounded-md text-xs font-bold transition border border-slate-600">
+                  <Settings className="w-3.5 h-3.5" /> その他 <ChevronDown className="w-3 h-3" />
+                </button>
+                {showUtilMenu && (
+                  <div className="absolute right-0 top-full mt-1 bg-white text-slate-800 rounded-lg shadow-2xl border border-slate-200 w-56 z-50 overflow-hidden">
+                    <button onClick={() => { setShowUtilMenu(false); setShowOfficeModal(true); }} className="w-full text-left px-3 py-2.5 hover:bg-amber-50 border-b border-slate-100 flex items-center gap-2 text-xs font-bold"><Building2 className="w-4 h-4 text-amber-600" /> 営業所設定</button>
+                    <button onClick={() => { setShowUtilMenu(false); setShowGuideModal(true); }} className="w-full text-left px-3 py-2.5 hover:bg-blue-50 border-b border-slate-100 flex items-center gap-2 text-xs font-bold"><BookOpen className="w-4 h-4 text-blue-600" /> 使い方ガイド</button>
+                    <button onClick={() => { setShowUtilMenu(false); handleLogout(); }} className="w-full text-left px-3 py-2.5 hover:bg-rose-50 flex items-center gap-2 text-xs font-bold text-rose-700"><X className="w-4 h-4" /> ログアウト</button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1333,6 +1390,35 @@ function App() {
 
       {notification && <div className="fixed bottom-4 right-4 bg-slate-900 text-white px-4 py-2.5 rounded-lg shadow-xl z-[100] text-sm font-bold no-print">{notification}</div>}
 
+      {showSyncPopover && (
+        <div className="fixed inset-0 z-[110] no-print" onClick={() => setShowSyncPopover(false)}>
+          <div className="absolute top-16 left-4 lg:left-1/2 lg:-translate-x-1/2 bg-white rounded-lg shadow-2xl border border-slate-200 p-4 max-w-md w-[92vw]" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-start mb-2">
+              <h3 className="font-bold text-slate-800 flex items-center gap-2"><span className={`inline-block w-2 h-2 rounded-full ${syncStatus === 'synced' ? 'bg-green-500' : syncStatus === 'connecting' ? 'bg-amber-500' : syncStatus === 'error' ? 'bg-rose-500' : 'bg-slate-400'}`}></span>クラウド同期ステータス</h3>
+              <button onClick={() => setShowSyncPopover(false)}><X className="w-4 h-4" /></button>
+            </div>
+            {syncStatus === 'synced' && (
+              <div className="text-sm space-y-1.5">
+                <p className="text-green-700 font-bold">✓ 同期は正常に動作しています。</p>
+                <p className="text-slate-600 text-xs">同じ <strong>営業所コード＋名前＋パスワード</strong> でログインした<strong>あなたの他のPC・スマホ</strong>に、見積・フォルダの変更が数秒で自動反映されます。</p>
+                {lastSyncedAt && <p className="text-slate-500 text-[11px] mt-2">最終同期: {new Date(lastSyncedAt).toLocaleString('ja-JP')}</p>}
+              </div>
+            )}
+            {syncStatus === 'connecting' && <p className="text-sm text-amber-700">Firebase に接続中です…数秒お待ちください。</p>}
+            {syncStatus === 'error' && (
+              <div className="text-sm space-y-1.5">
+                <p className="text-rose-700 font-bold">⚠ 同期エラーが発生しています。</p>
+                <p className="text-slate-600 text-xs">ネットワーク接続を確認してから、ページを再読込してください。データはこのPCに保存されているので失われません。</p>
+              </div>
+            )}
+            {syncStatus === 'idle' && <p className="text-sm text-slate-600">ログイン情報がありません。再ログインしてください。</p>}
+            <div className="mt-3 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
+              <strong>同期しない人と共有したい場合は</strong>、右上「共有 ▾」メニューを使ってください。
+            </div>
+          </div>
+        </div>
+      )}
+
       {showOfficeModal && (
         <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-center justify-center backdrop-blur-sm p-4">
           <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden">
@@ -1371,7 +1457,14 @@ function App() {
             {loadTab === 'save' ? (
               <>
                 <div className="flex-1 overflow-y-auto p-8 space-y-6">
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800"><strong className="text-base">💾 現在編集中の見積を保存します。</strong>　保存先フォルダを選び、名前を付けて保存してください。</div>
+                  {savedProposals.length === 0 ? (
+                    <div className="bg-amber-50 border-2 border-amber-300 rounded-lg p-4 text-sm text-amber-900">
+                      <strong className="text-base">🎉 はじめての保存ですね！</strong><br/>
+                      <span className="text-sm">フォルダは後からでも作れます。<strong>このまま下の「保存」ボタンを押すだけでOK</strong>です（フォルダなしに保存されます）。</span>
+                    </div>
+                  ) : (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800"><strong className="text-base">💾 現在編集中の見積を保存します。</strong>　保存先フォルダを選び、名前を付けて保存してください。</div>
+                  )}
                   <div>
                     <label className="block text-lg font-bold text-slate-800 mb-1.5">📁 保存先フォルダ（施設）を選択してください</label>
                     <div className="text-sm text-slate-500 mb-3">クリックで保存先を選択／ダブルクリックでフォルダ名を編集できます</div>
@@ -1481,13 +1574,24 @@ function App() {
                 </div>
               </div>
               <div className="flex-1 flex flex-col overflow-hidden">
-                <div className="px-4 py-2 border-b border-slate-200 bg-white text-xs font-bold text-slate-600 flex items-center justify-between">
-                  <span>📝 {selectedFolderId === '__all__' ? 'すべての見積' : selectedFolderId === null ? 'フォルダなしの見積' : `「${folders.find(f => f.id === selectedFolderId)?.name||''}」の見積`}</span>
-                  <span className="text-[10px] text-slate-400">{proposalsInFolder.length}件</span>
+                <div className="px-4 py-3 border-b border-slate-200 bg-white">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-bold text-slate-700">📝 {selectedFolderId === '__all__' ? 'すべての見積' : selectedFolderId === null ? 'フォルダなしの見積' : `「${folders.find(f => f.id === selectedFolderId)?.name||''}」の見積`}</span>
+                    <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold">{proposalsInFolder.filter(p => !proposalSearchQuery || (p.name||'').toLowerCase().includes(proposalSearchQuery.toLowerCase()) || (p.clientName||'').toLowerCase().includes(proposalSearchQuery.toLowerCase())).length}件</span>
+                  </div>
+                  <div className="relative">
+                    <input value={proposalSearchQuery} onChange={e => setProposalSearchQuery(e.target.value)} placeholder="🔍 名前・宛先で絞り込み (例: A病院 / 2026年4月)" className="w-full pl-3 pr-8 py-2 text-sm border border-slate-300 rounded-md outline-none focus:border-blue-500" />
+                    {proposalSearchQuery && <button onClick={() => setProposalSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"><X className="w-4 h-4" /></button>}
+                  </div>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                  {proposalsInFolder.length === 0 ? <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />このフォルダには見積がありません</div> :
-                    proposalsInFolder.map(p => (
+                  {(() => {
+                    const q = proposalSearchQuery.toLowerCase();
+                    const filtered = proposalsInFolder.filter(p => !q || (p.name||'').toLowerCase().includes(q) || (p.clientName||'').toLowerCase().includes(q));
+                    if (filtered.length === 0) {
+                      return <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />{q ? `「${proposalSearchQuery}」に一致する見積はありません` : 'このフォルダには見積がありません'}</div>;
+                    }
+                    return filtered.map(p => (
                       <div key={p.id} className="border border-slate-200 rounded p-3 hover:bg-slate-50 group">
                         {editingProposalId === p.id ? (
                           <div className="flex items-center gap-2 mb-2">
@@ -1517,8 +1621,8 @@ function App() {
                           <span className="text-[10px] text-slate-400">← 別の施設フォルダへ移動</span>
                         </div>
                       </div>
-                    ))
-                  }
+                    ));
+                  })()}
                 </div>
               </div>
             </div>
