@@ -608,6 +608,17 @@ function App() {
   const syncWriteTimerRef = useRef(null);
   const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'connecting' | 'synced' | 'error'
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const [syncError, setSyncError] = useState(null);
+  const [reconnectTick, setReconnectTick] = useState(0);
+  const remoteLoadedRef = useRef(false); // 初回remote取得が完了するまで write を抑制（レース回避）
+  const [inbox, setInbox] = useState([]); // 受信トレイ（他人から共有された見積）
+  const [showInboxModal, setShowInboxModal] = useState(false);
+  const [showDirectSendModal, setShowDirectSendModal] = useState(false);
+  const [sendRecipientOffice, setSendRecipientOffice] = useState('');
+  const [sendRecipientName, setSendRecipientName] = useState('');
+  const [sendMessage, setSendMessage] = useState('');
+  const [sendSelectedIds, setSendSelectedIds] = useState(new Set());
+  const inboxRefHandle = useRef(null);
   const [showSyncPopover, setShowSyncPopover] = useState(false);
   const [showShareMenu, setShowShareMenu] = useState(false);
   const [showUtilMenu, setShowUtilMenu] = useState(false);
@@ -621,20 +632,24 @@ function App() {
     return simpleHash(`${loginInfo.officeCode}__${loginInfo.userName}__${u.hash}`);
   };
 
-  // 接続：ログイン後 or ログアウト時に同期接続を貼り直す
+  // 接続：ログイン後 or ログアウト時 or 再接続要求で同期接続を貼り直す
   useEffect(() => {
+    remoteLoadedRef.current = false; // 接続のたびにリセット
     if (!loginInfo) {
       if (syncRefHandle.current) { try { dbOff(syncRefHandle.current); } catch {} syncRefHandle.current = null; }
-      setSyncStatus('idle');
+      setSyncStatus('idle'); setSyncError(null);
       return;
     }
-    if (!firebaseDB) { setSyncStatus('error'); return; }
+    if (!firebaseDB) { setSyncStatus('error'); setSyncError('Firebase 初期化に失敗（ネットワーク要確認）'); return; }
     const syncKey = getSyncKey();
-    if (!syncKey) { setSyncStatus('error'); return; }
-    setSyncStatus('connecting');
+    if (!syncKey) { setSyncStatus('error'); setSyncError('ユーザー情報の不整合：再ログインするか営業所設定をご確認ください'); return; }
+    setSyncStatus('connecting'); setSyncError(null);
+    // 初回読込が完了するまでローカル書込を抑制（リモート上書きレースを防止）
+    suppressNextWriteRef.current = true;
     const r = dbRef(firebaseDB, `users/${syncKey}/data`);
     syncRefHandle.current = r;
-    // 初回読込：リモート側にデータがあれば取り込む。なければローカル→リモートへ書き出す。
+    let unsubVal = null;
+    // 初回読込：リモート側にデータがあれば取り込む
     dbGet(r).then(snap => {
       const remote = snap.val();
       if (remote && (Array.isArray(remote.folders) || Array.isArray(remote.savedProposals))) {
@@ -643,25 +658,130 @@ function App() {
         if (Array.isArray(remote.savedProposals)) setSavedProposals(remote.savedProposals);
         lastSyncedJsonRef.current = JSON.stringify({ folders: remote.folders||[], savedProposals: remote.savedProposals||[] });
       }
-      setSyncStatus('synced'); setLastSyncedAt(Date.now());
-    }).catch(err => { console.warn('sync get error', err); setSyncStatus('error'); });
+      remoteLoadedRef.current = true;
+      setSyncStatus('synced'); setLastSyncedAt(Date.now()); setSyncError(null);
+    }).catch(err => {
+      console.warn('sync get error', err);
+      const m = err?.code || err?.message || String(err);
+      setSyncStatus('error'); setSyncError('初回読込エラー: ' + m);
+      remoteLoadedRef.current = true; // エラー時もwriteは解放（ローカル保存だけは続ける）
+    });
     // リアルタイム購読：他PCから更新が来たら自動で取り込む
-    onValue(r, (snap) => {
+    unsubVal = onValue(r, (snap) => {
       const remote = snap.val(); if (!remote) return;
       const remoteJson = JSON.stringify({ folders: remote.folders||[], savedProposals: remote.savedProposals||[] });
-      if (remoteJson === lastSyncedJsonRef.current) return; // 自分が書いた値の echo を無視
+      if (remoteJson === lastSyncedJsonRef.current) return;
       suppressNextWriteRef.current = true;
       if (Array.isArray(remote.folders)) setFolders(remote.folders);
       if (Array.isArray(remote.savedProposals)) setSavedProposals(remote.savedProposals);
       lastSyncedJsonRef.current = remoteJson;
-    }, (err) => { console.warn('sync onValue error', err); setSyncStatus('error'); });
-    return () => { try { dbOff(r); } catch {} };
+      setSyncStatus('synced'); setLastSyncedAt(Date.now()); setSyncError(null);
+    }, (err) => {
+      console.warn('sync onValue error', err);
+      const m = err?.code || err?.message || String(err);
+      setSyncStatus('error'); setSyncError('リアルタイム購読エラー: ' + m + ' (ローカル保存は継続)');
+    });
+    return () => {
+      if (typeof unsubVal === 'function') unsubVal();
+      else { try { dbOff(r); } catch {} }
+    };
+  }, [loginInfo, reconnectTick]);
+
+  // === 受信トレイ（インボックス）購読：相手から直接共有されたデータを受信 ===
+  // インボックスキーは officeCode + name のみから導出（パスワード不要）→ 送信者が知れる
+  const getMyInboxKey = () => loginInfo ? simpleHash(`${loginInfo.officeCode}__${loginInfo.userName}`) : null;
+  useEffect(() => {
+    if (!loginInfo || !firebaseDB) return;
+    const inboxKey = getMyInboxKey(); if (!inboxKey) return;
+    const r = dbRef(firebaseDB, `inbox/${inboxKey}`);
+    inboxRefHandle.current = r;
+    const unsub = onValue(r, (snap) => {
+      const v = snap.val() || {};
+      const items = Object.entries(v).map(([id, d]) => ({ shareId: id, ...d }));
+      // 30日経過したものは自動削除
+      const now = Date.now(), TTL = 30*24*3600*1000;
+      items.forEach(it => { if (it.sentAt && now - it.sentAt > TTL) { try { dbSet(dbRef(firebaseDB, `inbox/${inboxKey}/${it.shareId}`), null); } catch {} } });
+      const fresh = items.filter(it => !it.sentAt || now - it.sentAt <= TTL).sort((a,b) => (b.sentAt||0)-(a.sentAt||0));
+      setInbox(fresh);
+    }, (err) => { console.warn('inbox sub error', err); });
+    return () => { if (typeof unsub === 'function') unsub(); };
   }, [loginInfo]);
+
+  // === 直接送信：相手の営業所コード＋名前を指定して見積を送信 ===
+  const handleDirectSend = async () => {
+    if (!firebaseDB) { notify('Firebase未接続のため直接送信はできません'); return; }
+    const office = sendRecipientOffice.trim();
+    const name = normalizeName(sendRecipientName);
+    if (!office || !name) { notify('送信先の営業所と名前を入力してください'); return; }
+    if (sendSelectedIds.size === 0) { notify('送信する見積を1件以上選択してください'); return; }
+    const recipInboxKey = simpleHash(`${office}__${name}`);
+    // 選択された見積のみ送信
+    const selectedProps = savedProposals.filter(p => sendSelectedIds.has(p.id));
+    // フォルダ参照を解決して必要分だけ送る
+    const usedFolderIds = new Set(selectedProps.map(p => p.folderId).filter(Boolean));
+    const selectedFolders = folders.filter(f => usedFolderIds.has(f.id));
+    const shareId = genId('shr');
+    const sentAt = Date.now();
+    const payload = {
+      from: { officeCode: loginInfo.officeCode, name: loginInfo.userName },
+      sentAt,
+      message: sendMessage || '',
+      data: JSON.stringify({ folders: selectedFolders, savedProposals: selectedProps }),
+    };
+    try {
+      await dbSet(dbRef(firebaseDB, `inbox/${recipInboxKey}/${shareId}`), payload);
+      notify(`${name}さんへ ${selectedProps.length}件の見積を送信しました`);
+      setShowDirectSendModal(false);
+      setSendRecipientOffice(''); setSendRecipientName(''); setSendMessage(''); setSendSelectedIds(new Set());
+    } catch (err) {
+      console.warn('direct send error', err);
+      notify('送信失敗: ' + (err?.message || String(err)));
+    }
+  };
+
+  // === 受信トレイのアイテムを取り込む（マージ） ===
+  const acceptInboxItem = (item) => {
+    try {
+      const parsed = JSON.parse(item.data || '{}');
+      const incomingFolders = Array.isArray(parsed.folders) ? parsed.folders : [];
+      const incomingProps = Array.isArray(parsed.savedProposals) ? parsed.savedProposals : [];
+      // 受信専用の自動フォルダ
+      const autoFolderId = genId('fld');
+      const autoFolder = { id: autoFolderId, name: `📨 ${item.from?.name||'(送信者不明)'}さんから (${new Date(item.sentAt||Date.now()).toLocaleDateString('ja-JP')})`, createdAt: Date.now() };
+      // フォルダIDのリマップ
+      const idMap = {};
+      const remappedIncomingFolders = incomingFolders.map(f => { const nid = genId('fld'); idMap[f.id] = nid; return { ...f, id: nid }; });
+      const remappedProps = incomingProps.map(p => ({
+        ...p, id: genId('prop'),
+        folderId: p.folderId ? (idMap[p.folderId] || autoFolderId) : autoFolderId,
+        _importedFrom: `${item.from?.officeCode||''}/${item.from?.name||''}`,
+        _receivedAt: Date.now(),
+      }));
+      setFolders(prev => [autoFolder, ...remappedIncomingFolders, ...prev]);
+      setSavedProposals(prev => [...remappedProps, ...prev]);
+      // 取込後はインボックスから削除
+      const inboxKey = getMyInboxKey();
+      if (inboxKey && firebaseDB) {
+        try { dbSet(dbRef(firebaseDB, `inbox/${inboxKey}/${item.shareId}`), null); } catch {}
+      }
+      notify(`${remappedProps.length}件を取り込みました（フォルダ「${autoFolder.name}」へ）`);
+    } catch (err) {
+      notify('取込失敗: ' + (err?.message || String(err)));
+    }
+  };
+  const rejectInboxItem = (item) => {
+    if (!confirm(`${item.from?.name||'送信者不明'}さんからの共有を削除しますか？（後で復元できません）`)) return;
+    const inboxKey = getMyInboxKey();
+    if (inboxKey && firebaseDB) {
+      try { dbSet(dbRef(firebaseDB, `inbox/${inboxKey}/${item.shareId}`), null); } catch {}
+    }
+  };
 
   // 書込：folders / savedProposals が変わるたびに Firebase へ反映（500ms デバウンス）
   useEffect(() => {
     if (!loginInfo) return;
     if (suppressNextWriteRef.current) { suppressNextWriteRef.current = false; return; }
+    if (!remoteLoadedRef.current) return; // 初回読込完了まで書込せず（レース防止）
     if (!firebaseDB) return;
     const syncKey = getSyncKey(); if (!syncKey) return;
     if (syncWriteTimerRef.current) clearTimeout(syncWriteTimerRef.current);
@@ -1384,13 +1504,29 @@ function App() {
               <div className="relative">
                 <button onClick={() => { setShowShareMenu(!showShareMenu); setShowUtilMenu(false); }} className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded-md text-xs font-bold transition border border-slate-600">
                   <ExternalLink className="w-3.5 h-3.5" /> 共有 <ChevronDown className="w-3 h-3" />
+                  {inbox.length > 0 && <span className="bg-rose-500 text-white rounded-full px-1.5 text-[10px] font-bold animate-pulse ml-1">📨{inbox.length}</span>}
                 </button>
                 {showShareMenu && (
-                  <div className="absolute right-0 top-full mt-1 bg-white text-slate-800 rounded-lg shadow-2xl border border-slate-200 w-72 z-50 overflow-hidden">
+                  <div className="absolute right-0 top-full mt-1 bg-white text-slate-800 rounded-lg shadow-2xl border border-slate-200 w-80 z-50 overflow-hidden">
+                    {inbox.length > 0 && (
+                      <button onClick={() => { setShowShareMenu(false); setShowInboxModal(true); }} className="w-full text-left px-3 py-3 bg-rose-50 hover:bg-rose-100 border-b border-rose-200 flex items-start gap-2">
+                        <span className="text-2xl">📨</span>
+                        <div className="text-xs flex-1"><div className="font-bold text-rose-700">{inbox.length}件の受信があります</div><div className="text-rose-600 mt-0.5">クリックで内容を確認・取込</div></div>
+                      </button>
+                    )}
                     <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[10px] text-slate-500">
                       <strong>※ 同じ営業所コード＋名前＋パスワードの自分の他PCには ☁ 自動同期されます。</strong><br/>
                       下記は<strong>他人</strong>と共有する場合のみご利用ください。
                     </div>
+                    <button onClick={() => {
+                      setShowShareMenu(false);
+                      // 全保存見積を選択した状態で開く
+                      setSendSelectedIds(new Set(savedProposals.map(p => p.id)));
+                      setShowDirectSendModal(true);
+                    }} className="w-full text-left px-3 py-3 hover:bg-emerald-50 border-b border-slate-100 flex items-start gap-2">
+                      <span className="text-xl shrink-0">📨</span>
+                      <div className="text-xs flex-1"><div className="font-bold text-emerald-700">★ おすすめ：相手を選んで直接送信</div><div className="text-slate-500 mt-0.5">送信先の営業所・名前を指定するだけ。受信側は自動的にアプリ内に届きます</div></div>
+                    </button>
                     <button onClick={() => { setShowShareMenu(false); handleCopyShareLink(); }} className="w-full text-left px-3 py-2.5 hover:bg-teal-50 border-b border-slate-100 flex items-start gap-2">
                       <ExternalLink className="w-4 h-4 mt-0.5 text-teal-600 shrink-0" />
                       <div className="text-xs"><div className="font-bold text-slate-800">🔗 共有リンクをコピー</div><div className="text-slate-500 mt-0.5">チャット・メールに貼って送信</div></div>
@@ -1401,7 +1537,7 @@ function App() {
                     </button>
                     <button onClick={() => { setShowShareMenu(false); setShowImportShareModal(true); }} className="w-full text-left px-3 py-2.5 hover:bg-indigo-50 flex items-start gap-2">
                       <Download className="w-4 h-4 mt-0.5 text-indigo-600 shrink-0" />
-                      <div className="text-xs"><div className="font-bold text-slate-800">📥 共有データを取込</div><div className="text-slate-500 mt-0.5">受け取ったリンク/ファイルから取込</div></div>
+                      <div className="text-xs"><div className="font-bold text-slate-800">📥 共有リンク/ファイルから取込</div><div className="text-slate-500 mt-0.5">URLまたはJSONファイルから読込</div></div>
                     </button>
                   </div>
                 )}
@@ -1608,12 +1744,22 @@ function App() {
             {syncStatus === 'error' && (
               <div className="text-sm space-y-1.5">
                 <p className="text-rose-700 font-bold">⚠ 同期エラーが発生しています。</p>
-                <p className="text-slate-600 text-xs">ネットワーク接続を確認してから、ページを再読込してください。データはこのPCに保存されているので失われません。</p>
+                {syncError && <p className="text-rose-600 text-[11px] bg-rose-50 p-2 rounded border border-rose-200 break-all"><strong>原因：</strong>{syncError}</p>}
+                <p className="text-slate-600 text-xs"><strong>データは安全です</strong>：このPC内には保存されており、失われません。</p>
+                <ul className="text-[11px] text-slate-600 list-disc pl-5">
+                  <li>ネットワーク接続をご確認ください</li>
+                  <li>社内ファイアウォール経由の場合、Firebase ドメイン (firebaseio.com) への通信が遮断されている可能性</li>
+                  <li>パスワード変更や端末初期化後は、別端末からのデータ読込ができなくなることがあります</li>
+                </ul>
               </div>
             )}
             {syncStatus === 'idle' && <p className="text-sm text-slate-600">ログイン情報がありません。再ログインしてください。</p>}
+            <div className="mt-3 flex gap-2">
+              <button onClick={() => { setReconnectTick(t => t+1); notify('Firebase へ再接続中…'); }} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 rounded text-xs font-bold">🔄 再接続する</button>
+              <button onClick={() => location.reload(true)} className="flex-1 bg-slate-600 hover:bg-slate-700 text-white py-2 rounded text-xs font-bold">ページ再読込</button>
+            </div>
             <div className="mt-3 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
-              <strong>同期しない人と共有したい場合は</strong>、右上「共有 ▾」メニューを使ってください。
+              <strong>同期しない人と共有したい場合は</strong>、右上「共有 ▾」メニュー →「📨 相手を選んで送信」をご利用ください。
             </div>
           </div>
         </div>
@@ -1838,6 +1984,112 @@ function App() {
         </div>
         );
       })()}
+
+      {/* === 直接送信モーダル === */}
+      {showDirectSendModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[95] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="p-4 border-b bg-emerald-50 flex justify-between items-center">
+              <h3 className="text-base font-bold text-emerald-800 flex items-center gap-2">📨 相手を選んで直接送信</h3>
+              <button onClick={() => setShowDirectSendModal(false)}><X className="w-5 h-5" /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              <div className="bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-900">
+                <strong>👤 受信者は何もしなくてOK：</strong>送信先の方が同じアプリにログインすれば、自動的に「受信トレイ」に届きます。<strong>パスワードは不要</strong>です。
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">送信先の営業所コード <span className="text-rose-500">*</span></label>
+                <input value={sendRecipientOffice} onChange={e => setSendRecipientOffice(e.target.value)} placeholder="例: 行橋" className="w-full px-3 py-2.5 border-2 border-slate-300 rounded-md outline-none focus:border-emerald-500 text-base" />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">送信先の担当者名 <span className="text-rose-500">*</span></label>
+                <input value={sendRecipientName} onChange={e => setSendRecipientName(e.target.value)} placeholder="例: 山田 太郎" className="w-full px-3 py-2.5 border-2 border-slate-300 rounded-md outline-none focus:border-emerald-500 text-base" />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">メッセージ <span className="text-slate-400 font-normal">(任意)</span></label>
+                <textarea value={sendMessage} onChange={e => setSendMessage(e.target.value)} placeholder="例: 来月分の見積を送ります" rows={2} className="w-full px-3 py-2 border border-slate-300 rounded-md outline-none focus:border-emerald-500 text-sm resize-none" />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1.5">送信する見積を選択 <span className="text-slate-500 text-xs font-normal">({sendSelectedIds.size}件選択中)</span></label>
+                <div className="flex gap-2 mb-2">
+                  <button onClick={() => setSendSelectedIds(new Set(savedProposals.map(p => p.id)))} className="text-xs bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded">全選択</button>
+                  <button onClick={() => setSendSelectedIds(new Set())} className="text-xs bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded">全解除</button>
+                </div>
+                <div className="max-h-48 overflow-y-auto border border-slate-200 rounded bg-slate-50">
+                  {savedProposals.length === 0 ? <div className="text-center py-6 text-slate-400 text-sm">保存済みの見積がありません</div> :
+                    savedProposals.map(p => (
+                      <label key={p.id} className="flex items-start gap-2 px-3 py-2 border-b border-slate-100 hover:bg-white cursor-pointer">
+                        <input type="checkbox" checked={sendSelectedIds.has(p.id)} onChange={e => { const s = new Set(sendSelectedIds); if (e.target.checked) s.add(p.id); else s.delete(p.id); setSendSelectedIds(s); }} className="mt-1" />
+                        <div className="flex-1 min-w-0">
+                          <div className="font-bold text-sm text-slate-800 truncate">{p.name}</div>
+                          <div className="text-[11px] text-slate-500">{p.clientName && <span>{p.clientName}　</span>}{new Date(p.updatedAt).toLocaleDateString('ja-JP')}</div>
+                        </div>
+                      </label>
+                    ))
+                  }
+                </div>
+              </div>
+            </div>
+            <div className="p-4 border-t bg-slate-50 flex justify-end gap-2">
+              <button onClick={() => setShowDirectSendModal(false)} className="px-4 py-2 bg-slate-200 hover:bg-slate-300 font-bold rounded text-sm">キャンセル</button>
+              <button onClick={handleDirectSend} disabled={!sendRecipientOffice.trim() || !sendRecipientName.trim() || sendSelectedIds.size === 0} className={`px-5 py-2 font-bold rounded text-sm text-white flex items-center gap-1 ${sendRecipientOffice.trim() && sendRecipientName.trim() && sendSelectedIds.size > 0 ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-300 cursor-not-allowed'}`}>📨 送信する</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === 受信トレイモーダル === */}
+      {showInboxModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-[95] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="p-4 border-b bg-rose-50 flex justify-between items-center">
+              <h3 className="text-base font-bold text-rose-800 flex items-center gap-2">📨 受信トレイ {inbox.length > 0 && <span className="bg-rose-500 text-white rounded-full px-2 py-0.5 text-xs">{inbox.length}</span>}</h3>
+              <button onClick={() => setShowInboxModal(false)}><X className="w-5 h-5" /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50">
+              {inbox.length === 0 ? (
+                <div className="text-center py-12 text-slate-400">
+                  <div className="text-4xl mb-2">📭</div>
+                  <div className="font-bold">受信ボックスは空です</div>
+                  <div className="text-xs mt-1">他の担当者から見積が送られてくると、ここに表示されます</div>
+                </div>
+              ) : inbox.map(item => {
+                let preview = null;
+                try { preview = JSON.parse(item.data || '{}'); } catch {}
+                const propCount = preview?.savedProposals?.length || 0;
+                return (
+                  <div key={item.shareId} className="bg-white border-2 border-rose-200 rounded-lg p-4 shadow-sm">
+                    <div className="flex items-start justify-between mb-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-bold text-slate-800">📨 {item.from?.name||'(送信者不明)'} さんから</div>
+                        <div className="text-xs text-slate-500">{item.from?.officeCode||''} ／ {new Date(item.sentAt||Date.now()).toLocaleString('ja-JP')}</div>
+                      </div>
+                      <span className="text-xs bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-bold whitespace-nowrap">{propCount}件</span>
+                    </div>
+                    {item.message && <div className="bg-amber-50 border border-amber-200 rounded p-2 text-sm text-amber-900 mb-2">💬 {item.message}</div>}
+                    {preview?.savedProposals && preview.savedProposals.length > 0 && (
+                      <div className="text-xs text-slate-600 mb-2">
+                        <div className="font-bold mb-1">内容プレビュー：</div>
+                        <ul className="list-disc pl-5 space-y-0.5">
+                          {preview.savedProposals.slice(0,5).map(p => <li key={p.id}>{p.name}{p.clientName && ` (${p.clientName})`}</li>)}
+                          {preview.savedProposals.length > 5 && <li>...他 {preview.savedProposals.length - 5} 件</li>}
+                        </ul>
+                      </div>
+                    )}
+                    <div className="flex gap-2 mt-3">
+                      <button onClick={() => acceptInboxItem(item)} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm font-bold">✓ 取り込む（新規フォルダへ）</button>
+                      <button onClick={() => rejectInboxItem(item)} className="bg-slate-200 hover:bg-slate-300 text-slate-700 py-2 px-3 rounded text-sm font-bold">削除</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="p-3 border-t bg-white text-[11px] text-slate-500">
+              💡 取り込んだ見積は「📨送信者名さんから」という新規フォルダに自動分類されます。30日経過した受信は自動削除されます。
+            </div>
+          </div>
+        </div>
+      )}
 
       {showImportShareModal && (
         <div className="fixed inset-0 bg-slate-900/60 z-[90] flex items-center justify-center backdrop-blur-sm p-4">
