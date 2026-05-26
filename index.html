@@ -191,7 +191,13 @@ const genId = (prefix = 'id') =>
 const loadStorage = (key, fallback) => {
   try {
     const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    // 不正な null / undefined はフォールバック使用
+    if (parsed === null || parsed === undefined) return fallback;
+    // fallback が Array なのに parsed がオブジェクトの場合もフォールバック
+    if (Array.isArray(fallback) && !Array.isArray(parsed)) return fallback;
+    return parsed;
   } catch { return fallback; }
 };
 
@@ -548,12 +554,15 @@ function App() {
   };
 
   const processImportShare = (data) => {
-    if (data._type !== 'taiyo-share') { setImportError('共有データの形式が違います'); return; }
-    if (importCode.trim() && data.from.officeCode !== importCode.trim()) { setImportError(`共有元の営業所コード「${data.from.officeCode}」と一致しません`); return; }
-    if (importName.trim() && data.from.name !== normalizeName(importName)) { setImportError(`共有元の名前「${data.from.name}」と一致しません`); return; }
-    if (importPassword && simpleHash(importPassword) !== data.from.hash) { setImportError('共有元のパスワードが違います'); return; }
+    if (!data || typeof data !== 'object') { setImportError('共有データを読み込めません（ファイル形式が不正）'); return; }
+    if (data._type !== 'taiyo-share') { setImportError('共有データの形式が違います（_typeが taiyo-share ではありません）'); return; }
+    const from = data.from || {};
+    if (importCode.trim() && from.officeCode !== importCode.trim()) { setImportError(`共有元の営業所コード「${from.officeCode||'(不明)'}」と一致しません`); return; }
+    if (importName.trim() && from.name !== normalizeName(importName)) { setImportError(`共有元の名前「${from.name||'(不明)'}」と一致しません`); return; }
+    if (importPassword && simpleHash(importPassword) !== from.hash) { setImportError('共有元のパスワードが違います'); return; }
     const importedFolders = Array.isArray(data.folders) ? data.folders : [];
     const importedProposals = Array.isArray(data.savedProposals) ? data.savedProposals : [];
+    if (importedFolders.length === 0 && importedProposals.length === 0) { setImportError('共有データに見積もフォルダも含まれていません'); return; }
     const existingFolderNames = new Set(folders.map(f => f.name));
     const newFolders = importedFolders.filter(f => !existingFolderNames.has(f.name)).map(f => ({ ...f, id: genId('fld') }));
     const nameToNewId = {};
@@ -562,7 +571,7 @@ function App() {
       if (ex) nameToNewId[f.id] = ex.id;
       else { const nf = newFolders.find(x => x.name === f.name); if (nf) nameToNewId[f.id] = nf.id; }
     });
-    const remappedProposals = importedProposals.map(p => ({ ...p, id: genId('prop'), folderId: p.folderId ? (nameToNewId[p.folderId] || null) : null, _importedFrom: `${data.from.officeCode}/${data.from.name}` }));
+    const remappedProposals = importedProposals.map(p => ({ ...p, id: genId('prop'), folderId: p.folderId ? (nameToNewId[p.folderId] || null) : null, _importedFrom: `${from.officeCode||''}/${from.name||''}` }));
     setFolders(prev => [...newFolders, ...prev]);
     setSavedProposals(prev => [...remappedProposals, ...prev]);
     notify(`${remappedProposals.length}件の見積を取り込みました`);
@@ -769,8 +778,17 @@ function App() {
   const acceptInboxItem = (item) => {
     try {
       const parsed = JSON.parse(item.data || '{}');
+      if (!parsed || typeof parsed !== 'object') { notify('共有データが空または不正です'); return; }
       const incomingFolders = Array.isArray(parsed.folders) ? parsed.folders : [];
       const incomingProps = Array.isArray(parsed.savedProposals) ? parsed.savedProposals : [];
+      if (incomingProps.length === 0) {
+        if (!confirm('共有データに見積が1件も含まれていません。取り込みを中止しますか？\n（OKで中止／キャンセルでそのまま取込）')) {
+          // ユーザーがキャンセル＝そのまま取込続行
+        } else {
+          // OK=中止
+          return;
+        }
+      }
       // 受信専用の自動フォルダ
       const autoFolderId = genId('fld');
       const autoFolder = { id: autoFolderId, name: `📨 ${item.from?.name||'(送信者不明)'}さんから (${new Date(item.sentAt||Date.now()).toLocaleDateString('ja-JP')})`, createdAt: Date.now() };
@@ -1249,8 +1267,17 @@ function App() {
   const handleLoad = (p) => {
     setCurrentProposalId(p.id);
     setClientName(p.clientName||''); setClientName2(p.clientName2||''); setClientHonorific(p.clientHonorific||'御中');
-    setProposalTitle(p.proposalTitle||'御見積書'); setProposalDate(p.proposalDate||proposalDate);
-    setProposalDateText(p.proposalDateText||''); setProposalNumber(p.proposalNumber||'');
+    setProposalTitle(p.proposalTitle||'御見積書');
+    // 保存された日付があれば使用、なければ「今日」を新規に生成（過去ロードによる日付混乱を防止）
+    if (p.proposalDate) {
+      setProposalDate(p.proposalDate);
+      // dateText も同期。なければ日付から再生成
+      if (p.proposalDateText) setProposalDateText(p.proposalDateText);
+      else { const parts = p.proposalDate.split('-'); setProposalDateText(parts.length === 3 ? `${parts[0]}年${parseInt(parts[1],10)}月${parseInt(parts[2],10)}日` : ''); }
+    } else {
+      const d = new Date(); const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      setProposalDate(today); setProposalDateText(`${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`);
+    } setProposalNumber(p.proposalNumber||'');
     setValidityPeriod(p.validityPeriod||'お見積日より30日間'); setPaymentTerms(p.paymentTerms||'月末締め翌月末払い');
     setDeliveryInfo(p.deliveryInfo||'ご注文後、通常2〜3営業日'); setRemarks(p.remarks||'');
     setBottomRemarks(p.bottomRemarks||''); setTaxMode(p.taxMode||'exclusive');
@@ -1337,7 +1364,12 @@ function App() {
         cols += `<td class="price strong">¥${(item.price||0).toLocaleString()}</td>`;
         const factor = appMode === 'proposal' ? (Number(item.packSize)||0) : (Number(item.volume)||0);
         cols += `<td class="price">¥${(factor*(Number(item.price)||0)).toLocaleString()}</td>`;
-        if (appMode === 'proposal') cols += `<td class="unit-price">¥${item.unitPrice.toLocaleString('ja-JP',{minimumFractionDigits:1, maximumFractionDigits:1})}</td>`;
+        if (appMode === 'proposal') {
+          const up = Number(item.unitPrice || 0);
+          // 整数の場合は小数点なし、それ以外は1桁
+          const upStr = up % 1 === 0 ? up.toLocaleString('ja-JP') : up.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+          cols += `<td class="unit-price">¥${upStr}</td>`;
+        }
         return `<tr${trClass}>${cols}</tr>`;
       }).join('');
       let headers = `<th class="pname">品目</th>`;
@@ -1381,7 +1413,8 @@ function App() {
   #print-content-holder .stamps { display: flex; justify-content: flex-end; gap: 4mm; margin-top: 4px; padding-top: 4px; border-top: 1px solid #dbeafe; }
   #print-content-holder .stamp-box { text-align: center; }
   #print-content-holder .stamp-label { font-size: 7pt; color: #3b82f6; font-weight: 600; margin-bottom: 2px; }
-  #print-content-holder .stamp-square { width: 19mm; height: 19mm; border: 1px solid #93c5fd; background: #fff; }
+  #print-content-holder .stamp-square { width: 15mm; height: 15mm; border: 1px solid #93c5fd; background: #fff; }
+  #print-content-holder .stamp-box:last-child .stamp-square { width: 12mm; height: 12mm; }
   #print-content-holder .terms-small { margin: 6mm 0 0 0; max-width: 100mm; page-break-inside: avoid; }
   #print-content-holder .terms-table-sm { width: 100%; border-collapse: collapse; font-size: 7.5pt; border: 0.5px solid #bfdbfe; }
   #print-content-holder .terms-table-sm td { padding: 3px 6px; border-bottom: 0.5px solid #dbeafe; vertical-align: top; }
@@ -1448,7 +1481,7 @@ function App() {
         ${officeInfo.address ? `<div class="addr">${escapeHTML(officeInfo.address)}</div>` : ''}
         ${officeInfo.phone ? `<div class="addr">TEL ${escapeHTML(officeInfo.phone)}</div>` : ''}
         ${officeInfo.fax ? `<div class="addr">FAX ${escapeHTML(officeInfo.fax)}</div>` : ''}
-        <div class="addr invoice-no">登録番号　T1290001044462</div>
+        ${officeInfo.invoiceNumber ? `<div class="addr invoice-no">登録番号　${escapeHTML(officeInfo.invoiceNumber)}</div>` : '<div class="addr invoice-no">登録番号　T1290001044462</div>'}
         ${officeInfo.manager ? `<div class="staff"><span class="staff-label">所長</span><strong>${escapeHTML(normalizeName(officeInfo.manager))}</strong></div>` : ''}
         ${officeInfo.staffName ? `<div class="staff"><span class="staff-label">担当</span><strong>${escapeHTML(normalizeName(officeInfo.staffName))}</strong></div>` : ''}
       </div>
@@ -1845,7 +1878,7 @@ function App() {
                   {OFFICE_MASTER.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
                 </select>
               </div>
-              {[{k:'companyName',l:'会社名'},{k:'officeName',l:'営業所名'},{k:'postal',l:'郵便番号'},{k:'address',l:'住所'},{k:'phone',l:'電話番号'},{k:'fax',l:'FAX'},{k:'email',l:'Email'},{k:'manager',l:'所長名'},{k:'staffName',l:'担当者名'}].map(f => (
+              {[{k:'companyName',l:'会社名'},{k:'officeName',l:'営業所名'},{k:'postal',l:'郵便番号'},{k:'address',l:'住所'},{k:'phone',l:'電話番号'},{k:'fax',l:'FAX'},{k:'email',l:'Email'},{k:'invoiceNumber',l:'登録番号（インボイス制度・例：T1234567890123）'},{k:'manager',l:'所長名'},{k:'staffName',l:'担当者名'}].map(f => (
                 <div key={f.k}><label className="text-xs font-bold text-slate-600 block mb-1">{f.l}</label><input value={officeInfo[f.k]||''} onChange={e => setOfficeInfo({ ...officeInfo, [f.k]: e.target.value })} className="w-full p-2 border border-slate-300 rounded outline-none focus:border-blue-500" /></div>
               ))}
             </div>
