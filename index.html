@@ -161,10 +161,25 @@ const KNOWN_BOTTOM_TEXTS = [
 const CLEAN_TITLE_REGEX = /\s*[（(].*?[)）]/g;
 const ITEMS_PER_PAGE = 10;
 
+// 数値表示用フォーマッタ
+// バグ修正: 「200.」（末尾ピリオド）や「200.50」（末尾0）が消える問題を解消。
+// 入力途中の値を破壊せず、整数部のみカンマ区切り、小数点と小数部はそのまま保持する。
 const formatNumber = (v) => {
   if (v === null || v === undefined || v === '') return '';
-  const n = Number(v); if (!isFinite(n)) return '';
-  return n.toLocaleString('ja-JP');
+  const s = String(v).trim();
+  if (s === '' || s === '-') return s;
+  // 数字＋小数点パターンを抽出（先頭マイナス可、整数部・小数点・小数部を別キャプチャ）
+  const m = s.match(/^(-?)(\d*)(\.?)(\d*)$/);
+  if (!m) {
+    // 想定外フォーマット → Number化を試みる
+    const n = Number(s); if (!isFinite(n)) return '';
+    return n.toLocaleString('ja-JP');
+  }
+  const [, sign, intPart, dot, decPart] = m;
+  // 整数部が空（".5"のような入力）の場合
+  if (intPart === '' && dot === '') return '';
+  const intStr = intPart === '' ? '' : Number(intPart).toLocaleString('ja-JP');
+  return sign + intStr + dot + decPart;
 };
 const parseNumberInput = (raw) => {
   if (raw === null || raw === undefined) return '';
@@ -1190,7 +1205,7 @@ function App() {
                         </div>
                       </td>
                       {showCaseMode && <td className="px-2 py-2 text-right"><input type="text" value={inp.packSize === '' ? '' : formatNumber(inp.packSize)} onChange={e => handleInputChange(group.id, 'packSize', parseNumberInput(e.target.value))} className="item-table-input w-[80px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
-                      <td className="px-2 py-2 text-right"><input type="text" placeholder="数量" value={inp.volume} onChange={e => handleInputChange(group.id, 'volume', e.target.value)} className="item-table-input w-[90px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none font-bold" /></td>
+                      <td className="px-2 py-2 text-right"><input type="text" inputMode="decimal" placeholder="数量" value={inp.volume} onChange={e => handleInputChange(group.id, 'volume', parseNumberInput(e.target.value))} className="item-table-input w-[90px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none font-bold no-spin" /></td>
                       {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" placeholder="単価仕入" value={inp.cost === '' ? '' : formatNumber(inp.cost)} onChange={e => handleInputChange(group.id, 'cost', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
                       <td className="px-2 py-2 text-right"><input type="text" placeholder="単価" value={inp.price === '' ? '' : formatNumber(inp.price)} onChange={e => handleInputChange(group.id, 'price', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-slate-300 rounded px-2 py-1 text-right outline-none font-bold" /></td>
                       <td className="px-2 py-2 text-right font-bold text-slate-700">¥{((appMode === 'proposal' ? Number(inp.packSize)||0 : Number(inp.volume)||0) * (Number(inp.price)||0)).toLocaleString()}</td>
