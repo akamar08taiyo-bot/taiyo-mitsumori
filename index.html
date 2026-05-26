@@ -3,7 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="太陽シルバーサービス㈱ 見積書・提案書作成システム">
 <title>太陽シルバーサービス株式会社 — 見積書作成システム</title>
+<!-- リソースのプリコネクト（CDN との並列接続を高速化） -->
+<link rel="preconnect" href="https://esm.sh" crossorigin>
+<link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
+<link rel="preconnect" href="https://unpkg.com" crossorigin>
+<link rel="dns-prefetch" href="https://www.googleapis.com">
+<!-- importmap polyfill (古いブラウザの保険) -->
+<script async src="https://ga.jspm.io/npm:es-module-shims@1.10.0/dist/es-module-shims.js"></script>
+<!-- 必要 CDN: 並列読込 -->
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script type="importmap">
@@ -20,13 +29,59 @@
 </script>
 <style>
   body { margin:0; font-family: 'Hiragino Kaku Gothic ProN','Hiragino Sans','Yu Gothic',Meiryo,sans-serif; }
-  #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px; background:#f1f5f9; color:#334155; font-weight:bold; z-index:9999; }
+  #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px; background:#f1f5f9; color:#334155; font-weight:bold; z-index:9999; padding:20px; box-sizing:border-box; }
   #loading .sp { width:42px; height:42px; border:4px solid #cbd5e1; border-top-color:#1e40af; border-radius:50%; animation:sp 0.9s linear infinite; }
+  #loading .err { display:none; max-width:600px; width:100%; background:#fee2e2; border:2px solid #ef4444; color:#991b1b; padding:16px; border-radius:8px; margin-top:12px; font-weight:normal; font-size:13px; word-break:break-all; }
+  #loading .err.show { display:block; }
+  #loading .reload-btn { background:#1e40af; color:#fff; border:0; padding:10px 20px; border-radius:6px; cursor:pointer; margin-top:8px; font-weight:bold; font-size:14px; }
+  #loading .reload-btn:hover { background:#1e3a8a; }
   @keyframes sp { to { transform:rotate(360deg); } }
 </style>
+<script>
+  // === 早期エラー検出: 何かが失敗したら見える形で表示 ===
+  window.__loadStart = Date.now();
+  window.__appErrors = [];
+  window.__showLoadError = function(title, detail) {
+    var el = document.getElementById('loading-err');
+    if (!el) return;
+    el.classList.add('show');
+    el.innerHTML = '<strong>⚠ ' + title + '</strong><br/><span style="font-size:12px;">' + (detail||'') + '</span>' +
+      '<br/><br/><strong>解決方法：</strong><br/>' +
+      '1. ページを<strong>強制リロード</strong>（Ctrl+F5 / Cmd+Shift+R）<br/>' +
+      '2. それでも開かない場合は別のブラウザ（Chrome / Edge 推奨）でお試しください<br/>' +
+      '3. 社内ネットワークの場合、esm.sh / unpkg.com / cdn.tailwindcss.com への接続が遮断されていないかご確認ください<br/>' +
+      '<button class="reload-btn" onclick="location.reload(true)">🔄 再読込</button>';
+  };
+  window.addEventListener('error', function(e) {
+    var msg = (e.error && e.error.message) || e.message || String(e);
+    window.__appErrors.push({type:'error', msg:msg, src:e.filename, line:e.lineno});
+    window.__showLoadError('スクリプトエラーが発生しました', msg + (e.filename?' ('+e.filename+':'+e.lineno+')':''));
+  }, true);
+  window.addEventListener('unhandledrejection', function(e) {
+    var msg = (e.reason && e.reason.message) || String(e.reason);
+    window.__appErrors.push({type:'promise', msg:msg});
+    window.__showLoadError('読込中に問題が発生しました', msg);
+  });
+  // 30秒経っても起動しなければエラー表示
+  setTimeout(function() {
+    var root = document.getElementById('root');
+    if (!root || !root.firstChild) {
+      window.__showLoadError('読込に時間がかかっています',
+        '30秒経過してもアプリが起動しませんでした。エラーは記録されていない可能性があります。<br/>' +
+        '経過: ' + Math.round((Date.now()-window.__loadStart)/1000) + '秒。<br/>' +
+        'Babel:' + (typeof Babel !== 'undefined' ? 'OK' : 'NG') +
+        ' / Tailwind:' + (document.querySelector('script[src*="tailwindcss"]') ? 'タグあり' : 'タグなし'));
+    }
+  }, 30000);
+</script>
 </head>
 <body>
-<div id="loading"><div class="sp"></div><div>見積書作成システムを読み込み中…</div><div style="font-size:12px;color:#64748b;">初回読込は10〜20秒かかります</div></div>
+<div id="loading">
+  <div class="sp"></div>
+  <div>見積書作成システムを読み込み中…</div>
+  <div style="font-size:12px;color:#64748b;">初回は10〜20秒、2回目以降は数秒です</div>
+  <div id="loading-err" class="err"></div>
+</div>
 <div id="root"></div>
 <script type="text/babel" data-type="module" data-presets="react">
 import React, { useState, useMemo, useRef, useEffect } from 'react';
@@ -1921,8 +1976,27 @@ function App() {
   );
 }
 
-document.getElementById('loading').style.display = 'none';
-createRoot(document.getElementById('root')).render(<App />);
+// === 起動：失敗してもユーザーにエラーが見える形で表示 ===
+try {
+  const __loadingEl = document.getElementById('loading');
+  const __rootEl = document.getElementById('root');
+  if (!__rootEl) throw new Error('#root が見つかりません');
+  const __r = createRoot(__rootEl);
+  __r.render(<App />);
+  // 描画が始まったら少しだけ待ってからローディングを消す（早すぎる消去でちらつき回避）
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (__loadingEl) __loadingEl.style.display = 'none';
+    console.log('[App] mounted in', Date.now()-window.__loadStart, 'ms');
+  }));
+} catch (err) {
+  console.error('[App] 起動エラー:', err);
+  if (typeof window.__showLoadError === 'function') {
+    window.__showLoadError('アプリの起動に失敗しました', (err && err.message || String(err)) + (err && err.stack ? '\n\n' + err.stack.split('\n').slice(0,5).join('\n') : ''));
+  } else {
+    const el = document.getElementById('loading');
+    if (el) el.innerHTML = '<div style="max-width:600px;color:#b91c1c;background:white;padding:20px;border-radius:8px;font-size:13px;white-space:pre-wrap;"><b>起動エラー</b><br/>' + (err && err.message || err) + '<br/><br/><button onclick="location.reload(true)" style="padding:8px 16px;background:#1e40af;color:#fff;border:0;border-radius:4px;cursor:pointer;">再読込</button></div>';
+  }
+}
 </script>
 </body>
 </html>
