@@ -12,7 +12,9 @@
     "react": "https://esm.sh/react@18.3.1",
     "react-dom": "https://esm.sh/react-dom@18.3.1",
     "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
-    "lucide-react": "https://esm.sh/lucide-react@0.469.0?external=react"
+    "lucide-react": "https://esm.sh/lucide-react@0.469.0?external=react",
+    "firebase/app": "https://esm.sh/firebase@10.14.0/app",
+    "firebase/database": "https://esm.sh/firebase@10.14.0/database"
   }
 }
 </script>
@@ -29,6 +31,23 @@
 <script type="text/babel" data-type="module" data-presets="react">
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
+import { initializeApp } from 'firebase/app';
+import { getDatabase, ref as dbRef, onValue, set as dbSet, get as dbGet, off as dbOff } from 'firebase/database';
+
+// === Firebase 初期化 ===
+// プロジェクト: taiyo-mitsumori-03724 (永久無料 Spark プラン)
+const firebaseConfig = {
+  apiKey: "AIzaSyDK_GUIfrs_8qHiGjZavcb9EgD1DKjYQAY",
+  authDomain: "taiyo-mitsumori-03724.firebaseapp.com",
+  databaseURL: "https://taiyo-mitsumori-03724-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "taiyo-mitsumori-03724",
+  storageBucket: "taiyo-mitsumori-03724.firebasestorage.app",
+  messagingSenderId: "838108820514",
+  appId: "1:838108820514:web:8435818e15053c2b2f867b"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const firebaseDB = getDatabase(firebaseApp);
+
 import {
   Trash2, TrendingDown, Plus, Calculator, FileText, BarChart3,
   X as MultiplyIcon, PackagePlus, Percent, LayoutTemplate, ArrowUpDown,
@@ -486,6 +505,76 @@ function App() {
   useEffect(() => { saveStorage(STORAGE_KEYS.FAVORITES, favorites); }, [favorites]);
   useEffect(() => { saveStorage(STORAGE_KEYS.PROPOSALS, savedProposals); }, [savedProposals]);
   useEffect(() => { saveStorage(STORAGE_KEYS.FOLDERS, folders); }, [folders]);
+
+  // === Firebase クロスデバイス同期 ===
+  // 営業所コード＋名前＋パスワードハッシュから一意の同期キーを導出。
+  // 同じ認証情報を別PCで入力すれば同じキー → 同じデータにアクセス可能。
+  const syncRefHandle = useRef(null);
+  const suppressNextWriteRef = useRef(false);
+  const lastSyncedJsonRef = useRef('');
+  const syncWriteTimerRef = useRef(null);
+  const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'connecting' | 'synced' | 'error'
+
+  const getSyncKey = () => {
+    if (!loginInfo) return null;
+    const users = loadStorage(STORAGE_KEYS.USERS, []);
+    const u = users.find(x => x.key === `${loginInfo.officeCode}__${loginInfo.userName}`);
+    if (!u) return null;
+    return simpleHash(`${loginInfo.officeCode}__${loginInfo.userName}__${u.hash}`);
+  };
+
+  // 接続：ログイン後 or ログアウト時に同期接続を貼り直す
+  useEffect(() => {
+    if (!loginInfo) {
+      if (syncRefHandle.current) { try { dbOff(syncRefHandle.current); } catch {} syncRefHandle.current = null; }
+      setSyncStatus('idle');
+      return;
+    }
+    const syncKey = getSyncKey();
+    if (!syncKey) { setSyncStatus('error'); return; }
+    setSyncStatus('connecting');
+    const r = dbRef(firebaseDB, `users/${syncKey}/data`);
+    syncRefHandle.current = r;
+    // 初回読込：リモート側にデータがあれば取り込む。なければローカル→リモートへ書き出す。
+    dbGet(r).then(snap => {
+      const remote = snap.val();
+      if (remote && (Array.isArray(remote.folders) || Array.isArray(remote.savedProposals))) {
+        suppressNextWriteRef.current = true;
+        if (Array.isArray(remote.folders)) setFolders(remote.folders);
+        if (Array.isArray(remote.savedProposals)) setSavedProposals(remote.savedProposals);
+        lastSyncedJsonRef.current = JSON.stringify({ folders: remote.folders||[], savedProposals: remote.savedProposals||[] });
+      }
+      setSyncStatus('synced');
+    }).catch(err => { console.warn('sync get error', err); setSyncStatus('error'); });
+    // リアルタイム購読：他PCから更新が来たら自動で取り込む
+    onValue(r, (snap) => {
+      const remote = snap.val(); if (!remote) return;
+      const remoteJson = JSON.stringify({ folders: remote.folders||[], savedProposals: remote.savedProposals||[] });
+      if (remoteJson === lastSyncedJsonRef.current) return; // 自分が書いた値の echo を無視
+      suppressNextWriteRef.current = true;
+      if (Array.isArray(remote.folders)) setFolders(remote.folders);
+      if (Array.isArray(remote.savedProposals)) setSavedProposals(remote.savedProposals);
+      lastSyncedJsonRef.current = remoteJson;
+    }, (err) => { console.warn('sync onValue error', err); setSyncStatus('error'); });
+    return () => { try { dbOff(r); } catch {} };
+  }, [loginInfo]);
+
+  // 書込：folders / savedProposals が変わるたびに Firebase へ反映（500ms デバウンス）
+  useEffect(() => {
+    if (!loginInfo) return;
+    if (suppressNextWriteRef.current) { suppressNextWriteRef.current = false; return; }
+    const syncKey = getSyncKey(); if (!syncKey) return;
+    if (syncWriteTimerRef.current) clearTimeout(syncWriteTimerRef.current);
+    syncWriteTimerRef.current = setTimeout(() => {
+      const payload = { folders, savedProposals, _updatedAt: Date.now(), _device: loginInfo.officeCode + '/' + loginInfo.userName };
+      const json = JSON.stringify({ folders, savedProposals });
+      if (json === lastSyncedJsonRef.current) return;
+      lastSyncedJsonRef.current = json;
+      const r = dbRef(firebaseDB, `users/${syncKey}/data`);
+      dbSet(r, payload).then(() => { setSyncStatus('synced'); }).catch(err => { console.warn('sync write error', err); setSyncStatus('error'); });
+    }, 500);
+    return () => { if (syncWriteTimerRef.current) clearTimeout(syncWriteTimerRef.current); };
+  }, [folders, savedProposals, loginInfo]);
 
   const addFolder = (name) => {
     const n = (name||'').trim(); if (!n) return null;
@@ -1058,7 +1147,11 @@ function App() {
               <FileText className="w-7 h-7 text-amber-400" />
               <div>
                 <h1 className="font-bold text-lg leading-tight">見積書・提案書作成システム</h1>
-                <span className="text-xs text-slate-300">{loginInfo.office}　/　担当: <strong className="text-amber-200">{loginInfo.userName}</strong></span>
+                <span className="text-xs text-slate-300">{loginInfo.office}　/　担当: <strong className="text-amber-200">{loginInfo.userName}</strong>
+                  <span className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-bold ${syncStatus === 'synced' ? 'bg-green-600 text-white' : syncStatus === 'connecting' ? 'bg-amber-500 text-white animate-pulse' : syncStatus === 'error' ? 'bg-rose-600 text-white' : 'bg-slate-600 text-slate-300'}`} title="クラウド同期ステータス">
+                    {syncStatus === 'synced' ? '☁ 同期OK' : syncStatus === 'connecting' ? '⏳ 接続中' : syncStatus === 'error' ? '⚠ 同期エラー' : '○ 未接続'}
+                  </span>
+                </span>
               </div>
             </div>
             <div className="flex flex-wrap gap-2 justify-center lg:justify-end items-center">
