@@ -176,6 +176,28 @@ const normalizeName = (raw) => {
   if (!raw) return '';
   return String(raw).trim().replace(/[\s　]+/g, ' ');
 };
+// 単位から印刷時の列ヘッダ名を導出（ml→容量、枚→枚数、m/cm→長さ、g/kg→重量 など）
+const getUnitHeaderLabel = (unit) => {
+  if (!unit) return '数量';
+  const u = String(unit).toLowerCase();
+  if (u === 'ml' || u === 'l') return '容量';
+  if (u === 'g' || u === 'kg') return '重量';
+  if (u === 'm' || u === 'cm') return '長さ';
+  if (unit === '枚') return '枚数';
+  if (unit === '個') return '個数';
+  if (unit === '本') return '本数';
+  if (unit === '組') return 'セット数';
+  if (unit === '箱') return 'ケース数';
+  if (unit === '台') return '台数';
+  return '数量';
+};
+// 小数1桁表示
+const formatDecimal1 = (v) => {
+  if (v === null || v === undefined || v === '') return '';
+  const n = Number(v);
+  if (!isFinite(n)) return '';
+  return n.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+};
 
 function LoginScreen({ onLogin }) {
   const [officeCode, setOfficeCode] = useState('');
@@ -431,6 +453,7 @@ function App() {
   const [editingProposalName, setEditingProposalName] = useState('');
   const [favorites, setFavorites] = useState(() => loadStorage(STORAGE_KEYS.FAVORITES, []));
   const [showSaveModal, setShowSaveModal] = useState(false);
+  const [currentProposalId, setCurrentProposalId] = useState(null); // 開いている見積のID（上書き保存用）
   const [showLoadModal, setShowLoadModal] = useState(false);
   const [showFavoritesModal, setShowFavoritesModal] = useState(false);
   const [targetGroupIdForFav, setTargetGroupIdForFav] = useState(null);
@@ -629,6 +652,16 @@ function App() {
       return { ...prev, [gid]: calculatePrices(u, field) };
     });
   };
+  // 指定位置に空行を挿入（atIndex=0なら先頭、items.lengthなら末尾）
+  const insertItemAt = (gid, atIndex) => {
+    setGroups(prev => prev.map(g => {
+      if (g.id !== gid) return g;
+      const items = [...g.items];
+      const blank = { id: genId('i'), name: '', memo: '', volume: '', packSize: 1, price: '', casePrice: '', cost: '', caseCost: '', targetMargin: '', isHighlighted: false };
+      items.splice(Math.max(0, Math.min(atIndex, items.length)), 0, blank);
+      return { ...g, items };
+    }));
+  };
   const handleAddItem = (gid) => {
     const inp = newItems[gid]; if (!inp) return;
     setGroups(prev => prev.map(g => {
@@ -676,9 +709,52 @@ function App() {
     if (folderId === '__new__') folderId = addFolder(newFolderInputName);
     const np = { id: genId('prop'), name: saveName, folderId: folderId || null, clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal, groups, attachments, updatedAt: Date.now() };
     setSavedProposals(prev => [np, ...prev]);
-    setShowSaveModal(false); setSaveName(''); setSaveFolderId(null); setNewFolderInputName(''); notify('保存しました');
+    setCurrentProposalId(np.id);
+    setShowSaveModal(false); setSaveName(''); setSaveFolderId(null); setNewFolderInputName(''); notify('新規保存しました');
+  };
+  // 上書き保存：現在開いている見積のIDと一致するものを更新
+  const handleOverwriteSave = () => {
+    if (!currentProposalId) { notify('上書き対象がありません。「新規保存」をご利用ください。'); return; }
+    setSavedProposals(prev => prev.map(p => p.id === currentProposalId ? {
+      ...p,
+      clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber,
+      validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal,
+      groups, attachments, updatedAt: Date.now(),
+    } : p));
+    notify('上書き保存しました');
+  };
+  // メール送信で見積データを共有（mailtoスキーム）
+  const handleEmailShare = () => {
+    const payload = { _type: 'taiyo-share', version: 1, from: { officeCode: loginInfo?.officeCode || '', name: loginInfo?.userName || '', hash: (loadStorage(STORAGE_KEYS.USERS, []).find(u => u.key === `${loginInfo?.officeCode}__${loginInfo?.userName}`)?.hash) || '' }, exportedAt: Date.now(), folders, savedProposals };
+    const json = JSON.stringify(payload);
+    const dataUrl = 'data:application/json;base64,' + btoa(unescape(encodeURIComponent(json)));
+    const body = [
+      '太陽シルバーサービス 見積書作成システムからの共有データです。',
+      '',
+      `送信元: ${loginInfo?.office||''} / ${loginInfo?.userName||''}`,
+      `件数: フォルダ ${folders.length}件, 見積 ${savedProposals.length}件`,
+      '',
+      '取り込み手順:',
+      '1) 以下のJSONテキストを「共有見積.json」というファイル名で保存',
+      '2) 受信者のアプリで「保存BOX」→「共有見積を取込」を開く',
+      '3) 共有元の営業所コード／名前／パスワードを入力（空欄なら検証スキップ）',
+      '4) 保存したJSONファイルを選択',
+      '',
+      '----- JSONデータ（ここから） -----',
+      json,
+      '----- JSONデータ（ここまで） -----',
+    ].join('\n');
+    const subject = encodeURIComponent('【太陽見積】共有データ ' + new Date().toLocaleDateString('ja-JP'));
+    const mail = `mailto:?subject=${subject}&body=${encodeURIComponent(body)}`;
+    try {
+      window.location.href = mail;
+      notify('メーラーを起動しました');
+    } catch {
+      notify('メーラーを起動できませんでした。代わりにJSONダウンロードをご利用ください。');
+    }
   };
   const handleLoad = (p) => {
+    setCurrentProposalId(p.id);
     setClientName(p.clientName||''); setClientName2(p.clientName2||''); setClientHonorific(p.clientHonorific||'御中');
     setProposalTitle(p.proposalTitle||'御見積書'); setProposalDate(p.proposalDate||proposalDate);
     setProposalDateText(p.proposalDateText||''); setProposalNumber(p.proposalNumber||'');
@@ -750,7 +826,7 @@ function App() {
         return `<tr${trClass}>${cols}</tr>`;
       }).join('');
       let headers = `<th class="pname">品目</th>`;
-      if (appMode === 'proposal') { headers += `<th class="num">容量・枚数・長さなど</th>`; if (showCaseMode) headers += `<th class="num">ケース入数</th>`; }
+      if (appMode === 'proposal') { headers += `<th class="num">${escapeHTML(getUnitHeaderLabel(group.unit))}</th>`; if (showCaseMode) headers += `<th class="num">ケース入数</th>`; }
       else headers += `<th class="num">数量</th>`;
       headers += `<th class="price">単価</th><th class="price">金額</th>`;
       if (appMode === 'proposal') headers += `<th class="unit-price">${baseLabel}単価</th>`;
@@ -900,7 +976,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 font-sans text-slate-800 text-sm">
-      <style>{`@page { size: A4; margin: 12mm 10mm; } .item-table-input { height: 40px !important; box-sizing: border-box !important; line-height: 1.2 !important; } @media print { .no-print { display: none !important; } }`}</style>
+      <style>{`@page { size: A4; margin: 12mm 10mm; } .item-table-input { height: 40px !important; box-sizing: border-box !important; line-height: 1.2 !important; } input.no-spin::-webkit-outer-spin-button, input.no-spin::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; } input.no-spin { -moz-appearance: textfield; } @media print { .no-print { display: none !important; } }`}</style>
       <header className="no-print bg-gradient-to-r from-slate-800 to-slate-900 text-white shadow-lg sticky top-0 z-50">
         <div className="max-w-[1400px] mx-auto px-4 py-3">
           <div className="flex flex-col lg:flex-row justify-between items-center gap-3">
@@ -916,8 +992,10 @@ function App() {
                 {isPreviewMode ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />} プレビュー
               </button>
               <button onClick={() => handlePrint('print')} className="flex items-center gap-1 bg-red-600 hover:bg-red-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Printer className="w-4 h-4" /> 印刷/PDF</button>
-              <button onClick={() => { setLoadTab('save'); setShowLoadModal(true); }} className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Save className="w-4 h-4" /> 保存</button>
+              <button onClick={() => { setCurrentProposalId(null); setLoadTab('save'); setShowLoadModal(true); }} title="新規保存：新しいフォルダを選んで別名で保存" className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Save className="w-4 h-4" /> 新規保存</button>
+              <button onClick={handleOverwriteSave} disabled={!currentProposalId} title={currentProposalId ? '上書き保存：開いている見積を上書き' : '上書き対象なし。先に保存済み見積を開いてください'} className={`flex items-center gap-1 px-3 py-2 rounded shadow text-sm font-bold transition ${currentProposalId ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-300 text-slate-500 cursor-not-allowed'}`}><CheckCircle2 className="w-4 h-4" /> 上書き保存</button>
               <button onClick={() => { setLoadTab('manage'); setShowLoadModal(true); }} className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded shadow text-sm font-bold transition"><Archive className="w-4 h-4" /> フォルダ管理{savedProposals.length > 0 && <span className="bg-white text-indigo-700 rounded-full px-1.5 text-[10px] ml-1">{savedProposals.length}</span>}</button>
+              <button onClick={handleEmailShare} title="メールで共有：mailtoでJSONデータを本文に貼り付け" className="flex items-center gap-1 bg-teal-600 hover:bg-teal-500 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><Upload className="w-3.5 h-3.5" /> メール共有</button>
               <button onClick={() => setShowOfficeModal(true)} className="flex items-center gap-1 bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><Building2 className="w-3.5 h-3.5" /> 営業所設定</button>
               <button onClick={() => setShowGuideModal(true)} className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded text-xs font-bold transition border border-slate-600"><BookOpen className="w-3.5 h-3.5" /> 使い方</button>
               <button onClick={handleLogout} className="flex items-center gap-1 bg-slate-600 hover:bg-slate-500 text-white px-3 py-1.5 rounded shadow text-xs font-bold transition"><X className="w-3.5 h-3.5" /> ログアウト</button>
@@ -997,7 +1075,7 @@ function App() {
                     <tr>
                       <th className="px-3 py-2 text-left font-bold min-w-[280px]">品目</th>
                       {showCaseMode && <th className="px-2 py-2 text-right font-bold w-[90px]">ケース入数</th>}
-                      <th className="px-2 py-2 text-right font-bold w-[110px]">{appMode === 'proposal' ? '容量・枚数等' : '数量'}</th>
+                      <th className="px-2 py-2 text-right font-bold w-[110px]">{appMode === 'proposal' ? getUnitHeaderLabel(group.unit) : '数量'}</th>
                       {showCost && <th className="px-2 py-2 text-right font-semibold text-orange-600 bg-orange-50 w-[95px]">単価仕入</th>}
                       <th className="px-2 py-2 text-right font-bold w-[100px]">単価</th>
                       <th className="px-2 py-2 text-right font-bold w-[100px]">金額</th>
@@ -1016,14 +1094,26 @@ function App() {
                               <button onClick={() => updateItem(group.id, item.id, 'isHighlighted', !item.isHighlighted)} className={`p-1.5 rounded ${item.isHighlighted ? 'bg-yellow-400 text-white' : 'bg-slate-100 text-slate-400'}`}><HighlighterIcon className="w-4 h-4" /></button>
                             </div>
                           </td>
-                          {showCaseMode && <td className="px-2 py-2 text-right"><input type="text" value={formatNumber(item.packSize)} onChange={e => updateItem(group.id, item.id, 'packSize', parseNumberInput(e.target.value))} className="item-table-input w-[80px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
-                          <td className="px-2 py-2 text-right"><input type="text" value={item.volume} onChange={e => updateItem(group.id, item.id, 'volume', e.target.value)} className="item-table-input w-[90px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none font-bold" /></td>
-                          {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" value={item.cost === 0 || item.cost === '' ? '' : formatNumber(item.cost)} onChange={e => updateItem(group.id, item.id, 'cost', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none" /></td>}
-                          <td className="px-2 py-2 text-right"><input type="text" value={item.price === 0 || item.price === '' ? '' : formatNumber(item.price)} onChange={e => updateItem(group.id, item.id, 'price', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-slate-300 rounded px-2 py-1 text-right outline-none font-bold" /></td>
-                          <td className="px-2 py-2 text-right font-bold text-slate-800">¥{(factor*(Number(item.price)||0)).toLocaleString()}</td>
-                          {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" value={item.targetMargin} onChange={e => updateItem(group.id, item.id, 'targetMargin', e.target.value)} className="item-table-input w-[80px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none" placeholder={String(item.margin||0)} /></td>}
+                          {showCaseMode && <td className="px-2 py-2 text-right"><input type="text" inputMode="decimal" value={formatNumber(item.packSize)} onChange={e => updateItem(group.id, item.id, 'packSize', parseNumberInput(e.target.value))} className="item-table-input w-[80px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none no-spin" /></td>}
+                          <td className="px-2 py-2 text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <input type="text" inputMode="decimal" value={item.volume} onChange={e => updateItem(group.id, item.id, 'volume', parseNumberInput(e.target.value))} className="item-table-input w-[78px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none font-bold no-spin" />
+                              {appMode === 'proposal' && <input type="text" value={item.unitOverride ?? group.unit ?? ''} onChange={e => updateItem(group.id, item.id, 'unitOverride', e.target.value)} placeholder="単位" title="単位を上書き(例：ml/枚/m)" className="item-table-input w-[36px] bg-slate-50 border border-slate-200 rounded px-1 py-1 text-center outline-none text-[11px] text-slate-600" />}
+                            </div>
+                          </td>
+                          {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" inputMode="decimal" value={item.cost === 0 || item.cost === '' ? '' : formatNumber(item.cost)} onChange={e => updateItem(group.id, item.id, 'cost', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none no-spin" /></td>}
+                          <td className="px-2 py-2 text-right"><input type="text" inputMode="decimal" value={item.price === 0 || item.price === '' ? '' : formatNumber(item.price)} onChange={e => updateItem(group.id, item.id, 'price', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-slate-300 rounded px-2 py-1 text-right outline-none font-bold no-spin" /></td>
+                          <td className="px-2 py-2 text-right">
+                            {showCaseMode && appMode === 'proposal' ? (
+                              <input type="text" inputMode="decimal" value={item.casePrice === 0 || item.casePrice === '' ? '' : formatNumber(item.casePrice)} onChange={e => updateItem(group.id, item.id, 'casePrice', parseNumberInput(e.target.value))} title="ケース金額（直接編集可。単価が自動で再計算されます）" className="item-table-input w-[95px] bg-white border-2 border-blue-200 rounded px-1.5 py-1 text-right outline-none font-bold text-slate-800 no-spin" placeholder="ケース金額" />
+                            ) : (
+                              <span className="font-bold text-slate-800">¥{(factor*(Number(item.price)||0)).toLocaleString()}</span>
+                            )}
+                          </td>
+                          {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" inputMode="decimal" value={item.targetMargin} onChange={e => updateItem(group.id, item.id, 'targetMargin', e.target.value)} className="item-table-input w-[80px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none no-spin" placeholder={String(item.margin||0)} /></td>}
                           <td className="px-2 py-2 text-center">
                             <div className="flex items-center justify-center gap-0.5">
+                              <button onClick={() => insertItemAt(group.id, idx + 1)} title="下に新規行を挿入" className="text-blue-500 hover:bg-blue-50 rounded p-0.5"><Plus className="w-3.5 h-3.5" /></button>
                               <button onClick={() => moveItem(group.id, idx, -1)} disabled={idx === 0} className={idx > 0 ? 'text-slate-400 hover:text-blue-600' : 'text-slate-200'}><ChevronUp className="w-4 h-4" /></button>
                               <button onClick={() => moveItem(group.id, idx, 1)} disabled={idx >= group.items.length - 1} className={idx < group.items.length - 1 ? 'text-slate-400 hover:text-blue-600' : 'text-slate-200'}><ChevronDown className="w-4 h-4" /></button>
                               <button onClick={() => group.items.length > 1 && deleteItem(group.id, item.id)} disabled={group.items.length <= 1} className={group.items.length > 1 ? 'text-slate-300 hover:text-red-600' : 'text-slate-200'}><Trash2 className="w-4 h-4" /></button>
