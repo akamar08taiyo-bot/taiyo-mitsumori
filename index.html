@@ -301,7 +301,8 @@ function LoginScreen({ onLogin }) {
   const [userName, setUserName] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-  const [mode, setMode] = useState('login');
+  // 初回ユーザーには「新規登録」を、既存ユーザーには「ログイン」をデフォルト表示
+  const [mode, setMode] = useState(() => loadStorage(STORAGE_KEYS.USERS, []).length === 0 ? 'register' : 'login');
   const [readyOnly, setReadyOnly] = useState(true);
   const users = loadStorage(STORAGE_KEYS.USERS, []);
 
@@ -344,7 +345,8 @@ function LoginScreen({ onLogin }) {
 
     const master = findMatchingOffice(code);
     const officeName = master ? master.name : code + '営業所';
-    onLogin({ office: officeName, officeCode: code, userName: n, masterFound: !!master, loggedInAt: Date.now() });
+    // 同期キーをここで埋め込む（USERSへの再ルックアップ不要にする）
+    onLogin({ office: officeName, officeCode: code, userName: n, passwordHash: inputHash, masterFound: !!master, loggedInAt: Date.now() });
   };
 
   const canSubmit = officeCode.trim() && userName.trim() && password.length >= 6;
@@ -381,7 +383,7 @@ function LoginScreen({ onLogin }) {
           <button type="submit" disabled={!canSubmit} className={`w-full font-bold py-2.5 rounded-md transition text-sm ${canSubmit ? 'bg-amber-500 hover:bg-amber-600 text-white shadow' : 'bg-stone-200 text-stone-400 cursor-not-allowed'}`}>{mode === 'register' ? '登録してはじめる' : 'ログイン'}</button>
         </form>
         <div className="bg-stone-50 border-t border-stone-200 px-5 py-2.5 text-center text-[10px] text-stone-500">
-          {mode === 'login' ? 'はじめての方は「新規登録」タブで登録してください' : '※ パスワードは暗号化してこの端末に保存されます'}
+          {mode === 'login' ? <><strong className="text-amber-700">はじめての方は「新規登録」タブから</strong>。どのPCでもログイン可能です。</> : '※ パスワードは暗号化してこの端末に保存されます'}
         </div>
       </div>
     </div>
@@ -626,11 +628,35 @@ function App() {
 
   const getSyncKey = () => {
     if (!loginInfo) return null;
-    const users = loadStorage(STORAGE_KEYS.USERS, []);
-    const u = users.find(x => x.key === `${loginInfo.officeCode}__${loginInfo.userName}`);
-    if (!u) return null;
-    return simpleHash(`${loginInfo.officeCode}__${loginInfo.userName}__${u.hash}`);
+    const { officeCode, userName } = loginInfo;
+    const key = `${officeCode}__${userName}`;
+    let hash = loginInfo.passwordHash;
+    if (!hash) {
+      const users = loadStorage(STORAGE_KEYS.USERS, []);
+      hash = users.find(x => x.key === key)?.hash;
+    }
+    if (!hash) return null;
+    // セルフヒール：USERS にエントリがなければ自動補完（共有 from.hash の取得などが安定）
+    try {
+      const users = loadStorage(STORAGE_KEYS.USERS, []);
+      if (!users.find(x => x.key === key)) {
+        saveStorage(STORAGE_KEYS.USERS, [...users, { key, officeCode, name: userName, hash, createdAt: Date.now(), _recovered: true }]);
+      }
+    } catch {}
+    return simpleHash(`${officeCode}__${userName}__${hash}`);
   };
+  // 旧 loginInfo (passwordHash なし) を自動マイグレーション
+  useEffect(() => {
+    if (loginInfo && !loginInfo.passwordHash) {
+      const users = loadStorage(STORAGE_KEYS.USERS, []);
+      const u = users.find(x => x.key === `${loginInfo.officeCode}__${loginInfo.userName}`);
+      if (u) {
+        const updated = { ...loginInfo, passwordHash: u.hash };
+        saveStorage(STORAGE_KEYS.LOGIN, updated);
+        setLoginInfo(updated);
+      }
+    }
+  }, [loginInfo?.officeCode, loginInfo?.userName]);
 
   // 接続：ログイン後 or ログアウト時 or 再接続要求で同期接続を貼り直す
   useEffect(() => {
@@ -1154,34 +1180,71 @@ function App() {
       processImportShare(data);
     } catch (err) { setImportError('クリップボードからの取込に失敗: ' + err.message); }
   };
+  // ファイル＋メール送信：JSONファイルをダウンロード → メーラーを起動して添付指示
   const handleEmailShare = () => {
-    const payload = { _type: 'taiyo-share', version: 1, from: { officeCode: loginInfo?.officeCode || '', name: loginInfo?.userName || '', hash: (loadStorage(STORAGE_KEYS.USERS, []).find(u => u.key === `${loginInfo?.officeCode}__${loginInfo?.userName}`)?.hash) || '' }, exportedAt: Date.now(), folders, savedProposals };
-    const json = JSON.stringify(payload);
-    const dataUrl = 'data:application/json;base64,' + btoa(unescape(encodeURIComponent(json)));
-    const body = [
-      '太陽シルバーサービス 見積書作成システムからの共有データです。',
-      '',
-      `送信元: ${loginInfo?.office||''} / ${loginInfo?.userName||''}`,
-      `件数: フォルダ ${folders.length}件, 見積 ${savedProposals.length}件`,
-      '',
-      '取り込み手順:',
-      '1) 以下のJSONテキストを「共有見積.json」というファイル名で保存',
-      '2) 受信者のアプリで「保存BOX」→「共有見積を取込」を開く',
-      '3) 共有元の営業所コード／名前／パスワードを入力（空欄なら検証スキップ）',
-      '4) 保存したJSONファイルを選択',
-      '',
-      '----- JSONデータ（ここから） -----',
-      json,
-      '----- JSONデータ（ここまで） -----',
-    ].join('\n');
-    const subject = encodeURIComponent('【太陽見積】共有データ ' + new Date().toLocaleDateString('ja-JP'));
-    const mail = `mailto:?subject=${subject}&body=${encodeURIComponent(body)}`;
+    if (savedProposals.length === 0 && folders.length === 0) { notify('共有できるデータがありません'); return; }
+    const payload = {
+      _type: 'taiyo-share', version: 2,
+      from: { officeCode: loginInfo?.officeCode || '', name: loginInfo?.userName || '', hash: loginInfo?.passwordHash || (loadStorage(STORAGE_KEYS.USERS, []).find(u => u.key === `${loginInfo?.officeCode}__${loginInfo?.userName}`)?.hash) || '' },
+      exportedAt: Date.now(),
+      folders, savedProposals,
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const date = new Date().toISOString().slice(0,10);
+    const filename = `見積データ_${loginInfo?.officeCode||''}_${loginInfo?.userName||''}_${date}.json`;
+    // ファイルをダウンロード
     try {
-      window.location.href = mail;
-      notify('メーラーを起動しました');
-    } catch {
-      notify('メーラーを起動できませんでした。代わりにJSONダウンロードをご利用ください。');
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    } catch (err) {
+      notify('ファイル生成失敗: ' + err.message); return;
     }
+    // メーラーを起動（短い案内本文 + 添付指示）
+    setTimeout(() => {
+      const body = [
+        '太陽シルバーサービス㈱ 見積書作成システムから共有データをお送りします。',
+        '',
+        `送信元: ${loginInfo?.office||''} / ${loginInfo?.userName||''}`,
+        `データ: フォルダ ${folders.length}件、見積 ${savedProposals.length}件`,
+        `日付: ${new Date().toLocaleDateString('ja-JP')}`,
+        '',
+        '【受信者の方へ】',
+        '1. 添付ファイル「' + filename + '」を保存',
+        '2. https://akamar08taiyo-bot.github.io/taiyo-mitsumori/ を開く',
+        '3. 右上「共有▾」→「📥 共有リンク/ファイルから取込」',
+        '4. ファイル選択 → 取込完了',
+        '',
+        '※ ダウンロードフォルダにJSONファイルが保存されています。このメールに添付してください。',
+      ].join('\n');
+      const subject = encodeURIComponent('【太陽見積】共有データ ' + date);
+      const mailUrl = `mailto:?subject=${subject}&body=${encodeURIComponent(body)}`;
+      try { window.location.href = mailUrl; } catch {}
+    }, 500);
+    notify(`📥 ファイル「${filename}」をダウンロードしました。メーラーに添付してください。`);
+  };
+  // ファイルのみダウンロード（メーラー起動なし）
+  const handleDownloadShareFile = () => {
+    if (savedProposals.length === 0 && folders.length === 0) { notify('共有できるデータがありません'); return; }
+    const payload = {
+      _type: 'taiyo-share', version: 2,
+      from: { officeCode: loginInfo?.officeCode || '', name: loginInfo?.userName || '', hash: loginInfo?.passwordHash || '' },
+      exportedAt: Date.now(),
+      folders, savedProposals,
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const date = new Date().toISOString().slice(0,10);
+    const filename = `見積データ_${loginInfo?.officeCode||''}_${loginInfo?.userName||''}_${date}.json`;
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    notify(`📥 「${filename}」を保存しました（フォルダ ${folders.length}件、見積 ${savedProposals.length}件）`);
   };
   const handleLoad = (p) => {
     setCurrentProposalId(p.id);
@@ -1531,9 +1594,13 @@ function App() {
                       <ExternalLink className="w-4 h-4 mt-0.5 text-teal-600 shrink-0" />
                       <div className="text-xs"><div className="font-bold text-slate-800">🔗 共有リンクをコピー</div><div className="text-slate-500 mt-0.5">チャット・メールに貼って送信</div></div>
                     </button>
+                    <button onClick={() => { setShowShareMenu(false); handleDownloadShareFile(); }} className="w-full text-left px-3 py-2.5 hover:bg-blue-50 border-b border-slate-100 flex items-start gap-2">
+                      <Download className="w-4 h-4 mt-0.5 text-blue-600 shrink-0" />
+                      <div className="text-xs"><div className="font-bold text-slate-800">💾 ファイルに保存（.json）</div><div className="text-slate-500 mt-0.5">USB・チャット添付など何でも使える</div></div>
+                    </button>
                     <button onClick={() => { setShowShareMenu(false); handleEmailShare(); }} className="w-full text-left px-3 py-2.5 hover:bg-cyan-50 border-b border-slate-100 flex items-start gap-2">
                       <Upload className="w-4 h-4 mt-0.5 text-cyan-700 shrink-0" />
-                      <div className="text-xs"><div className="font-bold text-slate-800">✉ メールで送信</div><div className="text-slate-500 mt-0.5">メーラーが起動・本文に貼付済み</div></div>
+                      <div className="text-xs"><div className="font-bold text-slate-800">✉ メール送信（ファイル添付方式）</div><div className="text-slate-500 mt-0.5">JSONを自動DL→メーラー起動→添付するだけ</div></div>
                     </button>
                     <button onClick={() => { setShowShareMenu(false); setShowImportShareModal(true); }} className="w-full text-left px-3 py-2.5 hover:bg-indigo-50 flex items-start gap-2">
                       <Download className="w-4 h-4 mt-0.5 text-indigo-600 shrink-0" />
