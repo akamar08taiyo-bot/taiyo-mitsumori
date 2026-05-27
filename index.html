@@ -1019,7 +1019,19 @@ function App() {
       if (draft.taxMode !== undefined) setTaxMode(draft.taxMode);
       if (draft.appMode !== undefined) setAppMode(draft.appMode);
       if (draft.showGrandTotal !== undefined) setShowGrandTotal(draft.showGrandTotal);
-      if (Array.isArray(draft.groups)) setGroups(draft.groups);
+      // 他モード分のgroups/newItemsもrefに復元（モード切替時の消失を防止）
+      if (Array.isArray(draft.quoteGroups)) quoteGroupsRef.current = draft.quoteGroups;
+      if (Array.isArray(draft.proposalGroups)) proposalGroupsRef.current = draft.proposalGroups;
+      if (draft.quoteNewItems && typeof draft.quoteNewItems === 'object') quoteNewItemsRef.current = draft.quoteNewItems;
+      if (draft.proposalNewItems && typeof draft.proposalNewItems === 'object') proposalNewItemsRef.current = draft.proposalNewItems;
+      // 現在モードのgroupsを優先（後方互換：旧draft.groupsもfallback）
+      const activeMode = draft.appMode || 'quote';
+      const activeGroups = activeMode === 'quote'
+        ? (Array.isArray(draft.quoteGroups) ? draft.quoteGroups : draft.groups)
+        : (Array.isArray(draft.proposalGroups) ? draft.proposalGroups : draft.groups);
+      if (Array.isArray(activeGroups)) setGroups(activeGroups);
+      // prevAppModeRefを同期して、初回mountでmode切替useEffectが暴発しないようにする
+      prevAppModeRef.current = activeMode;
     }
   }, []);
 
@@ -1656,12 +1668,17 @@ function App() {
         #print-content-holder { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #f1f5f9; z-index: 99999; overflow: auto; padding: 0; }
         #print-content-holder::before { content: ''; display: block; height: 60px; }
         #print-content-holder .page { background: #fff; box-shadow: 0 0 20px rgba(0,0,0,0.15); margin: 0 auto 40px !important; max-width: 210mm !important; }
-        #print-toolbar { position: fixed; top: 0; left: 0; right: 0; background: #1e293b; color: #fff; padding: 10px 20px; z-index: 100000; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
-        #print-toolbar .info { font-size: 13px; } #print-toolbar .info strong { color: #fbbf24; }
-        #print-toolbar .actions { display: flex; gap: 8px; }
-        #print-toolbar button { padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; }
+        #print-toolbar { position: fixed; top: 0; left: 0; right: 0; background: #1e293b; color: #fff; padding: 10px 20px; z-index: 100000; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+        #print-toolbar .info { font-size: 13px; flex: 1 1 200px; min-width: 0; } #print-toolbar .info strong { color: #fbbf24; }
+        #print-toolbar .actions { display: flex; gap: 8px; flex-shrink: 0; }
+        #print-toolbar button { padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; white-space: nowrap; }
         #print-toolbar button.primary { background: #ef4444; color: #fff; } #print-toolbar button.primary:hover { background: #dc2626; }
         #print-toolbar button.secondary { background: #475569; color: #fff; } #print-toolbar button.secondary:hover { background: #334155; }
+        @media (max-width: 640px) {
+          #print-toolbar { padding: 8px 12px; }
+          #print-toolbar .info { font-size: 11px; }
+          #print-toolbar button { padding: 6px 12px; font-size: 12px; }
+        }
         @media print {
           #print-toolbar { display: none !important; }
           #print-content-holder { position: static !important; background: #fff !important; overflow: visible !important; padding: 0 !important; }
