@@ -62,16 +62,21 @@
       msg = (e.error && (e.error.stack||e.error.message)) || e.message || ('不明なエラー');
     }
     window.__appErrors.push({type:'error', msg:msg, src:e.filename, line:e.lineno});
-    // アプリがすでに起動済みなら警告だけ
-    var root = document.getElementById('root');
-    if (root && root.firstChild) return; // アプリ表示中はオーバーレイ出さない
+    // アプリ起動済みフラグまたはローディング画面が消えてれば、オーバーレイ表示しない
+    if (window.__appMounted) return;
+    var loadingEl = document.getElementById('loading');
+    if (loadingEl && loadingEl.style.display === 'none') return;
+    // リソース系の error は一度だけ表示（複数連続を抑制）
+    if (isResource && window.__resErrShown) return;
+    if (isResource) window.__resErrShown = true;
     window.__showLoadError(isResource ? '外部リソースの読込に失敗しました' : 'スクリプトエラーが発生しました', msg + (e.filename?' ('+e.filename+':'+e.lineno+')':''));
   }, true);
   window.addEventListener('unhandledrejection', function(e) {
     var msg = (e.reason && (e.reason.stack||e.reason.message)) || String(e.reason);
     window.__appErrors.push({type:'promise', msg:msg});
-    var root = document.getElementById('root');
-    if (root && root.firstChild) return;
+    if (window.__appMounted) return;
+    var loadingEl = document.getElementById('loading');
+    if (loadingEl && loadingEl.style.display === 'none') return;
     window.__showLoadError('読込中に問題が発生しました', msg);
   });
   // 30秒経っても起動しなければエラー表示
@@ -1227,7 +1232,10 @@ function App() {
     if (hash && hash.startsWith('#share=')) {
       try {
         const b64 = hash.substring('#share='.length);
-        const json = decodeURIComponent(escape(atob(b64)));
+        // TextDecoder で iOS Safari 互換に（escape()は非推奨）
+        const bin = atob(b64);
+        const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+        const json = new TextDecoder('utf-8').decode(bytes);
         const data = JSON.parse(json);
         if (data._type === 'taiyo-share') {
           window.__pendingShareData = data;
@@ -2440,16 +2448,46 @@ function App() {
   );
 }
 
+// === ErrorBoundary：React描画中の例外をキャッチして白画面を回避 ===
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error('[ErrorBoundary]', error, info); }
+  render() {
+    if (this.state.error) {
+      const err = this.state.error;
+      return (
+        <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',padding:20,background:'#f1f5f9'}}>
+          <div style={{maxWidth:640,background:'#fff',border:'2px solid #ef4444',borderRadius:12,padding:24}}>
+            <div style={{fontSize:'18px',fontWeight:'bold',color:'#b91c1c',marginBottom:12}}>⚠ アプリの描画でエラーが発生しました</div>
+            <div style={{fontSize:'13px',color:'#475569',background:'#fef2f2',padding:12,borderRadius:6,fontFamily:'monospace',whiteSpace:'pre-wrap',marginBottom:16}}>{err.message||String(err)}{err.stack?'\n\n'+err.stack.split('\n').slice(0,5).join('\n'):''}</div>
+            <div style={{fontSize:'13px',color:'#334155',marginBottom:16}}>
+              <strong>対処方法：</strong><br/>
+              1. <button onClick={() => location.reload(true)} style={{padding:'6px 12px',background:'#1e40af',color:'#fff',border:0,borderRadius:4,cursor:'pointer'}}>ページ再読込</button> を試す<br/>
+              2. それでもダメな場合は下記ボタンで下書きをリセット（保存済みデータは残ります）<br/>
+              3. 「クラウド同期」を OFF にして再ログインしてみる
+            </div>
+            <button onClick={() => { if(confirm('編集中の下書きを破棄します。保存済みデータは残ります。よろしいですか？')){ try{localStorage.removeItem('taiyo_draft_v1');}catch{} location.reload(true); } }} style={{padding:'8px 16px',background:'#dc2626',color:'#fff',border:0,borderRadius:4,cursor:'pointer',fontWeight:'bold',marginRight:8}}>下書きを破棄して再起動</button>
+            <button onClick={() => this.setState({error:null})} style={{padding:'8px 16px',background:'#64748b',color:'#fff',border:0,borderRadius:4,cursor:'pointer'}}>リトライ</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // === 起動：失敗してもユーザーにエラーが見える形で表示 ===
 try {
   const __loadingEl = document.getElementById('loading');
   const __rootEl = document.getElementById('root');
   if (!__rootEl) throw new Error('#root が見つかりません');
   const __r = createRoot(__rootEl);
-  __r.render(<App />);
+  __r.render(<ErrorBoundary><App /></ErrorBoundary>);
   // 描画が始まったら少しだけ待ってからローディングを消す（早すぎる消去でちらつき回避）
   requestAnimationFrame(() => requestAnimationFrame(() => {
     if (__loadingEl) __loadingEl.style.display = 'none';
+    window.__appMounted = true;
     console.log('[App] mounted in', Date.now()-window.__loadStart, 'ms');
   }));
 } catch (err) {
