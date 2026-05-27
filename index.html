@@ -2833,24 +2833,28 @@ try {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     if (__loadingEl) __loadingEl.style.display = 'none';
     window.__appMounted = true;
+    // CSSレベルで強制非表示：印刷ホルダーが存在しない時は ツールバーを必ず display:none
+    const enforceStyle = document.createElement('style');
+    enforceStyle.id = 'print-toolbar-enforcement';
+    enforceStyle.textContent = `body:not(.has-print-preview) #print-toolbar { display: none !important; visibility: hidden !important; pointer-events: none !important; }`;
+    document.head.appendChild(enforceStyle);
     // 起動時 + 継続的監視で印刷プレビューの孤児DOM要素を完全除去
     const scrubOrphans = () => {
-      // print-content-holder がない時に print-toolbar だけ残っているのは孤児
       const holder = document.getElementById('print-content-holder');
       const toolbar = document.getElementById('print-toolbar');
       const style = document.getElementById('print-injected-style');
-      if (!holder) {
-        // ホルダーがなければツールバーとスタイルも不要
+      if (holder) {
+        document.body.classList.add('has-print-preview');
+      } else {
+        document.body.classList.remove('has-print-preview');
         if (toolbar) { try { toolbar.remove(); } catch {} }
         if (style) { try { style.remove(); } catch {} }
       }
     };
     scrubOrphans();
-    // MutationObserverでbody直下のDOM変化を監視し孤児が現れたら即除去
-    try {
-      const obs = new MutationObserver(scrubOrphans);
-      obs.observe(document.body, { childList: true, subtree: false });
-    } catch {}
+    // MutationObserver + setInterval の二重防御
+    try { new MutationObserver(scrubOrphans).observe(document.body, { childList: true, subtree: false }); } catch {}
+    setInterval(scrubOrphans, 2000); // 2秒ごとにスキャン（保険）
     console.log('[App] mounted in', Date.now()-window.__loadStart, 'ms');
   }));
 } catch (err) {
