@@ -22,8 +22,8 @@
     "react-dom": "https://esm.sh/react-dom@18.3.1",
     "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
     "lucide-react": "https://esm.sh/lucide-react@0.469.0?external=react",
-    "firebase/app": "https://cdn.jsdelivr.net/npm/firebase@10.14.0/app/dist/index.esm.js",
-    "firebase/database": "https://cdn.jsdelivr.net/npm/firebase@10.14.0/database/dist/index.esm.js"
+    "firebase/app": "https://esm.sh/firebase@10.14.0/app",
+    "firebase/database": "https://esm.sh/firebase@10.14.0/database"
   }
 }
 </script>
@@ -53,13 +53,25 @@
       '<button class="reload-btn" onclick="location.reload(true)">🔄 再読込</button>';
   };
   window.addEventListener('error', function(e) {
-    var msg = (e.error && e.error.message) || e.message || String(e);
+    // リソース読込失敗(<script>/<img>等)は e.target にtagがある。e.error はnull
+    var isResource = e.target && e.target !== window && (e.target.src || e.target.href);
+    var msg;
+    if (isResource) {
+      msg = 'リソース読込失敗: ' + (e.target.tagName||'') + ' ' + (e.target.src || e.target.href || '');
+    } else {
+      msg = (e.error && (e.error.stack||e.error.message)) || e.message || ('不明なエラー');
+    }
     window.__appErrors.push({type:'error', msg:msg, src:e.filename, line:e.lineno});
-    window.__showLoadError('スクリプトエラーが発生しました', msg + (e.filename?' ('+e.filename+':'+e.lineno+')':''));
+    // アプリがすでに起動済みなら警告だけ
+    var root = document.getElementById('root');
+    if (root && root.firstChild) return; // アプリ表示中はオーバーレイ出さない
+    window.__showLoadError(isResource ? '外部リソースの読込に失敗しました' : 'スクリプトエラーが発生しました', msg + (e.filename?' ('+e.filename+':'+e.lineno+')':''));
   }, true);
   window.addEventListener('unhandledrejection', function(e) {
-    var msg = (e.reason && e.reason.message) || String(e.reason);
+    var msg = (e.reason && (e.reason.stack||e.reason.message)) || String(e.reason);
     window.__appErrors.push({type:'promise', msg:msg});
+    var root = document.getElementById('root');
+    if (root && root.firstChild) return;
     window.__showLoadError('読込中に問題が発生しました', msg);
   });
   // 30秒経っても起動しなければエラー表示
