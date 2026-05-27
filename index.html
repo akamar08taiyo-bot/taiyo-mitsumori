@@ -22,8 +22,8 @@
     "react-dom": "https://esm.sh/react-dom@18.3.1",
     "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
     "lucide-react": "https://esm.sh/lucide-react@0.469.0?external=react",
-    "firebase/app": "https://esm.sh/firebase@10.14.0/app",
-    "firebase/database": "https://esm.sh/firebase@10.14.0/database"
+    "firebase/app": "https://cdn.jsdelivr.net/npm/firebase@10.14.0/app/dist/index.esm.js",
+    "firebase/database": "https://cdn.jsdelivr.net/npm/firebase@10.14.0/database/dist/index.esm.js"
   }
 }
 </script>
@@ -114,11 +114,13 @@ const firebaseConfig = {
   appId: "1:838108820514:web:8435818e15053c2b2f867b"
 };
 let firebaseDB = null;
+let firebaseInitError = null; // 詳細エラーメッセージを保持（ユーザー表示用）
 try {
   const firebaseApp = initializeApp(firebaseConfig);
   firebaseDB = getDatabase(firebaseApp);
 } catch (e) {
-  console.warn('[Firebase] 初期化失敗（クラウド同期は無効化されますがアプリは起動します）', e);
+  firebaseInitError = (e && (e.code || e.message)) || String(e);
+  console.warn('[Firebase] 初期化失敗:', firebaseInitError, e);
 }
 
 const STORAGE_KEYS = {
@@ -617,10 +619,39 @@ function App() {
   const suppressNextWriteRef = useRef(false);
   const lastSyncedJsonRef = useRef('');
   const syncWriteTimerRef = useRef(null);
-  const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'connecting' | 'synced' | 'error'
+  const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'connecting' | 'synced' | 'error' | 'disabled'
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
-  const [syncError, setSyncError] = useState(null);
+  const [syncError, setSyncError] = useState(firebaseInitError ? `Firebase初期化エラー: ${firebaseInitError}` : null);
   const [reconnectTick, setReconnectTick] = useState(0);
+  // クラウド同期 ON/OFF（既定ON、永続化）
+  const [cloudSyncEnabled, setCloudSyncEnabled] = useState(() => {
+    const v = localStorage.getItem('taiyo_cloudSync');
+    return v === null ? true : v === '1';
+  });
+  useEffect(() => { try { localStorage.setItem('taiyo_cloudSync', cloudSyncEnabled ? '1' : '0'); } catch {} }, [cloudSyncEnabled]);
+  // ネットワーク診断
+  const [diagReport, setDiagReport] = useState(null);
+  const [diagRunning, setDiagRunning] = useState(false);
+  const runDiagnostic = async () => {
+    setDiagRunning(true); setDiagReport(null);
+    const checks = [];
+    const withTimeout = (p, ms) => Promise.race([p, new Promise((_,r) => setTimeout(() => r(new Error('timeout '+ms+'ms')), ms))]);
+    // 1. オンライン状態
+    checks.push({ id:'online', label:'ブラウザのネット接続', pass: !!navigator.onLine, suggestion: navigator.onLine ? null : 'ネットワークがオフラインです' });
+    // 2. localStorage
+    try { const k='__d_'+Date.now(); localStorage.setItem(k,'1'); localStorage.removeItem(k); checks.push({ id:'storage', label:'ローカル保存（localStorage）', pass:true }); }
+    catch (e) { checks.push({ id:'storage', label:'ローカル保存（localStorage）', pass:false, error:e.message, suggestion:'シークレットモード/プライベートモードでは保存できません' }); }
+    // 3. CDN到達
+    try { await withTimeout(fetch('https://cdn.jsdelivr.net/npm/firebase@10.14.0/app/dist/index.esm.js', { method:'HEAD', mode:'no-cors', cache:'no-store' }), 6000); checks.push({ id:'cdn', label:'Firebase CDN（jsdelivr）', pass:true }); }
+    catch (e) { checks.push({ id:'cdn', label:'Firebase CDN（jsdelivr）', pass:false, error:e.message, suggestion:'社内ネットワークから jsdelivr.net への通信が遮断されている可能性' }); }
+    // 4. Firebase RTDB endpoint
+    try { await withTimeout(fetch('https://taiyo-mitsumori-03724-default-rtdb.asia-southeast1.firebasedatabase.app/.json?shallow=true', { mode:'no-cors', cache:'no-store' }), 6000); checks.push({ id:'rtdb', label:'Firebase Realtime DB エンドポイント', pass:true }); }
+    catch (e) { checks.push({ id:'rtdb', label:'Firebase Realtime DB エンドポイント', pass:false, error:e.message, suggestion:'firebaseio.com / firebasedatabase.app ドメインがブロックされている可能性' }); }
+    // 5. Firebase SDK 初期化
+    checks.push({ id:'sdkInit', label:'Firebase SDK 初期化', pass: !!firebaseDB, error: firebaseInitError||null, suggestion: firebaseDB ? null : 'SDKのロードに失敗。Ctrl+F5 でページ再読込してください' });
+    setDiagReport({ ts: Date.now(), checks, summary: { total: checks.length, passed: checks.filter(c => c.pass).length } });
+    setDiagRunning(false);
+  };
   const remoteLoadedRef = useRef(false); // 初回remote取得が完了するまで write を抑制（レース回避）
   const [inbox, setInbox] = useState([]); // 受信トレイ（他人から共有された見積）
   const [showInboxModal, setShowInboxModal] = useState(false);
@@ -675,7 +706,13 @@ function App() {
       setSyncStatus('idle'); setSyncError(null);
       return;
     }
-    if (!firebaseDB) { setSyncStatus('error'); setSyncError('Firebase 初期化に失敗（ネットワーク要確認）'); return; }
+    // クラウド同期がOFFの場合は接続しない（ローカルのみで動作）
+    if (!cloudSyncEnabled) { setSyncStatus('disabled'); setSyncError(null); return; }
+    if (!firebaseDB) {
+      setSyncStatus('error');
+      setSyncError(firebaseInitError ? `Firebase初期化エラー: ${firebaseInitError}` : 'Firebase 初期化に失敗（CDN・ネットワーク要確認）');
+      return;
+    }
     const syncKey = getSyncKey();
     if (!syncKey) { setSyncStatus('error'); setSyncError('ユーザー情報の不整合：再ログインするか営業所設定をご確認ください'); return; }
     setSyncStatus('connecting'); setSyncError(null);
@@ -726,7 +763,7 @@ function App() {
   // インボックスキーは officeCode + name のみから導出（パスワード不要）→ 送信者が知れる
   const getMyInboxKey = () => loginInfo ? simpleHash(`${loginInfo.officeCode}__${loginInfo.userName}`) : null;
   useEffect(() => {
-    if (!loginInfo || !firebaseDB) return;
+    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
     const inboxKey = getMyInboxKey(); if (!inboxKey) return;
     const r = dbRef(firebaseDB, `inbox/${inboxKey}`);
     inboxRefHandle.current = r;
@@ -826,7 +863,7 @@ function App() {
     if (!loginInfo) return;
     if (suppressNextWriteRef.current) { suppressNextWriteRef.current = false; return; }
     if (!remoteLoadedRef.current) return; // 初回読込完了まで書込せず（レース防止）
-    if (!firebaseDB) return;
+    if (!cloudSyncEnabled || !firebaseDB) return;
     const syncKey = getSyncKey(); if (!syncKey) return;
     if (syncWriteTimerRef.current) clearTimeout(syncWriteTimerRef.current);
     syncWriteTimerRef.current = setTimeout(() => {
@@ -1579,8 +1616,8 @@ function App() {
               <div>
                 <h1 className="font-bold text-lg leading-tight">見積書・提案書作成システム</h1>
                 <span className="text-xs text-slate-300">{loginInfo.office}　/　担当: <strong className="text-amber-200">{loginInfo.userName}</strong>
-                  <button onClick={() => setShowSyncPopover(!showSyncPopover)} className={`ml-2 px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${syncStatus === 'synced' ? 'bg-green-600 text-white hover:bg-green-700' : syncStatus === 'connecting' ? 'bg-amber-500 text-white animate-pulse' : syncStatus === 'error' ? 'bg-rose-600 text-white hover:bg-rose-700' : 'bg-slate-600 text-slate-300 hover:bg-slate-700'}`} title="クリックで同期の詳細を表示">
-                    {syncStatus === 'synced' ? '☁ 同期OK' : syncStatus === 'connecting' ? '⏳ 接続中' : syncStatus === 'error' ? '⚠ 同期エラー' : '○ 未接続'}
+                  <button onClick={() => setShowSyncPopover(!showSyncPopover)} className={`ml-2 px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${syncStatus === 'synced' ? 'bg-green-600 text-white hover:bg-green-700' : syncStatus === 'connecting' ? 'bg-amber-500 text-white animate-pulse' : syncStatus === 'error' ? 'bg-rose-600 text-white hover:bg-rose-700' : syncStatus === 'disabled' ? 'bg-slate-500 text-white hover:bg-slate-600' : 'bg-slate-600 text-slate-300 hover:bg-slate-700'}`} title="クリックで同期の詳細を表示">
+                    {syncStatus === 'synced' ? '☁ 同期OK' : syncStatus === 'connecting' ? '⏳ 接続中' : syncStatus === 'error' ? '⚠ 同期エラー' : syncStatus === 'disabled' ? '○ ローカルのみ' : '○ 未接続'}
                   </button>
                 </span>
               </div>
@@ -1875,10 +1912,42 @@ function App() {
               </div>
             )}
             {syncStatus === 'idle' && <p className="text-sm text-slate-600">ログイン情報がありません。再ログインしてください。</p>}
+            {syncStatus === 'disabled' && (
+              <div className="text-sm space-y-1.5">
+                <p className="text-slate-700 font-bold">○ クラウド同期は OFF（ローカルのみで動作中）</p>
+                <p className="text-slate-600 text-xs">データは <strong>このPC内に保存</strong>されます。他のPCには同期されません。</p>
+                <p className="text-slate-600 text-xs">他人と共有したい場合は「共有 ▾」→「📨 相手を選んで送信」「💾 ファイルに保存」をご利用ください。</p>
+              </div>
+            )}
             <div className="mt-3 flex gap-2">
-              <button onClick={() => { setReconnectTick(t => t+1); notify('Firebase へ再接続中…'); }} className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 rounded text-xs font-bold">🔄 再接続する</button>
+              <button onClick={() => { setReconnectTick(t => t+1); notify('Firebase へ再接続中…'); }} disabled={!cloudSyncEnabled} className={`flex-1 py-2 rounded text-xs font-bold ${cloudSyncEnabled ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-slate-300 text-slate-500 cursor-not-allowed'}`}>🔄 再接続する</button>
+              <button onClick={runDiagnostic} disabled={diagRunning} className={`flex-1 py-2 rounded text-xs font-bold ${diagRunning ? 'bg-slate-400 text-white cursor-wait' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}`}>{diagRunning ? '診断中…' : '🔍 詳細診断'}</button>
               <button onClick={() => location.reload(true)} className="flex-1 bg-slate-600 hover:bg-slate-700 text-white py-2 rounded text-xs font-bold">ページ再読込</button>
             </div>
+
+            {/* 診断結果 */}
+            {diagReport && (
+              <div className="mt-3 pt-3 border-t border-slate-100 space-y-1.5">
+                <div className="font-bold text-xs text-slate-700">診断結果：{diagReport.summary.passed}/{diagReport.summary.total} OK</div>
+                {diagReport.checks.map(c => (
+                  <div key={c.id} className={`text-[11px] p-2 rounded border ${c.pass ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200'}`}>
+                    <div className="flex justify-between items-center"><span className="font-bold">{c.label}</span><span className={c.pass ? 'text-emerald-700' : 'text-rose-700'}>{c.pass ? '✓ OK' : '✗ NG'}</span></div>
+                    {!c.pass && c.suggestion && <div className="text-[10px] text-rose-700 mt-0.5">💡 {c.suggestion}</div>}
+                    {!c.pass && c.error && <div className="text-[10px] text-slate-500 mt-0.5 font-mono break-all">{c.error}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* クラウド同期 ON/OFF 切替 */}
+            <div className="mt-3 pt-3 border-t border-slate-100">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={cloudSyncEnabled} onChange={e => setCloudSyncEnabled(e.target.checked)} className="w-4 h-4" />
+                <span className="text-sm font-bold text-slate-700">クラウド同期を使う（ON）</span>
+              </label>
+              <p className="text-[11px] text-slate-500 mt-1 ml-6">OFFにすると <strong>Firebase接続を一切行わず</strong>、エラー表示も止まります。<br/>ローカルPCのみで完結し、共有したい時は「共有▾」メニューでファイル送信できます。</p>
+            </div>
+
             <div className="mt-3 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
               <strong>同期しない人と共有したい場合は</strong>、右上「共有 ▾」メニュー →「📨 相手を選んで送信」をご利用ください。
             </div>
