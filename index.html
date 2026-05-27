@@ -1066,7 +1066,15 @@ function App() {
       return { ...g, items: g.items.map(i => {
         if (i.id !== iid) return i;
         let u = { ...i, [field]: value };
-        if (field === 'name') { const inf = inferFromProductName(value); if (inf?.volume) u.volume = inf.volume; }
+        if (field === 'name') {
+          const inf = inferFromProductName(value);
+          if (inf?.volume) u.volume = inf.volume;
+          // 単位がまだ未設定なら自動設定（既存単位は上書きしない）
+          if (inf?.unit && !u.unitOverride && (!g.unit || g.unit === 'ml')) {
+            updateGroupField(g.id, 'unit', inf.unit);
+            updateGroupField(g.id, 'baseScale', inf.baseScale);
+          }
+        }
         return calculatePrices(u, field);
       }) };
     }));
@@ -1351,7 +1359,9 @@ function App() {
       return { ...g, items: [...g.items, tempItem] };
     });
     const groupsHTML = groupsForPrint.filter(g => g.items.length > 0 || (g.title && g.title.trim())).map((group) => {
-      const baseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
+      // 単価ラベル：自動生成（例：100ml）。group.unitPriceLabel が設定されていれば優先。
+      const autoBaseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
+      const baseLabel = (group.unitPriceLabel && group.unitPriceLabel.trim()) ? group.unitPriceLabel.trim() : autoBaseLabel;
       const rows = group.items.map((item) => {
         const trClass = item.isHighlighted ? ' class="highlighted"' : '';
         let cols = `<td class="pname"><div class="name">${escapeHTML(item.name)}</div></td>`;
@@ -1377,7 +1387,8 @@ function App() {
       else headers += `<th class="num">数量</th>`;
       headers += `<th class="price">単価</th><th class="price">金額</th>`;
       if (appMode === 'proposal') headers += `<th class="unit-price">${baseLabel}単価</th>`;
-      const subtotalRow = group.subtotal > 0 ? `<div class="group-subtotal">小計：<strong>¥${group.subtotal.toLocaleString()}</strong></div>` : '';
+      // 合計表示OFFなら小計も非表示（連動）
+      const subtotalRow = (showGrandTotal && group.subtotal > 0) ? `<div class="group-subtotal">小計：<strong>¥${group.subtotal.toLocaleString()}</strong></div>` : '';
       const groupClass = group.items.length > 6 ? 'group large' : 'group';
       return `<div class="${groupClass}">${(group.title && group.title.trim()) ? `<div class="group-title">${escapeHTML(group.title)}</div>` : ''}<table class="items-table"><thead><tr>${headers}</tr></thead><tbody>${rows || '<tr><td colspan="10" class="empty">商品データがありません</td></tr>'}</tbody></table>${subtotalRow}</div>`;
     }).join('');
@@ -1414,7 +1425,6 @@ function App() {
   #print-content-holder .stamp-box { text-align: center; }
   #print-content-holder .stamp-label { font-size: 7pt; color: #3b82f6; font-weight: 600; margin-bottom: 2px; }
   #print-content-holder .stamp-square { width: 15mm; height: 15mm; border: 1px solid #93c5fd; background: #fff; }
-  #print-content-holder .stamp-box:last-child .stamp-square { width: 12mm; height: 12mm; }
   #print-content-holder .terms-small { margin: 6mm 0 0 0; max-width: 100mm; page-break-inside: avoid; }
   #print-content-holder .terms-table-sm { width: 100%; border-collapse: collapse; font-size: 7.5pt; border: 0.5px solid #bfdbfe; }
   #print-content-holder .terms-table-sm td { padding: 3px 6px; border-bottom: 0.5px solid #dbeafe; vertical-align: top; }
@@ -1718,12 +1728,22 @@ function App() {
                   </div>
                 </div>
               )}
-              <div className="px-4 py-3 border-b flex items-center justify-between gap-3 bg-slate-50">
-                <div className="flex items-center gap-3 flex-1">
-                  <PackagePlus className="w-6 h-6 text-slate-700" />
+              <div className="px-4 py-3 border-b flex items-center justify-between gap-3 bg-slate-50 flex-wrap">
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <PackagePlus className="w-6 h-6 text-slate-700 shrink-0" />
                   <input value={group.title} onChange={e => updateGroupField(group.id, 'title', e.target.value)} placeholder="商品カテゴリ名 (例: ビニール手袋)" className="bg-white border border-slate-300 rounded px-2.5 py-1.5 font-bold text-slate-800 text-sm outline-none flex-1 max-w-[320px] focus:border-blue-500" />
                 </div>
-                <button onClick={() => removeGroup(group.id)} className={`p-1.5 rounded transition ${deleteConfirmMap[group.id] ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-red-500 hover:bg-red-50'}`}>{deleteConfirmMap[group.id] ? <AlertTriangle className="w-4 h-4" /> : <X className="w-4 h-4" />}</button>
+                {appMode === 'proposal' && (
+                  <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-white border border-slate-200 rounded px-2 py-1.5 no-print" title="単位と単価表記。「自動」ボタンで商品名から推測。手入力で上書きも可能。">
+                    <span className="text-slate-500 text-[10px] font-bold">単位:</span>
+                    <input value={group.unit||''} onChange={e => updateGroupField(group.id, 'unit', e.target.value)} placeholder="ml" className="w-12 px-1.5 py-1 border border-slate-300 rounded text-center text-xs font-bold focus:border-blue-500 outline-none" title="単位（例：ml, 枚, m, 個）" />
+                    <span className="text-slate-400">/</span>
+                    <span className="text-slate-500 text-[10px] font-bold">単価表記:</span>
+                    <input value={group.unitPriceLabel || ''} onChange={e => updateGroupField(group.id, 'unitPriceLabel', e.target.value)} placeholder={group.baseScale === 1 ? `1${group.unit||''}` : `${group.baseScale||100}${group.unit||''}`} className="w-20 px-1.5 py-1 border border-slate-300 rounded text-center text-xs font-bold focus:border-blue-500 outline-none" title="単価表記（例：100ml、1枚、1m）。空欄なら自動生成" />
+                    <button onClick={() => updateGroupField(group.id, 'unitPriceLabel', '')} title="自動表記に戻す" className="text-[10px] bg-amber-100 hover:bg-amber-200 text-amber-700 px-1.5 py-1 rounded font-bold">自動</button>
+                  </div>
+                )}
+                <button onClick={() => removeGroup(group.id)} aria-label="カテゴリを削除" className={`p-1.5 rounded transition ${deleteConfirmMap[group.id] ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-red-500 hover:bg-red-50'}`}>{deleteConfirmMap[group.id] ? <AlertTriangle className="w-4 h-4" /> : <X className="w-4 h-4" />}</button>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs text-left">
