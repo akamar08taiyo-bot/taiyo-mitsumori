@@ -105,7 +105,7 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
-import { getDatabase, ref as dbRef, onValue, set as dbSet, get as dbGet, off as dbOff } from 'firebase/database';
+import { getDatabase, ref as dbRef, onValue, set as dbSet, get as dbGet, off as dbOff, onDisconnect, update as dbUpdate } from 'firebase/database';
 import {
   Trash2, TrendingDown, Plus, Calculator, FileText, BarChart3,
   X as MultiplyIcon, PackagePlus, Percent, LayoutTemplate, ArrowUpDown,
@@ -615,6 +615,11 @@ function App() {
   const [favorites, setFavorites] = useState(() => loadStorage(STORAGE_KEYS.FAVORITES, []));
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [currentProposalId, setCurrentProposalId] = useState(null); // 開いている見積のID（上書き保存用）
+  // 同期コンフリクト検出用：onValue クロージャから最新値を参照するための ref
+  const currentProposalIdRef = useRef(null);
+  const savedProposalsRef = useRef([]);
+  useEffect(() => { currentProposalIdRef.current = currentProposalId; }, [currentProposalId]);
+  useEffect(() => { savedProposalsRef.current = savedProposals; }, [savedProposals]);
   const [showLoadModal, setShowLoadModal] = useState(false);
   const [showFavoritesModal, setShowFavoritesModal] = useState(false);
   const [targetGroupIdForFav, setTargetGroupIdForFav] = useState(null);
@@ -766,6 +771,31 @@ function App() {
       const remote = snap.val(); if (!remote) return;
       const remoteJson = JSON.stringify({ folders: remote.folders||[], savedProposals: remote.savedProposals||[] });
       if (remoteJson === lastSyncedJsonRef.current) return;
+      // === バグ3/7修正：編集中の見積が他端末で更新されていれば確認 ===
+      try {
+        const editingId = currentProposalIdRef.current;
+        const remoteProps = Array.isArray(remote.savedProposals) ? remote.savedProposals : [];
+        const localProps = savedProposalsRef.current || [];
+        if (editingId) {
+          const remoteCur = remoteProps.find(p => p && p.id === editingId);
+          const localCur = localProps.find(p => p && p.id === editingId);
+          const rUp = remoteCur && remoteCur.updatedAt ? remoteCur.updatedAt : 0;
+          const lUp = localCur && localCur.updatedAt ? localCur.updatedAt : 0;
+          const otherDev = remote._device && loginInfo && remote._device !== (loginInfo.officeCode + '/' + loginInfo.userName);
+          if (remoteCur && rUp > lUp + 500) {
+            const who = otherDev ? `（${remote._device}）` : '（別タブ/端末）';
+            const ok = window.confirm(`現在編集中の見積が他端末${who}で更新されました。\n再読込しますか？\n\nOK: リモートを取込（未保存の編集は失われます）\nキャンセル: ローカル編集を保持（次の保存でリモートを上書き）`);
+            if (!ok) {
+              // ローカル保持：foldersのみ取り込み、savedProposalsは現状維持
+              suppressNextWriteRef.current = true;
+              if (Array.isArray(remote.folders)) setFolders(remote.folders);
+              // lastSyncedJsonRefは更新しない（次回のローカル書込でリモート上書きを促す）
+              setSyncStatus('synced'); setLastSyncedAt(Date.now()); setSyncError(null);
+              return;
+            }
+          }
+        }
+      } catch (e) { console.warn('conflict detect error', e); }
       suppressNextWriteRef.current = true;
       if (Array.isArray(remote.folders)) setFolders(remote.folders);
       if (Array.isArray(remote.savedProposals)) setSavedProposals(remote.savedProposals);
@@ -815,6 +845,47 @@ function App() {
     }, (err) => { console.warn('inbox sub error', err); });
     return () => { if (typeof unsub === 'function') unsub(); };
   }, [loginInfo]);
+
+  // === Presence: 自分のオンライン状態を公開 ===
+  useEffect(() => {
+    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
+    const { officeCode, userName } = loginInfo;
+    const userKey = simpleHash(`${officeCode}__${userName}`);
+    const pRef = dbRef(firebaseDB, `presence/${officeCode}/${userKey}`);
+    const writeOnline = () => dbUpdate(pRef, { name: userName, officeCode, online: true, lastSeen: Date.now() }).catch(e => console.warn('presence write', e));
+    writeOnline();
+    try { onDisconnect(pRef).set({ name: userName, officeCode, online: false, lastSeen: Date.now() }); } catch {}
+    const hb = setInterval(writeOnline, 30000);
+    const onVis = () => { if (document.visibilityState === 'visible') writeOnline(); };
+    document.addEventListener('visibilitychange', onVis);
+    const onUnload = () => { try { dbSet(pRef, { name: userName, officeCode, online: false, lastSeen: Date.now() }); } catch {} };
+    window.addEventListener('beforeunload', onUnload);
+    return () => {
+      clearInterval(hb);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('beforeunload', onUnload);
+      try { dbSet(pRef, { name: userName, officeCode, online: false, lastSeen: Date.now() }); } catch {}
+    };
+  }, [loginInfo?.officeCode, loginInfo?.userName, cloudSyncEnabled]);
+
+  // === 同じ営業所のオンライン同僚一覧 ===
+  const [onlineColleagues, setOnlineColleagues] = useState([]);
+  useEffect(() => {
+    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) { setOnlineColleagues([]); return; }
+    const { officeCode, userName } = loginInfo;
+    const myKey = simpleHash(`${officeCode}__${userName}`);
+    const r = dbRef(firebaseDB, `presence/${officeCode}`);
+    const unsub = onValue(r, snap => {
+      const v = snap.val() || {};
+      const now = Date.now();
+      const list = Object.entries(v)
+        .filter(([k, u]) => k !== myKey && u && u.online && u.lastSeen && (now - u.lastSeen) < 90000)
+        .map(([k, u]) => ({ key: k, name: u.name, officeCode: u.officeCode, lastSeen: u.lastSeen }))
+        .sort((a, b) => (a.name||'').localeCompare(b.name||'', 'ja'));
+      setOnlineColleagues(list);
+    }, e => console.warn('presence sub', e));
+    return () => { try { if (typeof unsub === 'function') unsub(); else dbOff(r); } catch {} };
+  }, [loginInfo?.officeCode, loginInfo?.userName, cloudSyncEnabled]);
 
   // === 直接送信：相手の営業所コード＋名前を指定して見積を送信 ===
   // === QR共有：短期トークンをFirebase /qrshare/{token} に保存し、QRコードでURL共有 ===
@@ -1041,7 +1112,12 @@ function App() {
     if (!draftLoadedRef.current) return;
     if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
     draftSaveTimerRef.current = setTimeout(() => {
-      const d = { clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups };
+      // モード別のgroups/newItemsをスナップショット保存（モード切替で他モード分が消失するのを防止）
+      const _quoteGroups = appMode === 'quote' ? groups : (quoteGroupsRef.current || null);
+      const _proposalGroups = appMode === 'proposal' ? groups : (proposalGroupsRef.current || null);
+      const _quoteNewItems = appMode === 'quote' ? newItems : (quoteNewItemsRef.current || null);
+      const _proposalNewItems = appMode === 'proposal' ? newItems : (proposalNewItemsRef.current || null);
+      const d = { clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, quoteGroups: _quoteGroups, proposalGroups: _proposalGroups, quoteNewItems: _quoteNewItems, proposalNewItems: _proposalNewItems };
       try {
         const s = JSON.stringify(d);
         if (s === lastDraftStringRef.current) return;
@@ -1050,10 +1126,15 @@ function App() {
       } catch {}
     }, 500);
     return () => { if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current); };
-  }, [clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups]);
+  }, [clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, newItems]);
 
   const notifyTimerRef = useRef(null);
-  const notify = (msg) => { setNotification(msg); if (notifyTimerRef.current) clearTimeout(notifyTimerRef.current); notifyTimerRef.current = setTimeout(() => setNotification(''), 3500); };
+  // type: 'info' (デフォルト) | 'success' | 'error'
+  const notify = (msg, type = 'info') => {
+    setNotification({ msg, type, id: Date.now() });
+    if (notifyTimerRef.current) clearTimeout(notifyTimerRef.current);
+    notifyTimerRef.current = setTimeout(() => setNotification(''), 3500);
+  };
 
   const calculatePrices = (item, changedField) => {
     let { packSize, price, casePrice, cost, caseCost, targetMargin } = item;
@@ -1281,7 +1362,7 @@ function App() {
     const np = { id: genId('prop'), name: saveName, folderId: folderId || null, clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal, groups, attachments, updatedAt: Date.now() };
     setSavedProposals(prev => [np, ...prev]);
     setCurrentProposalId(np.id);
-    setShowSaveModal(false); setSaveName(''); setSaveFolderId(null); setNewFolderInputName(''); notify('新規保存しました');
+    setShowSaveModal(false); setSaveName(''); setSaveFolderId(null); setNewFolderInputName(''); notify('新規保存しました', 'success');
   };
   // 上書き保存：現在開いている見積のIDと一致するものを更新
   const handleOverwriteSave = () => {
@@ -1293,7 +1374,7 @@ function App() {
       groups, attachments, updatedAt: Date.now(),
     } : p));
     const target = savedProposals.find(p => p.id === currentProposalId);
-    notify(target ? `「${target.name}」を上書き保存しました` : '上書き保存しました');
+    notify(target ? `「${target.name}」を上書き保存しました` : '上書き保存しました', 'success');
   };
   // メール送信で見積データを共有（mailtoスキーム）
   // URLリンクで共有：データを圧縮してURLハッシュに含め、クリップボードへコピー
@@ -1472,6 +1553,53 @@ function App() {
       if (warns.length > 0) {
         const msg = '印刷前に以下を確認してください：\n\n' + warns.map(w => '・ ' + w).join('\n') + '\n\nこのまま印刷を続けますか？';
         if (!confirm(msg)) return;
+      }
+      // === バグ5修正：入力途中（追加ボタン未押下）の pending データを実groupsへcommitするか確認 ===
+      const pendingGroupIds = groups.filter(g => {
+        const inp = newItems[g.id];
+        return inp && (
+          (inp.name && String(inp.name).trim()) ||
+          (inp.volume !== '' && inp.volume !== undefined && inp.volume !== null) ||
+          (inp.price !== '' && inp.price !== undefined && inp.price !== null)
+        );
+      }).map(g => g.id);
+      if (pendingGroupIds.length > 0) {
+        const ok = confirm(`入力途中（未追加）の商品が ${pendingGroupIds.length}件あります。\n印刷物には表示されますが、保存データには含まれません。\n\nOK: 実データへ追加して印刷（保存データにも反映）\nキャンセル: 追加せず印刷のみ（保存データと印刷物が食い違います）`);
+        if (ok) {
+          // pending を実 groups へ commit
+          const committedNewItems = { ...newItems };
+          setGroups(prev => prev.map(g => {
+            if (!pendingGroupIds.includes(g.id)) return g;
+            const inp = newItems[g.id];
+            const vol = Number(inp.volume) || 0;
+            const pri = Number(inp.price) || 0;
+            const unitPrice = vol > 0 ? (pri / vol) * (g.baseScale || 1) : 0;
+            const committed = {
+              id: genId('itm'),
+              name: inp.name || '',
+              memo: inp.memo || '',
+              volume: inp.volume,
+              packSize: Number(inp.packSize) || 1,
+              price: pri,
+              casePrice: Number(inp.casePrice) || 0,
+              cost: Number(inp.cost) || 0,
+              caseCost: Number(inp.caseCost) || 0,
+              targetMargin: inp.targetMargin || '',
+              unitPrice: Math.round(unitPrice*10)/10,
+              unitPriceRaw: unitPrice,
+              isHighlighted: !!inp.isHighlighted,
+              unitOverride: inp.unitOverride,
+            };
+            committedNewItems[g.id] = getEmptyItem();
+            return { ...g, items: [...(g.items||[]), committed] };
+          }));
+          setNewItems(committedNewItems);
+          notify(`入力途中の ${pendingGroupIds.length}件を商品リストへ追加しました`);
+          // setState 反映を待ってから印刷を再実行（再帰で newItems がクリアされた状態でhandlePrintを呼ぶ）
+          setTimeout(() => handlePrint(mode), 100);
+          return;
+        }
+        // キャンセル：そのまま既存ロジック（pendingをgroupsForPrintに含めて印刷）
       }
     }
     const formatDate = (d) => {
@@ -1710,6 +1838,14 @@ function App() {
         .item-table-input { height: 40px !important; box-sizing: border-box !important; line-height: 1.2 !important; }
         input.no-spin::-webkit-outer-spin-button, input.no-spin::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
         input.no-spin { -moz-appearance: textfield; }
+        /* === ボタン押下フィードバック（全ボタン共通） === */
+        button:not(:disabled) { transition: transform .08s ease, box-shadow .15s ease, background-color .15s ease; }
+        button:not(:disabled):active { transform: translateY(1px) scale(.98); box-shadow: inset 0 2px 4px rgba(0,0,0,.12); }
+        /* === 保存成功トーストのバウンスアニメ === */
+        @keyframes toastPop { 0% { transform: translateY(20px) scale(.9); opacity: 0; } 60% { transform: translateY(-4px) scale(1.04); opacity: 1; } 100% { transform: translateY(0) scale(1); } }
+        .toast-pop { animation: toastPop .35s cubic-bezier(.34,1.56,.64,1); }
+        @keyframes checkPop { 0% { transform: scale(0) rotate(-90deg); } 100% { transform: scale(1.2) rotate(0); } }
+        .check-anim { display: inline-block; animation: checkPop .5s .1s both; font-size: 1.2em; }
         /* === A11y: 全ボタン・入力にフォーカスリング === */
         button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [role="button"]:focus-visible {
           outline: 2px solid #f59e0b !important;
@@ -2002,7 +2138,18 @@ function App() {
         <div className="pb-20"></div>
       </main>
 
-      {notification && <div className="fixed bottom-4 right-4 bg-slate-900 text-white px-4 py-2.5 rounded-lg shadow-xl z-[100] text-sm font-bold no-print">{notification}</div>}
+      {notification && (() => {
+        // 旧形式（文字列）と新形式（オブジェクト）両対応
+        const n = typeof notification === 'string' ? { msg: notification, type: 'info' } : notification;
+        const bg = n.type === 'success' ? 'bg-emerald-600' : n.type === 'error' ? 'bg-rose-600' : 'bg-slate-900';
+        return (
+          <div key={n.id||0} className={`fixed bottom-4 right-4 ${bg} text-white px-4 py-3 rounded-lg shadow-2xl z-[100] text-sm font-bold no-print flex items-center gap-2 toast-pop max-w-md`}>
+            {n.type === 'success' && <span className="check-anim">✓</span>}
+            {n.type === 'error' && <span>⚠</span>}
+            <span>{n.msg}</span>
+          </div>
+        );
+      })()}
       {undoAvailable && (
         <button onClick={handleUndo} className="fixed bottom-4 left-4 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2.5 rounded-lg shadow-xl z-[100] text-sm font-bold flex items-center gap-2 no-print" title="削除した行/カテゴリを元に戻す (Ctrl+Z)">
           ↶ 元に戻す <span className="text-[10px] opacity-80">(Ctrl+Z)</span>
@@ -2151,7 +2298,7 @@ function App() {
                 <div key={f.k}><label className="text-xs font-bold text-slate-600 block mb-1">{f.l}</label><input value={officeInfo[f.k]||''} onChange={e => setOfficeInfo({ ...officeInfo, [f.k]: e.target.value })} className="w-full p-2 border border-slate-300 rounded outline-none focus:border-blue-500" /></div>
               ))}
             </div>
-            <div className="p-4 border-t flex justify-end gap-2 bg-slate-50"><button onClick={() => setShowOfficeModal(false)} className="px-5 py-2 bg-slate-200 font-bold rounded text-sm">閉じる</button><button onClick={() => { setShowOfficeModal(false); notify('保存しました'); }} className="px-5 py-2 bg-amber-500 text-white font-bold rounded text-sm">保存して閉じる</button></div>
+            <div className="p-4 border-t flex justify-end gap-2 bg-slate-50"><button onClick={() => setShowOfficeModal(false)} className="px-5 py-2 bg-slate-200 font-bold rounded text-sm">閉じる</button><button onClick={() => { setShowOfficeModal(false); notify('営業所設定を保存しました', 'success'); }} className="px-5 py-2 bg-amber-500 text-white font-bold rounded text-sm">保存して閉じる</button></div>
           </div>
         </div>
       )}
@@ -2366,6 +2513,31 @@ function App() {
             <div className="flex-1 overflow-y-auto p-5 space-y-4">
               <div className="bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-900">
                 <strong>👤 受信者は何もしなくてOK：</strong>送信先の方が同じアプリにログインすれば、自動的に「受信トレイ」に届きます。<strong>パスワードは不要</strong>です。
+              </div>
+              {/* === オンライン同僚チップ === */}
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1.5">
+                  🟢 同じ営業所のオンライン同僚
+                  <span className="text-slate-500 text-xs font-normal ml-1">({onlineColleagues.length}名)</span>
+                </label>
+                {onlineColleagues.length === 0 ? (
+                  <div className="text-center py-3 text-slate-400 text-xs bg-slate-50 rounded border border-dashed border-slate-300">
+                    現在オンラインの同僚はいません（下の欄に手入力してください）
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto p-2 bg-emerald-50/60 rounded border border-emerald-200">
+                    {onlineColleagues.map(u => {
+                      const selected = sendRecipientOffice === u.officeCode && sendRecipientName === u.name;
+                      return (
+                        <button key={u.key} type="button"
+                          onClick={() => { setSendRecipientOffice(u.officeCode); setSendRecipientName(u.name); }}
+                          className={`px-3 py-1.5 rounded-full text-xs font-bold border-2 transition flex items-center gap-1.5 ${selected ? 'bg-emerald-600 text-white border-emerald-700' : 'bg-white text-emerald-800 border-emerald-300 hover:bg-emerald-100'}`}>
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>{u.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-bold text-slate-700 mb-1">送信先の営業所コード <span className="text-rose-500">*</span></label>
