@@ -2833,11 +2833,24 @@ try {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     if (__loadingEl) __loadingEl.style.display = 'none';
     window.__appMounted = true;
-    // 起動時に印刷プレビューの孤児DOM要素を完全除去（前回印刷からの残骸対策）
-    ['print-content-holder', 'print-injected-style', 'print-toolbar'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) { try { el.remove(); } catch {} }
-    });
+    // 起動時 + 継続的監視で印刷プレビューの孤児DOM要素を完全除去
+    const scrubOrphans = () => {
+      // print-content-holder がない時に print-toolbar だけ残っているのは孤児
+      const holder = document.getElementById('print-content-holder');
+      const toolbar = document.getElementById('print-toolbar');
+      const style = document.getElementById('print-injected-style');
+      if (!holder) {
+        // ホルダーがなければツールバーとスタイルも不要
+        if (toolbar) { try { toolbar.remove(); } catch {} }
+        if (style) { try { style.remove(); } catch {} }
+      }
+    };
+    scrubOrphans();
+    // MutationObserverでbody直下のDOM変化を監視し孤児が現れたら即除去
+    try {
+      const obs = new MutationObserver(scrubOrphans);
+      obs.observe(document.body, { childList: true, subtree: false });
+    } catch {}
     console.log('[App] mounted in', Date.now()-window.__loadStart, 'ms');
   }));
 } catch (err) {
