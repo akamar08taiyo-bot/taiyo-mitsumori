@@ -446,6 +446,7 @@ function App() {
       if (showLoadModal) { setShowLoadModal(false); return; }
       if (showOfficeModal) { setShowOfficeModal(false); return; }
       if (showGuideModal) { setShowGuideModal(false); return; }
+      if (showTroubleshootModal) { setShowTroubleshootModal(false); return; }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -626,6 +627,25 @@ function App() {
   const [saveName, setSaveName] = useState('');
   const [notification, setNotification] = useState('');
   const [showGuideModal, setShowGuideModal] = useState(false);
+  const [showTroubleshootModal, setShowTroubleshootModal] = useState(false);
+  // 強制再読込：Service Worker / cache を全消去してから location.reload
+  const handleForceReload = async () => {
+    try {
+      // Service Worker 解除
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r => r.unregister()));
+      }
+      // Cache API クリア
+      if (typeof caches !== 'undefined' && caches.keys) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+      }
+    } catch (e) { console.warn('cache clear', e); }
+    // タイムスタンプ付きで強制再読込（ブラウザキャッシュをバイパス）
+    const url = window.location.pathname + '?cb=' + Date.now();
+    window.location.replace(url);
+  };
   const [confirmClearAll, setConfirmClearAll] = useState(false);
   const [deleteConfirmMap, setDeleteConfirmMap] = useState({});
 
@@ -1972,6 +1992,7 @@ function App() {
                   <div className="absolute right-0 top-full mt-1 bg-white text-slate-800 rounded-lg shadow-2xl border border-slate-200 w-56 z-50 overflow-hidden">
                     <button onClick={() => { setShowUtilMenu(false); setShowOfficeModal(true); }} className="w-full text-left px-3 py-2.5 hover:bg-amber-50 border-b border-slate-100 flex items-center gap-2 text-xs font-bold"><Building2 className="w-4 h-4 text-amber-600" /> 営業所設定</button>
                     <button onClick={() => { setShowUtilMenu(false); setShowGuideModal(true); }} className="w-full text-left px-3 py-2.5 hover:bg-blue-50 border-b border-slate-100 flex items-center gap-2 text-xs font-bold"><BookOpen className="w-4 h-4 text-blue-600" /> 使い方ガイド</button>
+                    <button onClick={() => { setShowUtilMenu(false); setShowTroubleshootModal(true); }} className="w-full text-left px-3 py-2.5 hover:bg-orange-50 border-b border-slate-100 flex items-center gap-2 text-xs font-bold"><AlertTriangle className="w-4 h-4 text-orange-600" /> 🛠 トラブルシューティング</button>
                     <button onClick={() => { setShowUtilMenu(false); handleLogout(); }} className="w-full text-left px-3 py-2.5 hover:bg-rose-50 flex items-center gap-2 text-xs font-bold text-rose-700"><X className="w-4 h-4" /> ログアウト</button>
                   </div>
                 )}
@@ -2671,6 +2692,94 @@ function App() {
               )}
               <button onClick={handleImportFromClipboard} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded text-sm flex items-center justify-center gap-2"><Paperclip className="w-4 h-4" /> クリップボードから取込（JSONを貼付け不要）</button>
               <button onClick={() => importFileRef.current?.click()} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded text-sm flex items-center justify-center gap-2"><Paperclip className="w-4 h-4" /> 共有ファイル(.json)を選択して取込</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === トラブルシューティング モーダル === */}
+      {showTroubleshootModal && (
+        <div className="fixed inset-0 bg-slate-900/70 z-[95] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden">
+            <div className="p-4 border-b bg-orange-50 flex justify-between items-center">
+              <h3 className="text-base font-bold text-orange-800 flex items-center gap-2"><AlertTriangle className="w-5 h-5" /> 🛠 トラブルシューティング</h3>
+              <button onClick={() => setShowTroubleshootModal(false)} aria-label="閉じる"><X className="w-5 h-5" /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50 text-sm">
+
+              <div className="bg-red-50 border-2 border-red-300 rounded-lg p-4">
+                <div className="font-bold text-red-800 mb-2 flex items-center gap-2">⚡ ワンクリック解決</div>
+                <p className="text-xs text-slate-700 mb-3">下のボタン1回で <strong>キャッシュ全削除＋Service Worker解除＋強制再読込</strong> を実行します。表示が変な時はまずこれを試してください。</p>
+                <button onClick={handleForceReload} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg text-base shadow">
+                  🔄 強制再読込（キャッシュ完全クリア）
+                </button>
+              </div>
+
+              <section className="bg-white p-4 rounded-lg border border-slate-200">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="bg-blue-600 text-white font-bold w-7 h-7 rounded-full flex items-center justify-center text-sm">A</span>
+                  <h4 className="font-bold text-base text-slate-800">ブラウザキャッシュの完全削除（手動）</h4>
+                </div>
+                <ol className="list-decimal pl-6 space-y-1.5 text-xs text-slate-700">
+                  <li><strong>Ctrl + Shift + Delete</strong>（Mac は <strong>Cmd + Shift + Backspace</strong>）を押す</li>
+                  <li>「キャッシュされた画像とファイル」「Cookieとサイトデータ」にチェック</li>
+                  <li>期間は「<strong>全期間</strong>」を選択 → 「データを削除」ボタン</li>
+                  <li>ブラウザを<strong>完全に閉じてから再起動</strong></li>
+                  <li>もう一度このアプリを開く</li>
+                </ol>
+              </section>
+
+              <section className="bg-white p-4 rounded-lg border border-slate-200">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="bg-purple-600 text-white font-bold w-7 h-7 rounded-full flex items-center justify-center text-sm">B</span>
+                  <h4 className="font-bold text-base text-slate-800">シークレットウィンドウで確認</h4>
+                </div>
+                <ol className="list-decimal pl-6 space-y-1.5 text-xs text-slate-700">
+                  <li><strong>Ctrl + Shift + N</strong>（Chrome / Edge）または <strong>Cmd + Shift + N</strong>（Safari）</li>
+                  <li>アドレスバーに以下を貼り付けて開く：<br/><code className="bg-slate-100 px-1.5 py-0.5 rounded text-[10px] break-all">https://akamar08taiyo-bot.github.io/taiyo-mitsumori/</code></li>
+                  <li>問題が消えていれば <strong>キャッシュ問題</strong>確定 → 手順Aを実施</li>
+                  <li>シークレットでも同じ問題が出るなら次（手順C）へ</li>
+                </ol>
+              </section>
+
+              <section className="bg-white p-4 rounded-lg border border-slate-200">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="bg-emerald-600 text-white font-bold w-7 h-7 rounded-full flex items-center justify-center text-sm">C</span>
+                  <h4 className="font-bold text-base text-slate-800">別ブラウザで確認</h4>
+                </div>
+                <ol className="list-decimal pl-6 space-y-1.5 text-xs text-slate-700">
+                  <li>普段使っているブラウザを<strong>別のもの</strong>に切替えて開く<br/>（Chrome → Edge、Edge → Firefox など）</li>
+                  <li>別ブラウザで表示が正常 → 元ブラウザのキャッシュ問題 / 拡張機能の影響</li>
+                  <li>すべて同じ問題なら → 開発者へスクリーンショット付きでご報告ください</li>
+                </ol>
+              </section>
+
+              <section className="bg-amber-50 p-4 rounded-lg border border-amber-300">
+                <div className="font-bold text-amber-900 mb-2 flex items-center gap-2">📋 アプリ診断情報（コピーして開発者へ）</div>
+                <div className="text-[11px] text-slate-700 font-mono break-all bg-white p-2 rounded border border-amber-200">
+                  <div>URL: {typeof window !== 'undefined' ? window.location.href : ''}</div>
+                  <div>UA: {typeof navigator !== 'undefined' ? navigator.userAgent.substring(0, 100) : ''}</div>
+                  <div>画面: {typeof window !== 'undefined' ? `${window.innerWidth}×${window.innerHeight}` : ''}</div>
+                  <div>オンライン: {typeof navigator !== 'undefined' ? (navigator.onLine ? 'YES' : 'NO') : '?'}</div>
+                  <div>同期: {syncStatus} {syncError ? '(' + syncError + ')' : ''}</div>
+                  <div>ログイン: {loginInfo ? `${loginInfo.officeCode}/${loginInfo.userName}` : 'なし'}</div>
+                  <div>保存件数: {savedProposals.length}件 / フォルダ {folders.length}件</div>
+                </div>
+                <button onClick={() => {
+                  const info = `URL: ${window.location.href}\nUA: ${navigator.userAgent}\n画面: ${window.innerWidth}×${window.innerHeight}\nオンライン: ${navigator.onLine}\n同期: ${syncStatus}\nログイン: ${loginInfo?.officeCode}/${loginInfo?.userName}\n保存件数: ${savedProposals.length}\nフォルダ: ${folders.length}`;
+                  navigator.clipboard?.writeText(info);
+                  notify('診断情報をコピーしました', 'success');
+                }} className="mt-2 w-full bg-amber-600 hover:bg-amber-700 text-white py-2 rounded text-xs font-bold">
+                  📋 診断情報をクリップボードへコピー
+                </button>
+              </section>
+
+              <div className="text-[11px] text-slate-500 bg-slate-100 p-3 rounded">
+                <strong>💡 ヒント：</strong>「閉じる」ボタンが意図しない場所に表示される問題は、印刷プレビューを過去に開いた際の残骸が原因です。アプリには <strong>三重防御（CSS非表示・MutationObserver・2秒間隔スキャン）</strong>が組み込まれているため、通常は自動で消えます。それでも見える場合は上記「強制再読込」をお試しください。
+              </div>
+            </div>
+            <div className="p-3 border-t bg-white flex justify-end">
+              <button onClick={() => setShowTroubleshootModal(false)} className="px-6 py-2 bg-slate-600 hover:bg-slate-700 text-white font-bold rounded text-sm">閉じる</button>
             </div>
           </div>
         </div>
