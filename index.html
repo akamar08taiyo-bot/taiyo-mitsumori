@@ -1820,7 +1820,20 @@ function App() {
       const toolbar = document.createElement('div'); toolbar.id = 'print-toolbar';
       toolbar.innerHTML = `<div class="info">📄 印刷プレビュー　<strong>「印刷する」</strong>を押すか、<strong>Ctrl+P</strong>で印刷できます</div><div class="actions"><button class="primary" id="print-toolbar-print">🖨 印刷する</button><button class="secondary" id="print-toolbar-close">✕ 閉じる</button></div>`;
       document.head.appendChild(styleEl); document.body.appendChild(holder); document.body.appendChild(toolbar);
-      const cleanup = () => { holder.remove(); styleEl.remove(); toolbar.remove(); document.removeEventListener('keydown', escH); };
+      const cleanup = () => {
+        // ID 経由で再取得して確実に削除（参照が外れていてもクリーンアップ可能）
+        ['print-content-holder', 'print-injected-style', 'print-toolbar'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) { try { el.remove(); } catch {} }
+        });
+        try { holder.remove(); } catch {}
+        try { styleEl.remove(); } catch {}
+        try { toolbar.remove(); } catch {}
+        try { document.removeEventListener('keydown', escH); } catch {}
+      };
+      // ブラウザの印刷ダイアログが閉じた直後にもクリーンアップ実行
+      const afterPrintHandler = () => cleanup();
+      window.addEventListener('afterprint', afterPrintHandler, { once: true });
       const escH = (e) => { if (e.key === 'Escape') cleanup(); };
       document.addEventListener('keydown', escH);
       document.getElementById('print-toolbar-print').onclick = () => { try { window.print(); } catch { alert('Ctrl+Pで印刷してください'); } };
@@ -2820,6 +2833,11 @@ try {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     if (__loadingEl) __loadingEl.style.display = 'none';
     window.__appMounted = true;
+    // 起動時に印刷プレビューの孤児DOM要素を完全除去（前回印刷からの残骸対策）
+    ['print-content-holder', 'print-injected-style', 'print-toolbar'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) { try { el.remove(); } catch {} }
+    });
     console.log('[App] mounted in', Date.now()-window.__loadStart, 'ms');
   }));
 } catch (err) {
