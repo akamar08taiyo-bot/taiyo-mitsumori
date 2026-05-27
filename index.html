@@ -654,8 +654,8 @@ function App() {
     try { const k='__d_'+Date.now(); localStorage.setItem(k,'1'); localStorage.removeItem(k); checks.push({ id:'storage', label:'ローカル保存（localStorage）', pass:true }); }
     catch (e) { checks.push({ id:'storage', label:'ローカル保存（localStorage）', pass:false, error:e.message, suggestion:'シークレットモード/プライベートモードでは保存できません' }); }
     // 3. CDN到達
-    try { await withTimeout(fetch('https://cdn.jsdelivr.net/npm/firebase@10.14.0/app/dist/index.esm.js', { method:'HEAD', mode:'no-cors', cache:'no-store' }), 6000); checks.push({ id:'cdn', label:'Firebase CDN（jsdelivr）', pass:true }); }
-    catch (e) { checks.push({ id:'cdn', label:'Firebase CDN（jsdelivr）', pass:false, error:e.message, suggestion:'社内ネットワークから jsdelivr.net への通信が遮断されている可能性' }); }
+    try { await withTimeout(fetch('https://esm.sh/firebase@10.14.0/app', { method:'HEAD', mode:'no-cors', cache:'no-store' }), 6000); checks.push({ id:'cdn', label:'Firebase CDN（esm.sh）', pass:true }); }
+    catch (e) { checks.push({ id:'cdn', label:'Firebase CDN（esm.sh）', pass:false, error:e.message, suggestion:'社内ネットワークから esm.sh への通信が遮断されている可能性' }); }
     // 4. Firebase RTDB endpoint
     try { await withTimeout(fetch('https://taiyo-mitsumori-03724-default-rtdb.asia-southeast1.firebasedatabase.app/.json?shallow=true', { mode:'no-cors', cache:'no-store' }), 6000); checks.push({ id:'rtdb', label:'Firebase Realtime DB エンドポイント', pass:true }); }
     catch (e) { checks.push({ id:'rtdb', label:'Firebase Realtime DB エンドポイント', pass:false, error:e.message, suggestion:'firebaseio.com / firebasedatabase.app ドメインがブロックされている可能性' }); }
