@@ -678,6 +678,12 @@ function App() {
   const [sendMessage, setSendMessage] = useState('');
   const [sendSelectedIds, setSendSelectedIds] = useState(new Set());
   const inboxRefHandle = useRef(null);
+  const inboxSeenIdsRef = useRef(null); // 初回ロード時の既知IDセット（null=未初期化）
+  const [incomingNotification, setIncomingNotification] = useState(null);
+  // QR共有
+  const [showQRShareModal, setShowQRShareModal] = useState(false);
+  const [qrShareUrl, setQRShareUrl] = useState('');
+  const [qrShareExpiresAt, setQRShareExpiresAt] = useState(0);
   const [showSyncPopover, setShowSyncPopover] = useState(false);
   const [showShareMenu, setShowShareMenu] = useState(false);
   const [showUtilMenu, setShowUtilMenu] = useState(false);
@@ -784,19 +790,92 @@ function App() {
     const inboxKey = getMyInboxKey(); if (!inboxKey) return;
     const r = dbRef(firebaseDB, `inbox/${inboxKey}`);
     inboxRefHandle.current = r;
+    const seenIdsRef = inboxSeenIdsRef;
     const unsub = onValue(r, (snap) => {
       const v = snap.val() || {};
       const items = Object.entries(v).map(([id, d]) => ({ shareId: id, ...d }));
-      // 30日経過したものは自動削除
       const now = Date.now(), TTL = 30*24*3600*1000;
       items.forEach(it => { if (it.sentAt && now - it.sentAt > TTL) { try { dbSet(dbRef(firebaseDB, `inbox/${inboxKey}/${it.shareId}`), null); } catch {} } });
       const fresh = items.filter(it => !it.sentAt || now - it.sentAt <= TTL).sort((a,b) => (b.sentAt||0)-(a.sentAt||0));
+      // 新着検出：seenIdsRef に未登録のアイテムをポップアップ通知
+      if (seenIdsRef.current === null) {
+        // 初回ロード時は既存を「既読」扱い（古い通知のスパム防止）
+        seenIdsRef.current = new Set(fresh.map(f => f.shareId));
+      } else {
+        const newItems = fresh.filter(f => !seenIdsRef.current.has(f.shareId));
+        if (newItems.length > 0) {
+          newItems.forEach(it => seenIdsRef.current.add(it.shareId));
+          // 最新の新着で通知ポップアップ
+          setIncomingNotification(newItems[0]);
+          // 5秒後に自動消去
+          setTimeout(() => setIncomingNotification(null), 12000);
+        }
+      }
       setInbox(fresh);
     }, (err) => { console.warn('inbox sub error', err); });
     return () => { if (typeof unsub === 'function') unsub(); };
   }, [loginInfo]);
 
   // === 直接送信：相手の営業所コード＋名前を指定して見積を送信 ===
+  // === QR共有：短期トークンをFirebase /qrshare/{token} に保存し、QRコードでURL共有 ===
+  // 受信者はQRをスマホで読み取り → ?qr=token でアプリを開く → 自動取込
+  const handleQRShare = async () => {
+    if (!firebaseDB) { notify('Firebase未接続のためQR共有はできません'); return; }
+    if (savedProposals.length === 0 && folders.length === 0) { notify('共有できるデータがありません'); return; }
+    const token = Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+    const expires = Date.now() + 10 * 60 * 1000; // 10分有効
+    try {
+      await dbSet(dbRef(firebaseDB, `qrshare/${token}`), {
+        from: { officeCode: loginInfo?.officeCode || '', name: loginInfo?.userName || '' },
+        sentAt: Date.now(),
+        ttl: expires,
+        data: JSON.stringify({ folders, savedProposals }),
+      });
+      const base = window.location.origin + window.location.pathname;
+      const url = `${base}?qr=${token}`;
+      setQRShareUrl(url);
+      setQRShareExpiresAt(expires);
+      setShowQRShareModal(true);
+    } catch (err) {
+      notify('QR共有の準備に失敗: ' + (err?.message||String(err)));
+    }
+  };
+
+  // === ?qr=xxx を検知して自動取込 ===
+  useEffect(() => {
+    if (!loginInfo || !firebaseDB) return;
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('qr');
+    if (!token) return;
+    // 取得・取込・トークン削除
+    (async () => {
+      try {
+        const snap = await dbGet(dbRef(firebaseDB, `qrshare/${token}`));
+        const v = snap.val();
+        if (!v) { notify('QRコードが見つかりません（既に使用済みか期限切れ）'); return; }
+        if (v.ttl && Date.now() > v.ttl) { notify('QRコードの有効期限切れです'); return; }
+        const parsed = JSON.parse(v.data || '{}');
+        const incomingFolders = Array.isArray(parsed.folders) ? parsed.folders : [];
+        const incomingProps = Array.isArray(parsed.savedProposals) ? parsed.savedProposals : [];
+        if (incomingProps.length === 0) { notify('QRに有効な見積データが含まれていません'); return; }
+        // 受信専用フォルダに自動取込
+        const autoFolderId = genId('fld');
+        const autoFolder = { id: autoFolderId, name: `📱 QR受信 ${v.from?.name||'(送信者不明)'}さんから`, createdAt: Date.now() };
+        const remapped = incomingProps.map(p => ({ ...p, id: genId('prop'), folderId: autoFolderId, _importedFrom: `QR/${v.from?.officeCode||''}/${v.from?.name||''}`, _receivedAt: Date.now() }));
+        setFolders(prev => [autoFolder, ...prev]);
+        setSavedProposals(prev => [...remapped, ...prev]);
+        notify(`📱 QR取込完了：${remapped.length}件を「${autoFolder.name}」へ追加しました`);
+        // 使用済みトークンは削除
+        try { await dbSet(dbRef(firebaseDB, `qrshare/${token}`), null); } catch {}
+        // URLからqrパラメータを削除
+        const cleanUrl = window.location.origin + window.location.pathname;
+        history.replaceState(null, '', cleanUrl);
+      } catch (err) {
+        notify('QR取込エラー: ' + (err?.message||String(err)));
+      }
+    })();
+  }, [loginInfo]);
+
   const handleDirectSend = async () => {
     if (!firebaseDB) { notify('Firebase未接続のため直接送信はできません'); return; }
     const office = sendRecipientOffice.trim();
@@ -1291,7 +1370,7 @@ function App() {
       const body = [
         '太陽シルバーサービス㈱ 見積書作成システムから共有データをお送りします。',
         '',
-        `送信元: ${loginInfo?.office||''} / ${loginInfo?.userName||''}`,
+        `送信元: ${loginInfo?.officeCode||''} / ${loginInfo?.userName||''}`,
         `データ: フォルダ ${folders.length}件、見積 ${savedProposals.length}件`,
         `日付: ${new Date().toLocaleDateString('ja-JP')}`,
         '',
@@ -1371,6 +1450,11 @@ function App() {
   };
 
   const handlePrint = (mode = 'print') => {
+    // 連打防止：既に印刷プレビューが表示中なら何もしない
+    if (document.getElementById('print-content-holder')) {
+      console.warn('[Print] already showing preview, skipping double-click');
+      return;
+    }
     if (mode === 'print') {
       const warns = validateBeforePrint();
       if (warns.length > 0) {
@@ -1688,7 +1772,11 @@ function App() {
                       setShowDirectSendModal(true);
                     }} className="w-full text-left px-3 py-3 hover:bg-emerald-50 border-b border-slate-100 flex items-start gap-2">
                       <span className="text-xl shrink-0">📨</span>
-                      <div className="text-xs flex-1"><div className="font-bold text-emerald-700">★ おすすめ：相手を選んで直接送信</div><div className="text-slate-500 mt-0.5">送信先の営業所・名前を指定するだけ。受信側は自動的にアプリ内に届きます</div></div>
+                      <div className="text-xs flex-1"><div className="font-bold text-emerald-700">★ 相手を選んで直接送信</div><div className="text-slate-500 mt-0.5">送信先の営業所・名前を指定。受信側に自動ポップアップ通知</div></div>
+                    </button>
+                    <button onClick={() => { setShowShareMenu(false); handleQRShare(); }} className="w-full text-left px-3 py-3 hover:bg-purple-50 border-b border-slate-100 flex items-start gap-2">
+                      <span className="text-xl shrink-0">📱</span>
+                      <div className="text-xs flex-1"><div className="font-bold text-purple-700">QRコードで隣の人へ送る</div><div className="text-slate-500 mt-0.5">画面のQRをスマホで読み取り。10分有効・1回限り</div></div>
                     </button>
                     <button onClick={() => { setShowShareMenu(false); handleCopyShareLink(); }} className="w-full text-left px-3 py-2.5 hover:bg-teal-50 border-b border-slate-100 flex items-start gap-2">
                       <ExternalLink className="w-4 h-4 mt-0.5 text-teal-600 shrink-0" />
@@ -1902,6 +1990,61 @@ function App() {
         <button onClick={handleUndo} className="fixed bottom-4 left-4 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2.5 rounded-lg shadow-xl z-[100] text-sm font-bold flex items-center gap-2 no-print" title="削除した行/カテゴリを元に戻す (Ctrl+Z)">
           ↶ 元に戻す <span className="text-[10px] opacity-80">(Ctrl+Z)</span>
         </button>
+      )}
+
+      {/* === リアルタイム新着通知トースト === */}
+      {incomingNotification && (
+        <div className="fixed top-20 right-4 bg-white border-2 border-emerald-500 rounded-xl shadow-2xl z-[110] max-w-sm w-[92vw] sm:w-96 animate-pulse-slow no-print" style={{animation:'slideIn 0.3s ease-out'}}>
+          <style>{`@keyframes slideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }`}</style>
+          <div className="p-4">
+            <div className="flex items-start gap-3 mb-3">
+              <span className="text-3xl">📨</span>
+              <div className="flex-1">
+                <div className="font-bold text-emerald-700">新着メッセージ</div>
+                <div className="text-sm text-slate-800 mt-0.5"><strong>{incomingNotification.from?.name || '(送信者不明)'}</strong> さんから見積が届きました</div>
+                {incomingNotification.message && <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-1.5 mt-1.5">💬 {incomingNotification.message}</div>}
+                <div className="text-[10px] text-slate-500 mt-1">{incomingNotification.from?.officeCode} ／ {new Date(incomingNotification.sentAt||Date.now()).toLocaleTimeString('ja-JP')}</div>
+              </div>
+              <button onClick={() => setIncomingNotification(null)} className="text-slate-400 hover:text-slate-700" aria-label="閉じる"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => { acceptInboxItem(incomingNotification); setIncomingNotification(null); }} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded text-sm font-bold">✓ 取込・編集する</button>
+              <button onClick={() => { setIncomingNotification(null); setShowInboxModal(true); }} className="bg-slate-200 hover:bg-slate-300 text-slate-700 py-2 px-3 rounded text-sm font-bold">後で確認</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* === QRコード共有モーダル === */}
+      {showQRShareModal && (
+        <div className="fixed inset-0 bg-slate-900/70 z-[95] flex items-center justify-center backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="p-4 border-b bg-purple-50 flex justify-between items-center">
+              <h3 className="text-base font-bold text-purple-800 flex items-center gap-2">📱 QRコードで隣の人へ送る</h3>
+              <button onClick={() => setShowQRShareModal(false)}><X className="w-5 h-5" /></button>
+            </div>
+            <div className="p-6 text-center">
+              <div className="bg-slate-50 border-2 border-purple-200 rounded-lg p-4 mb-3 inline-block">
+                <img src={`https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=10&data=${encodeURIComponent(qrShareUrl)}`} alt="QRコード" width="280" height="280" style={{display:'block'}} />
+              </div>
+              <div className="text-sm text-slate-700 font-bold mb-2">📲 受信者のスマホ・PCで読み取り</div>
+              <div className="text-xs text-slate-500 mb-3">
+                <strong>有効期限: あと {Math.max(0, Math.round((qrShareExpiresAt - Date.now()) / 60000))} 分</strong>（1回限り）<br/>
+                データ：フォルダ {folders.length}件 / 見積 {savedProposals.length}件
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded p-2 text-[11px] text-amber-800 text-left">
+                <strong>使い方：</strong><br/>
+                1. 受信者のスマホでQRをスキャン<br/>
+                2. ブラウザでアプリが開く<br/>
+                3. ログイン後、自動的に「📱 QR受信」フォルダへ取込<br/>
+                <strong>※ メール不要、Firebase経由で安全に転送</strong>
+              </div>
+              <div className="mt-3">
+                <button onClick={() => { navigator.clipboard?.writeText(qrShareUrl); notify('リンクをコピーしました'); }} className="text-xs bg-slate-200 hover:bg-slate-300 px-3 py-1.5 rounded font-bold">🔗 URLをコピー（QR以外で送る場合）</button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {showSyncPopover && (
