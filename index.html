@@ -1667,10 +1667,20 @@ function App() {
         const trClass = item.isHighlighted ? ' class="highlighted"' : '';
         let cols = `<td class="pname"><div class="name">${escapeHTML(item.name)}</div></td>`;
         if (appMode === 'proposal') {
-          cols += `<td class="num">${escapeHTML(String(item.volume||''))}${showUnit ? `<span class="unit">${escapeHTML(item.unitOverride ?? group.unit)}</span>` : ''}</td>`;
+          // 数量：整数ならそのまま、小数なら1桁まで表示（例: 200 → 200、1.55 → 1.6）
+          const volNum = Number(item.volume);
+          const volStr = (item.volume === '' || item.volume === null || item.volume === undefined) ? '' :
+            (!isFinite(volNum) ? String(item.volume) :
+            (volNum % 1 === 0 ? volNum.toLocaleString('ja-JP') : volNum.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 })));
+          cols += `<td class="num">${escapeHTML(volStr)}${showUnit ? `<span class="unit">${escapeHTML(item.unitOverride ?? group.unit)}</span>` : ''}</td>`;
           if (showCaseMode) cols += `<td class="num">${item.packSize}</td>`;
         } else {
-          cols += `<td class="num">${escapeHTML(String(item.volume||''))}</td>`;
+          // 見積モードの数量も同様に整数/小数1桁で表示
+          const volNum2 = Number(item.volume);
+          const volStr2 = (item.volume === '' || item.volume === null || item.volume === undefined) ? '' :
+            (!isFinite(volNum2) ? String(item.volume) :
+            (volNum2 % 1 === 0 ? volNum2.toLocaleString('ja-JP') : volNum2.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 })));
+          cols += `<td class="num">${escapeHTML(volStr2)}</td>`;
         }
         cols += `<td class="price strong">¥${(item.price||0).toLocaleString()}</td>`;
         const factor = appMode === 'proposal' ? (Number(item.packSize)||0) : (Number(item.volume)||0);
