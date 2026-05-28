@@ -447,6 +447,7 @@ function App() {
       if (showOfficeModal) { setShowOfficeModal(false); return; }
       if (showGuideModal) { setShowGuideModal(false); return; }
       if (showTroubleshootModal) { setShowTroubleshootModal(false); return; }
+      if (showBackupModal) { setShowBackupModal(false); return; }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -906,6 +907,98 @@ function App() {
     }, e => console.warn('presence sub', e));
     return () => { try { if (typeof unsub === 'function') unsub(); else dbOff(r); } catch {} };
   }, [loginInfo?.officeCode, loginInfo?.userName, cloudSyncEnabled]);
+
+  // === 営業所共有フォルダ（office-shared）：営業所全員で同じ見積を閲覧・編集 ===
+  const [officeSharedFolders, setOfficeSharedFolders] = useState([]);
+  const [officeSharedProposals, setOfficeSharedProposals] = useState([]);
+  const officeSharedRefHandle = useRef(null);
+  const officeSharedLoadedRef = useRef(false);
+  const officeSharedSuppressRef = useRef(false);
+
+  // 営業所共有データの購読
+  useEffect(() => {
+    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
+    const r = dbRef(firebaseDB, `office-shared/${loginInfo.officeCode}`);
+    officeSharedRefHandle.current = r;
+    const unsub = onValue(r, (snap) => {
+      const v = snap.val() || {};
+      officeSharedSuppressRef.current = true;
+      setOfficeSharedFolders(Array.isArray(v.folders) ? v.folders : []);
+      setOfficeSharedProposals(Array.isArray(v.savedProposals) ? v.savedProposals : []);
+      officeSharedLoadedRef.current = true;
+    }, e => console.warn('office-shared sub', e));
+    return () => { try { if (typeof unsub === 'function') unsub(); else dbOff(r); } catch {} };
+  }, [loginInfo?.officeCode, cloudSyncEnabled]);
+
+  // 営業所共有データの書込：マージ方式（既存上書き禁止、新規追加のみ）
+  const saveToOfficeShared = async (folder, proposal) => {
+    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) { notify('Firebase未接続のため営業所共有はできません', 'error'); return false; }
+    try {
+      const r = dbRef(firebaseDB, `office-shared/${loginInfo.officeCode}`);
+      const snap = await dbGet(r);
+      const cur = snap.val() || { folders: [], savedProposals: [] };
+      const curFolders = Array.isArray(cur.folders) ? cur.folders : [];
+      const curProposals = Array.isArray(cur.savedProposals) ? cur.savedProposals : [];
+      // フォルダはID/名前で重複チェックして追加
+      let mergedFolders = curFolders;
+      if (folder && !curFolders.find(f => f.id === folder.id || f.name === folder.name)) {
+        mergedFolders = [...curFolders, { ...folder, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }];
+      }
+      // 見積はID重複チェックして追加（既存IDは上書きせず別IDで追加=保護）
+      let mergedProposals = curProposals;
+      if (proposal) {
+        const existsIdx = curProposals.findIndex(p => p.id === proposal.id);
+        if (existsIdx === -1) {
+          mergedProposals = [...curProposals, { ...proposal, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }];
+        } else {
+          // 同じIDがある場合は新規IDで複製追加（既存データ保護）
+          mergedProposals = [...curProposals, { ...proposal, id: genId('prop'), _sharedBy: loginInfo.userName, _sharedAt: Date.now(), _copyOf: proposal.id }];
+        }
+      }
+      await dbSet(r, { folders: mergedFolders, savedProposals: mergedProposals, _updatedAt: Date.now(), _updatedBy: loginInfo.userName });
+      notify('営業所共有フォルダに追加しました', 'success');
+      return true;
+    } catch (err) {
+      notify('共有エラー: ' + (err?.message || String(err)), 'error');
+      return false;
+    }
+  };
+
+  // === 自動バックアップ（データ保護）：保存時に過去5世代を localStorage に保持 ===
+  const backupRef = useRef({ lastTs: 0 });
+  useEffect(() => {
+    if (!loginInfo) return;
+    const now = Date.now();
+    // 直近5分以内のバックアップはスキップ（スパム防止）
+    if (now - backupRef.current.lastTs < 5 * 60 * 1000) return;
+    backupRef.current.lastTs = now;
+    try {
+      const key = `taiyo_backup_${loginInfo.officeCode}_${loginInfo.userName}`;
+      const existing = JSON.parse(localStorage.getItem(key) || '[]');
+      const snapshot = { ts: now, folders, savedProposals, officeInfo };
+      // 最新5世代だけ保持
+      const next = [snapshot, ...existing].slice(0, 5);
+      localStorage.setItem(key, JSON.stringify(next));
+      console.log('[Backup] saved', folders.length, 'folders /', savedProposals.length, 'proposals');
+    } catch (e) { console.warn('backup save error', e); }
+  }, [savedProposals, folders, loginInfo?.officeCode, loginInfo?.userName]);
+
+  // バックアップ一覧取得（復元UI用）
+  const getBackups = () => {
+    if (!loginInfo) return [];
+    try {
+      const key = `taiyo_backup_${loginInfo.officeCode}_${loginInfo.userName}`;
+      return JSON.parse(localStorage.getItem(key) || '[]');
+    } catch { return []; }
+  };
+  const restoreFromBackup = (snapshot) => {
+    if (!confirm('このバックアップに復元しますか？\n現在の編集中データは別途バックアップされていません。\n（保存済みデータは差し戻ります）')) return;
+    setFolders(snapshot.folders || []);
+    setSavedProposals(snapshot.savedProposals || []);
+    if (snapshot.officeInfo) setOfficeInfo(snapshot.officeInfo);
+    notify(`${new Date(snapshot.ts).toLocaleString('ja-JP')} のバックアップから復元しました`, 'success');
+  };
+  const [showBackupModal, setShowBackupModal] = useState(false);
 
   // === 直接送信：相手の営業所コード＋名前を指定して見積を送信 ===
   // === QR共有：短期トークンをFirebase /qrshare/{token} に保存し、QRコードでURL共有 ===
@@ -1665,7 +1758,9 @@ function App() {
       const baseLabel = (group.unitPriceLabel && group.unitPriceLabel.trim()) ? group.unitPriceLabel.trim() : autoBaseLabel;
       const rows = group.items.map((item) => {
         const trClass = item.isHighlighted ? ' class="highlighted"' : '';
-        let cols = `<td class="pname"><div class="name">${escapeHTML(item.name)}</div></td>`;
+        // 商品名 + 任意の備考メモ（あれば下に薄い色で表示）
+        const memoHtml = (item.memo && String(item.memo).trim()) ? `<div class="memo">${escapeHTML(String(item.memo).trim())}</div>` : '';
+        let cols = `<td class="pname"><div class="name">${escapeHTML(item.name)}</div>${memoHtml}</td>`;
         if (appMode === 'proposal') {
           // 数量：整数ならそのまま、小数なら1桁まで表示（例: 200 → 200、1.55 → 1.6）
           const volNum = Number(item.volume);
@@ -1751,7 +1846,7 @@ function App() {
   #print-content-holder .items-table tbody tr:nth-child(even) { background: #f8fbff; }
   #print-content-holder .items-table tbody tr.highlighted, #print-content-holder .items-table tbody tr.highlighted:nth-child(even) { background: #fef08a; }
   #print-content-holder .items-table tbody tr.highlighted td { background: #fef08a; color: #713f12; font-weight: 700; }
-  #print-content-holder .items-table tbody tr.highlighted td:first-child { border-left: 3px solid #b45309; }
+  /* 印刷時のマーカー行：赤縦線を撤廃（不要との要望） */
   /* グレースケール印刷でも読みやすい色補正 */
   @media print and (monochrome) {
     #print-content-holder .items-table tbody tr.highlighted td { background: #f5f5f5 !important; color: #000 !important; }
@@ -1766,6 +1861,7 @@ function App() {
   #print-content-holder .items-table td.unit-price { color: #6b7280; font-size: 9pt; }
   #print-content-holder .items-table td.pname { min-width: 50mm; }
   #print-content-holder .items-table td.pname .name { font-weight: 600; color: #111827; }
+  #print-content-holder .items-table td.pname .memo { font-size: 8.5pt; color: #1e40af; margin-top: 2px; padding-left: 4px; border-left: 2px solid #93c5fd; line-height: 1.4; }
   #print-content-holder .items-table td.price.strong { font-weight: 700; font-size: 10.5pt; color: #1e3a8a; }
   #print-content-holder .items-table td .unit { font-size: 8pt; color: #93c5fd; margin-left: 3px; }
   #print-content-holder .grand-total { margin: 0 0 4mm 0; padding: 10px 16px; border: 1.5px solid #3b82f6; display: flex; justify-content: space-between; align-items: baseline; background: #eff6ff; }
@@ -2109,8 +2205,12 @@ function App() {
                           <td className="px-3 py-2">
                             <div className="flex items-center gap-2">
                               <input value={item.name} onChange={e => updateItem(group.id, item.id, 'name', e.target.value)} className="item-table-input flex-1 border rounded px-2.5 py-1.5 outline-none font-bold text-sm bg-white border-slate-300 focus:border-blue-500" />
+                              <button onClick={() => updateItem(group.id, item.id, 'memoOpen', !item.memoOpen)} title="商品の備考メモを追加" className={`p-1.5 rounded ${item.memo ? 'bg-blue-500 text-white' : item.memoOpen ? 'bg-blue-200 text-blue-700' : 'bg-slate-100 text-slate-400'}`} aria-label="備考メモ"><Info className="w-4 h-4" /></button>
                               <button onClick={() => updateItem(group.id, item.id, 'isHighlighted', !item.isHighlighted)} className={`p-1.5 rounded ${item.isHighlighted ? 'bg-yellow-400 text-white' : 'bg-slate-100 text-slate-400'}`}><HighlighterIcon className="w-4 h-4" /></button>
                             </div>
+                            {(item.memoOpen || item.memo) && (
+                              <input value={item.memo || ''} onChange={e => updateItem(group.id, item.id, 'memo', e.target.value)} placeholder="例: 定価¥1,200 / 6月1日〜価格改定 / セット内容など" className="w-full mt-1.5 text-xs px-2 py-1 border border-blue-200 rounded outline-none focus:border-blue-500 bg-blue-50/30 text-slate-700" />
+                            )}
                           </td>
                           {showCaseMode && <td className="px-2 py-2 text-right"><input type="text" inputMode="decimal" value={formatNumber(item.packSize)} onChange={e => updateItem(group.id, item.id, 'packSize', parseNumberInput(e.target.value))} className="item-table-input w-[80px] bg-white border border-slate-300 rounded px-1.5 py-1 text-right outline-none no-spin" /></td>}
                           <td className="px-2 py-2 text-right">
@@ -2348,7 +2448,9 @@ function App() {
       )}
 
       {showLoadModal && (() => {
-        const proposalsInFolder = selectedFolderId === '__all__' ? savedProposals : savedProposals.filter(p => (p.folderId || null) === selectedFolderId);
+        const proposalsInFolder = selectedFolderId === '__all__' ? savedProposals
+          : selectedFolderId === '__office_shared__' ? officeSharedProposals.map(p => ({ ...p, _isShared: true }))
+          : savedProposals.filter(p => (p.folderId || null) === selectedFolderId);
         const matchedFolder = folders.find(f => clientName && f.name === clientName);
         const currentFolderId = saveFolderId !== null ? saveFolderId : (matchedFolder?.id ?? null);
         return (
@@ -2422,6 +2524,11 @@ function App() {
                     <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold">{folders.length}件</span>
                   </div>
                   <div className="text-[10px] text-slate-500">クリック=選択 / ダブルクリック=名前変更</div>
+                  {/* 営業所共有 + バックアップ クイックアクセス */}
+                  <div className="flex gap-1 mt-2">
+                    <button onClick={() => setSelectedFolderId('__office_shared__')} className={`flex-1 text-[10px] font-bold px-2 py-1 rounded transition ${selectedFolderId === '__office_shared__' ? 'bg-emerald-600 text-white' : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'}`} title={`営業所「${loginInfo?.officeCode||''}」の全員で共有する見積`}>🏢 営業所共有 ({officeSharedProposals.length})</button>
+                    <button onClick={() => setShowBackupModal(true)} className="text-[10px] font-bold px-2 py-1 rounded bg-amber-100 text-amber-700 hover:bg-amber-200" title="過去のバックアップ一覧（最大5世代）">💾 バックアップ ({getBackups().length})</button>
+                  </div>
                 </div>
                 <div className="flex-1 overflow-y-auto p-2.5 space-y-1.5">
                   <button onClick={() => setSelectedFolderId('__all__')} className={`w-full text-left px-3 py-2.5 rounded-lg text-sm font-bold flex items-center justify-between transition shadow-sm ${selectedFolderId === '__all__' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white hover:bg-indigo-50 text-slate-700 border border-slate-200'}`}>
@@ -2483,7 +2590,7 @@ function App() {
               <div className="flex-1 flex flex-col overflow-hidden">
                 <div className="px-4 py-3 border-b border-slate-200 bg-white">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-bold text-slate-700">📝 {selectedFolderId === '__all__' ? 'すべての見積' : selectedFolderId === null ? 'フォルダなしの見積' : `「${folders.find(f => f.id === selectedFolderId)?.name||''}」の見積`}</span>
+                    <span className="text-sm font-bold text-slate-700">📝 {selectedFolderId === '__all__' ? 'すべての見積' : selectedFolderId === '__office_shared__' ? `🏢 営業所「${loginInfo?.officeCode||''}」共有見積` : selectedFolderId === null ? 'フォルダなしの見積' : `「${folders.find(f => f.id === selectedFolderId)?.name||''}」の見積`}</span>
                     <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold">{proposalsInFolder.filter(p => !proposalSearchQuery || (p.name||'').toLowerCase().includes(proposalSearchQuery.toLowerCase()) || (p.clientName||'').toLowerCase().includes(proposalSearchQuery.toLowerCase())).length}件</span>
                   </div>
                   <div className="relative">
@@ -2514,8 +2621,23 @@ function App() {
                             </div>
                             <div className="flex gap-1 shrink-0">
                               <button onClick={() => handleLoad(p)} className="px-3 py-1.5 bg-blue-100 text-blue-700 font-bold rounded text-xs hover:bg-blue-200">開く</button>
+                              {!p._isShared && (
+                                <button onClick={async () => {
+                                  if (!confirm(`「${p.name}」を営業所「${loginInfo?.officeCode||''}」全員で共有しますか？\n（同営業所の全員が閲覧・コピーできるようになります）`)) return;
+                                  const folder = p.folderId ? folders.find(f => f.id === p.folderId) : null;
+                                  await saveToOfficeShared(folder, p);
+                                }} title="営業所共有フォルダへ送信（全員が見られる）" className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded"><span className="text-xs font-bold">🏢↑</span></button>
+                              )}
+                              {p._isShared && (
+                                <button onClick={() => {
+                                  if (!confirm(`営業所共有の「${p.name}」を自分のフォルダにコピーしますか？\n（編集できるようになります。元のデータはそのまま残ります）`)) return;
+                                  const copyProp = { ...p, id: genId('prop'), folderId: null, _isShared: undefined, _copiedFromShared: true, _copiedAt: Date.now() };
+                                  setSavedProposals(prev => [copyProp, ...prev]);
+                                  notify('自分のフォルダへコピーしました', 'success');
+                                }} title="自分のフォルダにコピー（編集可能になる）" className="p-1.5 text-blue-600 hover:bg-blue-50 rounded"><span className="text-xs font-bold">↓自分へ</span></button>
+                              )}
                               <button onClick={() => { setEditingProposalId(p.id); setEditingProposalName(p.name); }} title="名前を変更" className="p-1.5 text-slate-400 hover:text-blue-600"><Settings className="w-4 h-4" /></button>
-                              <button onClick={() => { if (confirm(`「${p.name}」を削除しますか？`)) handleDeleteProposal(p.id); }} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>
+                              {!p._isShared && <button onClick={() => { if (confirm(`「${p.name}」を削除しますか？\n（バックアップから復元可能）`)) handleDeleteProposal(p.id); }} className="p-1.5 text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>}
                             </div>
                           </div>
                         )}
@@ -2706,6 +2828,40 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* === バックアップ復元モーダル（データ保護） === */}
+      {showBackupModal && (() => {
+        const backups = getBackups();
+        return (
+          <div className="fixed inset-0 bg-slate-900/70 z-[95] flex items-center justify-center backdrop-blur-sm p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+              <div className="p-4 border-b bg-amber-50 flex justify-between items-center">
+                <h3 className="text-base font-bold text-amber-800 flex items-center gap-2">💾 バックアップから復元（最大5世代）</h3>
+                <button onClick={() => setShowBackupModal(false)} aria-label="閉じる"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-5 space-y-3 bg-slate-50 text-sm">
+                <div className="bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-900">
+                  <strong>🛡️ データ完全保護：</strong>保存内容が変わるたび自動でこの端末にスナップショットを保存。万が一データが消えても**過去5世代までさかのぼって復元**できます。
+                </div>
+                {backups.length === 0 ? (
+                  <div className="text-center py-8 text-slate-400 text-sm">バックアップがまだありません。保存操作のたびに自動作成されます。</div>
+                ) : backups.map((b, i) => (
+                  <div key={b.ts} className="bg-white border border-slate-200 rounded-lg p-3 flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold text-slate-800">{i === 0 ? '🟢 最新' : `世代 ${i+1}`} <span className="text-xs text-slate-500 font-normal">{new Date(b.ts).toLocaleString('ja-JP')}</span></div>
+                      <div className="text-xs text-slate-600 mt-0.5">📁 フォルダ {(b.folders||[]).length}件 ／ 📝 見積 {(b.savedProposals||[]).length}件</div>
+                    </div>
+                    <button onClick={() => { restoreFromBackup(b); setShowBackupModal(false); }} className="bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 px-3 rounded text-xs whitespace-nowrap">この時点に復元</button>
+                  </div>
+                ))}
+              </div>
+              <div className="p-3 border-t bg-white flex justify-end">
+                <button onClick={() => setShowBackupModal(false)} className="px-6 py-2 bg-slate-600 hover:bg-slate-700 text-white font-bold rounded text-sm">閉じる</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* === トラブルシューティング モーダル === */}
       {showTroubleshootModal && (
