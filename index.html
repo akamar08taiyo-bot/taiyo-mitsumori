@@ -131,13 +131,42 @@ const firebaseConfig = {
   appId: "1:838108820514:web:8435818e15053c2b2f867b"
 };
 let firebaseDB = null;
-let firebaseInitError = null; // 詳細エラーメッセージを保持（ユーザー表示用）
-try {
-  const firebaseApp = initializeApp(firebaseConfig);
-  firebaseDB = getDatabase(firebaseApp);
-} catch (e) {
-  firebaseInitError = (e && (e.code || e.message)) || String(e);
-  console.warn('[Firebase] 初期化失敗:', firebaseInitError, e);
+let firebaseApp = null;
+let firebaseInitError = null;
+let firebaseInitAttempts = 0;
+// 接続成功/失敗を通知するイベント（再試行時に React 側で再描画させる）
+const firebaseInitListeners = new Set();
+const notifyFirebaseInitChange = () => firebaseInitListeners.forEach(fn => { try { fn(); } catch {} });
+const tryInitFirebase = () => {
+  firebaseInitAttempts++;
+  try {
+    if (!firebaseApp) firebaseApp = initializeApp(firebaseConfig);
+    firebaseDB = getDatabase(firebaseApp);
+    firebaseInitError = null;
+    console.log('[Firebase] 初期化成功 (attempt ' + firebaseInitAttempts + ')');
+    notifyFirebaseInitChange();
+    return true;
+  } catch (e) {
+    firebaseInitError = (e && (e.code || e.message)) || String(e);
+    firebaseDB = null;
+    console.warn('[Firebase] 初期化失敗 (attempt ' + firebaseInitAttempts + '):', firebaseInitError);
+    notifyFirebaseInitChange();
+    return false;
+  }
+};
+tryInitFirebase();
+// 失敗時は最大10回まで自動再試行（exponential backoff: 2s, 4s, 8s, 16s ...）
+if (!firebaseDB) {
+  let delay = 2000;
+  const retry = () => {
+    if (firebaseDB || firebaseInitAttempts >= 10) return;
+    setTimeout(() => {
+      if (tryInitFirebase()) return;
+      delay = Math.min(delay * 2, 30000);
+      retry();
+    }, delay);
+  };
+  retry();
 }
 
 const STORAGE_KEYS = {
@@ -666,6 +695,19 @@ function App() {
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
   const [syncError, setSyncError] = useState(firebaseInitError ? `Firebase初期化エラー: ${firebaseInitError}` : null);
   const [reconnectTick, setReconnectTick] = useState(0);
+  // Firebase init 状態変化を購読（自動再試行で接続成功した瞬間に再描画）
+  const [firebaseReadyTick, setFirebaseReadyTick] = useState(0);
+  useEffect(() => {
+    const cb = () => setFirebaseReadyTick(t => t + 1);
+    firebaseInitListeners.add(cb);
+    return () => firebaseInitListeners.delete(cb);
+  }, []);
+  // 手動の強制再接続：tryInitFirebase 再実行
+  const handleForceFirebaseReconnect = () => {
+    const ok = tryInitFirebase();
+    if (ok) { notify('Firebase に接続しました', 'success'); setReconnectTick(t => t+1); }
+    else { notify('再接続失敗: ' + (firebaseInitError||'unknown'), 'error'); }
+  };
   // クラウド同期 ON/OFF（既定ON、永続化）
   const [cloudSyncEnabled, setCloudSyncEnabled] = useState(() => {
     const v = localStorage.getItem('taiyo_cloudSync');
@@ -770,14 +812,37 @@ function App() {
     const r = dbRef(firebaseDB, `users/${syncKey}/data`);
     syncRefHandle.current = r;
     let unsubVal = null;
-    // 初回読込：リモート側にデータがあれば取り込む
+    // 初回読込：リモート側にデータがあれば取り込む（既存データ削除を絶対防止）
     dbGet(r).then(snap => {
       const remote = snap.val();
+      // === データ保護ロジック ===
+      // ①リモートが完全に空 → ローカル維持（リモート初期化／別端末未保存ケース）
+      // ②リモートのフォルダ・見積件数がローカルより少なすぎる → 確認ダイアログを出して保護
+      // ③その他 → リモートを取り込む
       if (remote && (Array.isArray(remote.folders) || Array.isArray(remote.savedProposals))) {
+        const rF = Array.isArray(remote.folders) ? remote.folders : [];
+        const rP = Array.isArray(remote.savedProposals) ? remote.savedProposals : [];
+        const lF = folders || [];
+        const lP = savedProposals || [];
+        // リモートが極端に少ない（ローカルの方が3件以上多い）場合は確認
+        const looksLikeDataLoss = (lP.length > rP.length + 2 && lP.length > 0) || (lF.length > rF.length + 2 && lF.length > 0);
+        if (looksLikeDataLoss) {
+          const ok = confirm(`⚠ データ保護警告\n\nリモート（クラウド）の方がデータが大幅に少なくなっています。\n・ローカル: フォルダ${lF.length}件 / 見積${lP.length}件\n・リモート: フォルダ${rF.length}件 / 見積${rP.length}件\n\n「OK」= リモート(少ない方)で上書き／「キャンセル」= ローカル(多い方)を保持して、次の保存でリモートに反映`);
+          if (!ok) {
+            // ローカル保持 → 書込時にローカルがリモートに反映される
+            console.log('[DataProtect] ローカルデータを保持しました');
+            remoteLoadedRef.current = true;
+            setSyncStatus('synced'); setLastSyncedAt(Date.now()); setSyncError(null);
+            return;
+          }
+        }
         suppressNextWriteRef.current = true;
         if (Array.isArray(remote.folders)) setFolders(remote.folders);
         if (Array.isArray(remote.savedProposals)) setSavedProposals(remote.savedProposals);
-        lastSyncedJsonRef.current = JSON.stringify({ folders: remote.folders||[], savedProposals: remote.savedProposals||[] });
+        lastSyncedJsonRef.current = JSON.stringify({ folders: rF, savedProposals: rP });
+      } else {
+        // リモートが完全に空 → ローカルデータをそのまま保持（次の書込で同期される）
+        console.log('[Firebase] リモートに既存データなし。ローカルを保持して同期へ。');
       }
       remoteLoadedRef.current = true;
       setSyncStatus('synced'); setLastSyncedAt(Date.now()); setSyncError(null);
@@ -2391,7 +2456,12 @@ function App() {
               </div>
             )}
             <div className="mt-3 flex gap-2">
-              <button onClick={() => { setReconnectTick(t => t+1); notify('Firebase へ再接続中…'); }} disabled={!cloudSyncEnabled} className={`flex-1 py-2 rounded text-xs font-bold ${cloudSyncEnabled ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-slate-300 text-slate-500 cursor-not-allowed'}`}>🔄 再接続する</button>
+              <button onClick={() => {
+                // 強制再接続：firebaseDB を再構築 + sync useEffect を再実行
+                handleForceFirebaseReconnect();
+                setReconnectTick(t => t+1);
+                notify('Firebase へ強制再接続中…');
+              }} disabled={!cloudSyncEnabled} className={`flex-1 py-2 rounded text-xs font-bold ${cloudSyncEnabled ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-slate-300 text-slate-500 cursor-not-allowed'}`}>🔄 強制再接続</button>
               <button onClick={runDiagnostic} disabled={diagRunning} className={`flex-1 py-2 rounded text-xs font-bold ${diagRunning ? 'bg-slate-400 text-white cursor-wait' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}`}>{diagRunning ? '診断中…' : '🔍 詳細診断'}</button>
               <button onClick={() => location.reload(true)} className="flex-1 bg-slate-600 hover:bg-slate-700 text-white py-2 rounded text-xs font-bold">ページ再読込</button>
             </div>
