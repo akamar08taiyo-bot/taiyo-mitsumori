@@ -141,7 +141,9 @@ const tryInitFirebase = () => {
   firebaseInitAttempts++;
   try {
     if (!firebaseApp) firebaseApp = initializeApp(firebaseConfig);
-    firebaseDB = getDatabase(firebaseApp);
+    // databaseURL を明示渡し → "Service database is not available" エラー対策
+    // ESMでdatabaseモジュールが登録される前にgetDatabaseが呼ばれる問題を回避
+    firebaseDB = getDatabase(firebaseApp, firebaseConfig.databaseURL);
     firebaseInitError = null;
     console.log('[Firebase] 初期化成功 (attempt ' + firebaseInitAttempts + ')');
     notifyFirebaseInitChange();
@@ -154,7 +156,14 @@ const tryInitFirebase = () => {
     return false;
   }
 };
+// 即時 + 100ms後（マイクロタスク経由でモジュール登録待ち）の2段階で初期化
 tryInitFirebase();
+if (!firebaseDB) {
+  // 即時失敗時は100ms待ってから再試行（ESMモジュールの遅延ロード対策）
+  setTimeout(() => {
+    if (!firebaseDB) tryInitFirebase();
+  }, 100);
+}
 // 失敗時は最大10回まで自動再試行（exponential backoff: 2s, 4s, 8s, 16s ...）
 if (!firebaseDB) {
   let delay = 2000;
