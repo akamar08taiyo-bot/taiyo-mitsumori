@@ -22,8 +22,8 @@
     "react-dom": "https://esm.sh/react-dom@18.3.1",
     "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
     "lucide-react": "https://esm.sh/lucide-react@0.469.0?external=react",
-    "firebase/app": "https://esm.sh/firebase@10.14.0/app",
-    "firebase/database": "https://esm.sh/firebase@10.14.0/database"
+    "firebase/app": "https://www.gstatic.com/firebasejs/10.14.0/firebase-app.js",
+    "firebase/database": "https://www.gstatic.com/firebasejs/10.14.0/firebase-database.js"
   }
 }
 </script>
@@ -2188,8 +2188,8 @@ function App() {
             <input value={proposalTitle} onChange={e => setProposalTitle(e.target.value)} className="text-base font-bold text-slate-900 outline-none bg-transparent border-b border-dashed border-slate-300 focus:border-blue-500 w-32" placeholder="御見積書" />
             <div className="flex items-start gap-1.5">
               <div className="flex flex-col gap-1">
-                <input value={clientName} onChange={e => setClientName(e.target.value)} placeholder="施設名（1段目）" className="text-base font-bold text-slate-800 border-b-2 border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] md:w-[340px] bg-transparent" />
-                <input value={clientName2} onChange={e => setClientName2(e.target.value)} placeholder="施設名（2段目・任意）" className="text-base font-bold text-slate-800 border-b border-dashed border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] md:w-[340px] bg-transparent" />
+                <input value={clientName} onChange={e => setClientName(e.target.value)} placeholder="施設名（1段目）" className="text-base font-normal text-slate-800 border-b-2 border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] md:w-[340px] bg-transparent" />
+                <input value={clientName2} onChange={e => setClientName2(e.target.value)} placeholder="施設名（2段目・任意）" className="text-base font-normal text-slate-800 border-b border-dashed border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] md:w-[340px] bg-transparent" />
               </div>
               <select value={clientHonorific} onChange={e => setClientHonorific(e.target.value)} className="text-sm text-slate-600 font-bold border border-slate-300 rounded px-1.5 py-1 outline-none bg-white mt-1">
                 <option value="御中">御中</option><option value="様">様</option>
@@ -2278,7 +2278,7 @@ function App() {
                         <tr key={item.id} className={item.isHighlighted ? 'bg-yellow-200' : 'hover:bg-slate-50'}>
                           <td className="px-3 py-2">
                             <div className="flex items-center gap-2">
-                              <input value={item.name} onChange={e => updateItem(group.id, item.id, 'name', e.target.value)} className="item-table-input flex-1 border rounded px-2.5 py-1.5 outline-none font-bold text-sm bg-white border-slate-300 focus:border-blue-500" />
+                              <input value={item.name} onChange={e => updateItem(group.id, item.id, 'name', e.target.value)} className="item-table-input flex-1 border rounded px-2.5 py-1.5 outline-none font-normal text-sm bg-white border-slate-300 focus:border-blue-500" />
                               <button onClick={() => updateItem(group.id, item.id, 'memoOpen', !item.memoOpen)} title="商品の備考メモを追加" className={`p-1.5 rounded ${item.memo ? 'bg-blue-500 text-white' : item.memoOpen ? 'bg-blue-200 text-blue-700' : 'bg-slate-100 text-slate-400'}`} aria-label="備考メモ"><Info className="w-4 h-4" /></button>
                               <button onClick={() => updateItem(group.id, item.id, 'isHighlighted', !item.isHighlighted)} className={`p-1.5 rounded ${item.isHighlighted ? 'bg-yellow-400 text-white' : 'bg-slate-100 text-slate-400'}`}><HighlighterIcon className="w-4 h-4" /></button>
                             </div>
@@ -2294,7 +2294,17 @@ function App() {
                             </div>
                           </td>
                           {showCost && <td className="px-2 py-2 bg-orange-50 text-right"><input type="text" inputMode="decimal" value={item.cost === 0 || item.cost === '' ? '' : formatNumber(item.cost)} onChange={e => updateItem(group.id, item.id, 'cost', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-orange-300 rounded px-1.5 py-1 text-right outline-none no-spin" /></td>}
-                          <td className="px-2 py-2 text-right"><input type="text" inputMode="decimal" value={item.price === 0 || item.price === '' ? '' : formatNumber(item.price)} onChange={e => updateItem(group.id, item.id, 'price', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-slate-300 rounded px-2 py-1 text-right outline-none font-bold no-spin" /></td>
+                          <td className="px-2 py-2 text-right">
+                            <input type="text" inputMode="decimal" value={item.price === 0 || item.price === '' ? '' : formatNumber(item.price)} onChange={e => updateItem(group.id, item.id, 'price', parseNumberInput(e.target.value))} className="item-table-input w-[85px] bg-white border border-slate-300 rounded px-2 py-1 text-right outline-none font-bold no-spin" />
+                            {/* 印刷時に表示される単価表記をプレビュー（提案書モードのみ） */}
+                            {appMode === 'proposal' && item.price && Number(item.volume) > 0 && (() => {
+                              const autoLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
+                              const label = (group.unitPriceLabel && group.unitPriceLabel.trim()) ? group.unitPriceLabel.trim() : autoLabel;
+                              const up = (Number(item.price) / Number(item.volume)) * (group.baseScale || 1);
+                              const upStr = up % 1 === 0 ? up.toLocaleString('ja-JP') : up.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+                              return <div className="text-[10px] text-blue-600 mt-1 font-medium" title="印刷時に表示される単価表記">→ {label}単価 ¥{upStr}</div>;
+                            })()}
+                          </td>
                           <td className="px-2 py-2 text-right">
                             {showCaseMode && appMode === 'proposal' ? (
                               <input type="text" inputMode="decimal" value={item.casePrice === 0 || item.casePrice === '' ? '' : formatNumber(item.casePrice)} onChange={e => updateItem(group.id, item.id, 'casePrice', parseNumberInput(e.target.value))} title="ケース金額（直接編集可。単価が自動で再計算されます）" className="item-table-input w-[95px] bg-white border-2 border-blue-200 rounded px-1.5 py-1 text-right outline-none font-bold text-slate-800 no-spin" placeholder="ケース金額" />
@@ -2318,7 +2328,7 @@ function App() {
                     <tr className={inp.isHighlighted ? 'bg-yellow-200' : 'bg-slate-50/50'}>
                       <td className="px-3 py-2">
                         <div className="flex items-center gap-2">
-                          <input placeholder="商品名 (例: 除菌液 500ml)" value={inp.name} onChange={e => handleInputChange(group.id, 'name', e.target.value)} className={`item-table-input flex-1 border-2 rounded px-3 py-2 outline-none focus:border-blue-500 font-bold text-base ${inp.isHighlighted ? 'bg-yellow-100 border-yellow-300' : 'bg-white border-slate-300'}`} />
+                          <input placeholder="商品名 (例: 除菌液 500ml)" value={inp.name} onChange={e => handleInputChange(group.id, 'name', e.target.value)} className={`item-table-input flex-1 border-2 rounded px-3 py-2 outline-none focus:border-blue-500 font-normal text-base ${inp.isHighlighted ? 'bg-yellow-100 border-yellow-300' : 'bg-white border-slate-300'}`} />
                           <button type="button" onClick={() => handleInputChange(group.id, 'isHighlighted', !inp.isHighlighted)} title="マーカー(強調表示) — 印刷物にも反映されます" className={`p-1.5 rounded transition ${inp.isHighlighted ? 'bg-yellow-400 text-white' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}><HighlighterIcon className="w-4 h-4" /></button>
                         </div>
                       </td>
