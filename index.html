@@ -1922,7 +1922,11 @@ function App() {
   #print-content-holder .items-table thead { display: table-header-group; }
   #print-content-holder .items-table tbody tr { page-break-inside: avoid; }
   #print-content-holder .items-table th { background: #dbeafe; padding: 6px 8px; text-align: left; border-bottom: 1px solid #93c5fd; font-size: 8.5pt; font-weight: 600; color: #1e40af; }
-  #print-content-holder .items-table td { padding: 7px 8px; border-bottom: 0.5px solid #dbeafe; vertical-align: middle; font-size: 10pt; }
+  #print-content-holder .items-table td { padding: 7px 8px; border-bottom: 0.5px solid #dbeafe; vertical-align: middle; font-size: 10pt; line-height: 1.4; }
+  /* 横ライン揃え保証：全セル中央揃え＋単位スパンもベースライン中央 */
+  #print-content-holder .items-table tbody tr { vertical-align: middle; }
+  #print-content-holder .items-table td .unit { display: inline-block; vertical-align: middle; }
+  #print-content-holder .items-table td.num, #print-content-holder .items-table td.price, #print-content-holder .items-table td.unit-price { line-height: 1.4; }
   #print-content-holder .items-table tbody tr:nth-child(even) { background: #f8fbff; }
   #print-content-holder .items-table tbody tr.highlighted, #print-content-holder .items-table tbody tr.highlighted:nth-child(even) { background: #fef08a; }
   #print-content-holder .items-table tbody tr.highlighted td { background: #fef08a; color: #713f12; font-weight: 700; }
@@ -1932,7 +1936,9 @@ function App() {
   #print-content-holder .items-table tbody tr.redtext td.price,
   #print-content-holder .items-table tbody tr.redtext td.price.strong,
   #print-content-holder .items-table tbody tr.redtext td.num,
-  #print-content-holder .items-table tbody tr.redtext td.unit-price { color: #dc2626 !important; }
+  #print-content-holder .items-table tbody tr.redtext td.unit-price,
+  #print-content-holder .items-table tbody tr.redtext td .unit,
+  #print-content-holder .items-table tbody tr.redtext td.pname .memo { color: #dc2626 !important; }
   #print-content-holder .items-table tbody tr.highlighted.redtext td { background: #fef08a; color: #b91c1c !important; }
   /* 印刷時のマーカー行：赤縦線を撤廃（不要との要望） */
   /* グレースケール印刷でも読みやすい色補正 */
@@ -1950,7 +1956,7 @@ function App() {
   #print-content-holder .items-table td.pname { min-width: 50mm; }
   #print-content-holder .items-table td.pname .name { font-weight: normal; color: #111827; }
   #print-content-holder .items-table td.pname .memo { font-size: 8.5pt; color: #1e40af; margin-top: 2px; padding-left: 4px; border-left: 2px solid #93c5fd; line-height: 1.4; }
-  #print-content-holder .items-table td.price.strong { font-weight: 700; font-size: 10.5pt; color: #1e3a8a; }
+  #print-content-holder .items-table td.price.strong { font-weight: normal; font-size: 10.5pt; color: #1e3a8a; }
   #print-content-holder .items-table td .unit { font-size: 8pt; color: #93c5fd; margin-left: 3px; }
   #print-content-holder .grand-total { margin: 0 0 4mm 0; padding: 10px 16px; border: 1.5px solid #3b82f6; display: flex; justify-content: space-between; align-items: baseline; background: #eff6ff; }
   #print-content-holder .grand-total .label { font-size: 9.5pt; font-weight: 600; letter-spacing: 0.3em; color: #1e3a8a; }
