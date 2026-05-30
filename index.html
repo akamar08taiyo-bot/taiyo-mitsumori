@@ -28,6 +28,9 @@
 </script>
 <style>
   body { margin:0; font-family: 'Hiragino Kaku Gothic ProN','Hiragino Sans','Yu Gothic',Meiryo,sans-serif; }
+  /* 入力時の視認性向上: 画面表示のみ 125% ズーム（印刷は除外） */
+  @media screen { body { zoom: 1.25; } }
+  @media print { body { zoom: 1 !important; } #print-content-holder { zoom: 1 !important; } }
   #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px; background:#f1f5f9; color:#334155; font-weight:bold; z-index:9999; padding:20px; box-sizing:border-box; }
   #loading .sp { width:42px; height:42px; border:4px solid #cbd5e1; border-top-color:#1e40af; border-radius:50%; animation:sp 0.9s linear infinite; }
   #loading .err { display:none; max-width:600px; width:100%; background:#fee2e2; border:2px solid #ef4444; color:#991b1b; padding:16px; border-radius:8px; margin-top:12px; font-weight:normal; font-size:13px; word-break:break-all; }
