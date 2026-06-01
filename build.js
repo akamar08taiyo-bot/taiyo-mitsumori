@@ -27,7 +27,8 @@ const DST = process.argv[3] || path.join(__dirname, 'index.html');
   });
   console.log(`Compiled size: ${built.code.length} bytes (minified)`);
 
-  let out = html.replace(m[0], `<script type="module">${built.code}</script>`);
+  // 重要: 置換文字列内の `$&` などが特殊解釈されないよう関数形式を使用
+  let out = html.replace(m[0], () => `<script type="module">${built.code}</script>`);
   // Babel-standalone のCDN読込を削除（不要になったため）
   out = out.replace(/<script src="https:\/\/unpkg.com\/@babel\/standalone[^"]*"><\/script>\s*\n?/g, '');
   // ローディングテキストを更新（プリコンパイル版）
