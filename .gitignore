@@ -1,2 +1,5 @@
 node_modules/
 package-lock.json
+_serve.cjs
+tailwind.output.css
+_chk.mjs
