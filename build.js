@@ -34,7 +34,9 @@ const DST = process.argv[3] || path.join(__dirname, 'index.html');
     },
     bundle: true,
     format: 'esm',
-    target: 'es2020',
+    // 古めのブラウザ(?. や ?? 未対応のEdge/Safari等)でも構文エラーで落ちないよう
+    // es2017 まで下げてビルドする（?. ?? オブジェクトスプレッド等を互換コードに変換）。
+    target: 'es2017',
     jsx: 'transform',
     minify: true,
     legalComments: 'none',
