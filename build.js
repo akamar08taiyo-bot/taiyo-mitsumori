@@ -1,5 +1,5 @@
 // JSX を事前コンパイル＋全依存をバンドルして単一HTMLに同梱するビルドスクリプト
-// 入力: ../index.html (text/babel ブロックを含む)
+// 入力: src/index.html (text/babel ブロックを含む)
 // 出力: ./index.html (text/babel → type=module + 依存込み圧縮JS)
 // 目的: 外部CDN(esm.sh/unpkg/gstatic)に依存せず、GitHub Pagesに繋がれば必ず起動する。
 const fs = require('fs');
@@ -7,7 +7,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 const esbuild = require('esbuild');
 
-const SRC = process.argv[2] || path.join(__dirname, '..', 'index.html');
+const SRC = process.argv[2] || path.join(__dirname, 'src', 'index.html');
 const DST = process.argv[3] || path.join(__dirname, 'index.html');
 
 (async () => {
