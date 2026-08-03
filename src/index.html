@@ -755,7 +755,7 @@ function App() {
   const [remarks, setRemarks] = useState('消費税は含まれておりません。');
   const [bottomRemarks, setBottomRemarks] = useState('本見積書の記載金額には、消費税は含まれておりません。');
   const [taxMode, setTaxMode] = useState('exclusive');
-  const [showGrandTotal, setShowGrandTotal] = useState(false);
+  const [showGrandTotal, setShowGrandTotal] = useState(true);
   const [appMode, setAppMode] = useState('quote');
 
   // 全体設定(taxMode)だけでなく、行ごとの税区分オーバーライド（税込指定した行）も反映する。
@@ -779,10 +779,10 @@ function App() {
     }
   }, [taxMode]);
 
-  // モード切替時のデフォルト合計表示: 見積・提案書ともにOFF（手動でON可能）
+  // モード切替時のデフォルト合計表示: 見積=ON, 提案書=OFF
   useEffect(() => {
     setShowCaseMode(appMode === 'proposal');
-    setShowGrandTotal(false);
+    setShowGrandTotal(appMode === 'quote');
   }, [appMode]);
 
   const quoteGroupsRef = useRef(null);
