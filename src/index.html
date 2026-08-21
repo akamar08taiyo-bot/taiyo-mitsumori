@@ -469,6 +469,14 @@ const parseNumberInput = (raw) => {
     .replace(/[ー−－‐―‒–]/g, '-')  // 全角ハイフン・ダッシュ類を - に
     .replace(/[,，\s]/g, '');
 };
+// 数量・入数・単価は負数を受け付けない（合計金額の計算に直結するため）。
+// 利益率・値上がり率などマイナスに意味がある項目には使わない。
+const NONNEGATIVE_ITEM_FIELDS = new Set(['price', 'volume', 'packSize']);
+const clampItemField = (field, value) => {
+  if (!NONNEGATIVE_ITEM_FIELDS.has(field) || value === '' || value === undefined || value === null) return value;
+  const n = Number(value);
+  return !isNaN(n) && n < 0 ? 0 : value;
+};
 // 氏名を「苗字 名前」(半角スペース1個区切り)に正規化する
 // 全角スペース・連続スペース・前後の空白を半角スペース1個にまとめる
 const normalizeName = (raw) => {
@@ -930,6 +938,14 @@ function App() {
   const [selectedFolderId, setSelectedFolderId] = useState(null);
   // 営業所共有以外のフォルダへ移動したら、次に営業所共有へ戻った時は必ず選択画面から始める
   useEffect(() => { if (selectedFolderId !== '__office_shared__') setOfficeShareTab(null); }, [selectedFolderId]);
+  // 一括共有：チェックした自分の見積IDの集合。フォルダを切り替えたら選択はリセット
+  const [selectedShareIds, setSelectedShareIds] = useState(() => new Set());
+  useEffect(() => { setSelectedShareIds(new Set()); }, [selectedFolderId]);
+  const toggleShareSelect = (id) => setSelectedShareIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   // 営業所共有で一覧を開いたまま一定時間(3分)経過したら、自動的に選択画面へ戻す（タブ切替でリセット）
   useEffect(() => {
     if (selectedFolderId !== '__office_shared__' || officeShareTab === null) return;
@@ -1748,6 +1764,51 @@ function App() {
     }
   };
 
+  // 複数の見積を一括で営業所共有へ送信（一括／選択どちらも共通）。
+  // saveToOfficeShared と同じ「内容が完全一致なら追加しない」ルールを、
+  // 既存の共有データ・選択バッチ内の重複の両方に適用し、絶対に二重登録しない。
+  const saveMultipleToOfficeShared = async (proposals) => {
+    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) { notify('Firebase未接続のため営業所共有はできません', 'error'); return false; }
+    if (!proposals || proposals.length === 0) return false;
+    try {
+      const r = dbRef(firebaseDB, `office-shared/${loginInfo.officeCode}`);
+      const snap = await dbGet(r);
+      const cur = snap.val() || { folders: [], savedProposals: [] };
+      const curFolders = Array.isArray(cur.folders) ? cur.folders : [];
+      const curProposals = Array.isArray(cur.savedProposals) ? cur.savedProposals : [];
+      const contentSig = (p) => { if (!p) return ''; const { id, updatedAt, createdAt, _sharedBy, _sharedAt, _copyOf, _isShared, ...rest } = p; try { return JSON.stringify(rest); } catch { return ''; } };
+      let mergedFolders = curFolders;
+      let mergedProposals = curProposals;
+      const seenSigs = new Set(curProposals.map(contentSig));
+      let addedCount = 0, dupCount = 0;
+      proposals.forEach((proposal) => {
+        const folder = proposal.folderId ? folders.find(f => f.id === proposal.folderId) : null;
+        if (folder && !mergedFolders.find(f => f.id === folder.id || f.name === folder.name)) {
+          mergedFolders = [...mergedFolders, { ...folder, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }];
+        }
+        const sig = contentSig(proposal);
+        if (seenSigs.has(sig)) { dupCount++; return; } // 共有先に既にある、または今回のバッチ内で既に追加済み → 追加しない
+        seenSigs.add(sig);
+        const existsIdx = mergedProposals.findIndex(p => p.id === proposal.id);
+        if (existsIdx === -1) {
+          mergedProposals = [...mergedProposals, { ...proposal, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }];
+        } else {
+          mergedProposals = [...mergedProposals, { ...proposal, id: genId('prop'), _sharedBy: loginInfo.userName, _sharedAt: Date.now(), _copyOf: proposal.id }];
+        }
+        addedCount++;
+      });
+      await dbSet(r, cleanForFirebase({ folders: mergedFolders, savedProposals: mergedProposals, _updatedAt: Date.now(), _updatedBy: loginInfo.userName }));
+      notify(dupCount > 0
+        ? `${addedCount}件を営業所共有に追加しました（内容が同じ見積${dupCount}件は重複のため追加しませんでした）`
+        : `${addedCount}件を営業所共有に追加しました`, 'success');
+      setSelectedShareIds(new Set());
+      return true;
+    } catch (err) {
+      notify('共有エラー: ' + (err?.message || String(err)), 'error');
+      return false;
+    }
+  };
+
   // === 営業所共有から開いた見積の上書き保存：共有側の元データを更新（別ファイルを作らない）===
   const updateOfficeSharedProposal = async () => {
     if (!firebaseDB || !loginInfo || !cloudSyncEnabled) { notify('Firebase未接続のため営業所共有データを上書きできません。同期設定をご確認ください。', 'error'); return false; }
@@ -2205,7 +2266,7 @@ function App() {
   const handleInputChange = (gid, field, value) => {
     setNewItems(prev => {
       const cur = prev[gid] || getEmptyItem();
-      let u = { ...cur, [field]: value };
+      let u = { ...cur, [field]: clampItemField(field, value) };
       if (field === 'name') {
         const inf = inferFromProductName(value);
         if (inf?.volume) u.volume = inf.volume;
@@ -2295,7 +2356,7 @@ function App() {
       if (g.id !== gid) return g;
       return { ...g, items: g.items.map(i => {
         if (i.id !== iid) return i;
-        let u = { ...i, [field]: value };
+        let u = { ...i, [field]: clampItemField(field, value) };
         if (field === 'name') {
           const inf = inferFromProductName(value);
           if (inf?.volume) u.volume = inf.volume;
@@ -5335,6 +5396,47 @@ function App() {
                     })()}
                   </div>
                 </div>
+                {selectedFolderId !== '__office_shared__' && (() => {
+                  const q = normalizeSearch(proposalSearchQuery);
+                  const getDate = (p) => p.proposalDate || (p.updatedAt ? new Date(p.updatedAt).toISOString().slice(0,10) : '');
+                  let visible = proposalsInFolder.filter(p => !q || normalizeSearch(p.name).includes(q) || normalizeSearch(p.clientName).includes(q) || normalizeSearch(p.clientName2).includes(q));
+                  if (proposalFilterYear) visible = visible.filter(p => String(getDate(p)).startsWith(proposalFilterYear));
+                  if (proposalFilterMonth) visible = visible.filter(p => String(getDate(p)).slice(5,7) === proposalFilterMonth);
+                  const shareCandidates = visible.filter(p => !p._isShared);
+                  const allChecked = shareCandidates.length > 0 && shareCandidates.every(p => selectedShareIds.has(p.id));
+                  return (
+                    <div className="px-4 py-2 border-b border-slate-200 bg-slate-50 flex items-center gap-3 flex-wrap">
+                      <label className={`flex items-center gap-1.5 text-xs font-bold select-none ${shareCandidates.length ? 'text-slate-600 cursor-pointer' : 'text-slate-300 cursor-not-allowed'}`}>
+                        <input type="checkbox" disabled={shareCandidates.length === 0} checked={allChecked}
+                          onChange={(e) => setSelectedShareIds(e.target.checked ? new Set(shareCandidates.map(p => p.id)) : new Set())}
+                          className="w-4 h-4" />
+                        全選択
+                      </label>
+                      <span className="text-xs text-slate-500">{selectedShareIds.size}件選択中</span>
+                      <button
+                        disabled={selectedShareIds.size === 0}
+                        onClick={async () => {
+                          const targets = proposalsInFolder.filter(p => selectedShareIds.has(p.id));
+                          if (targets.length === 0) return;
+                          if (!confirm(`選択した${targets.length}件を営業所「${loginInfo?.officeCode||''}」全員で共有しますか？\n（自分の控えはそのまま残ります。内容が同じ見積は自動的に除外され、重複登録はされません）`)) return;
+                          await saveMultipleToOfficeShared(targets);
+                        }}
+                        className={`px-3.5 py-1.5 rounded-md text-xs font-bold text-white ${selectedShareIds.size > 0 ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-300 cursor-not-allowed'}`}>
+                        🏢 選択した見積を営業所共有へ
+                      </button>
+                      <button
+                        disabled={shareCandidates.length === 0}
+                        onClick={async () => {
+                          if (shareCandidates.length === 0) return;
+                          if (!confirm(`表示中の${shareCandidates.length}件全てを営業所「${loginInfo?.officeCode||''}」全員で共有しますか？\n（自分の控えはそのまま残ります。内容が同じ見積・既に共有済みの見積は自動的に除外され、重複登録はされません）`)) return;
+                          await saveMultipleToOfficeShared(shareCandidates);
+                        }}
+                        className={`ml-auto px-3.5 py-1.5 rounded-md text-xs font-bold text-white ${shareCandidates.length > 0 ? 'bg-teal-600 hover:bg-teal-700' : 'bg-slate-300 cursor-not-allowed'}`}>
+                        🏢 全件({shareCandidates.length})を営業所共有へ
+                      </button>
+                    </div>
+                  );
+                })()}
                 <div className="flex-1 overflow-y-auto p-3 space-y-2">
                   {(() => {
                     const q = normalizeSearch(proposalSearchQuery);
@@ -5357,6 +5459,12 @@ function App() {
                     }
                     const renderCard = (p) => (
                       <div key={p.id} onClick={(e) => { if (e.target.closest('button, select, input, a, option, label, [data-name-edit]')) return; handleLoad(p); }} title="クリックで開く" className={`border rounded-lg p-4 group cursor-pointer ${p._isShared ? 'border-emerald-200 hover:bg-emerald-50 hover:border-emerald-400' : 'border-slate-200 hover:bg-slate-50 hover:border-blue-300'}`}>
+                        {!p._isShared && selectedFolderId !== '__office_shared__' && (
+                          <label className="flex items-center gap-1.5 mb-1.5 text-[11px] text-slate-500 font-bold cursor-pointer select-none w-fit" onClick={(e) => e.stopPropagation()}>
+                            <input type="checkbox" checked={selectedShareIds.has(p.id)} onChange={() => toggleShareSelect(p.id)} className="w-4 h-4" />
+                            共有用に選択
+                          </label>
+                        )}
                         {editingProposalId === p.id ? (
                           <div className="flex items-center gap-2 mb-2">
                             <input value={editingProposalName} onChange={e => setEditingProposalName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { renameProposal(p.id, editingProposalName); setEditingProposalId(null); notify('名前を変更しました'); } if (e.key === 'Escape') setEditingProposalId(null); }} className="flex-1 text-base font-bold px-2.5 py-1.5 border-2 border-blue-400 rounded outline-none" autoFocus />
