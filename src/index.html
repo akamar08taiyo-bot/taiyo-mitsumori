@@ -946,6 +946,13 @@ function App() {
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
+  // メーカー仕切りの一括共有：チェックした自分の仕切りIDの集合
+  const [selectedMakerIds, setSelectedMakerIds] = useState(() => new Set());
+  const toggleMakerSelect = (id) => setSelectedMakerIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   // 営業所共有で一覧を開いたまま一定時間(3分)経過したら、自動的に選択画面へ戻す（タブ切替でリセット）
   useEffect(() => {
     if (selectedFolderId !== '__office_shared__' || officeShareTab === null) return;
@@ -1581,6 +1588,38 @@ function App() {
       await dbSet(r, cleanForFirebase({ ...m, id, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
       notify('営業所共有に追加しました', 'success');
     } catch (err) { notify('共有エラー: '+(err?.message||err)+'\nファイル容量が大きい場合は共有できません。', 'error'); }
+  };
+  // 複数のメーカー仕切りを一括で営業所共有へ送信（一括／選択どちらも共通）。
+  // shareMakerData と同じ「内容が完全一致なら追加しない」「9MB超は不可」のルールを適用し、
+  // 1ファイルずつ個別の子ノードへ書き込む（既存の巨大配列書込エラー対策を踏襲）。
+  const shareMultipleMakerData = async (list) => {
+    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) {
+      notify('クラウド同期がオフのため共有できません。右上の同期設定をオンにしてください。', 'error');
+      return;
+    }
+    if (!list || list.length === 0) return;
+    const MAX_BYTES = 9 * 1024 * 1024;
+    const sig = (m) => `${m.makerName}|${m.fileName}|${m.fileSize}|${m.data}`;
+    const seen = new Set((officeSharedMakerData || []).filter(Boolean).map(sig));
+    let addedCount = 0, dupCount = 0, errorCount = 0;
+    for (const m of list) {
+      const s = sig(m);
+      if (seen.has(s)) { dupCount++; continue; }
+      seen.add(s);
+      const approxBytes = m.data ? Math.floor(m.data.length * 0.75) : 0;
+      if (approxBytes > MAX_BYTES) { errorCount++; continue; }
+      try {
+        const id = m.id || genId('mk');
+        const r = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${id}`);
+        await dbSet(r, cleanForFirebase({ ...m, id, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+        addedCount++;
+      } catch (err) { errorCount++; }
+    }
+    let msg = `${addedCount}件を営業所共有に追加しました`;
+    if (dupCount > 0) msg += `（重複${dupCount}件は除外）`;
+    if (errorCount > 0) msg += `（エラー${errorCount}件はファイル容量超過などのため共有できませんでした）`;
+    notify(msg, errorCount > 0 ? 'error' : 'success');
+    setSelectedMakerIds(new Set());
   };
   // 営業所共有へ メーカー仕切りを直接 新規登録する共通処理（ファイル選択／ドラッグ&ドロップ共用）
   const registerMakerFilesToOffice = async (files, makerName) => {
@@ -5827,11 +5866,43 @@ function App() {
               const isOpen = (key) => expandedMakers === key; // アコーディオン：常に1つだけ
               const toggle = (key) => setExpandedMakers(prev => prev === key ? null : key);
               const btnCls = 'px-2.5 py-1 rounded text-xs font-bold text-white';
+              const shareableMakers = ownGroups.flatMap(g => g.files);
+              const allMakerChecked = shareableMakers.length > 0 && shareableMakers.every(m => selectedMakerIds.has(m.id));
               return (
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               {/* 自分のデータ（メーカー毎フォルダ） */}
               <div>
                 <div className="text-sm font-bold text-slate-700 mb-2">自分のメーカー仕切り（{makerDataList.length}件）</div>
+                {shareableMakers.length > 0 && (
+                  <div className="flex items-center gap-3 flex-wrap mb-2 bg-slate-50 border border-slate-200 rounded px-3 py-2">
+                    <label className="flex items-center gap-1.5 text-xs font-bold text-slate-600 cursor-pointer select-none">
+                      <input type="checkbox" checked={allMakerChecked}
+                        onChange={(e) => setSelectedMakerIds(e.target.checked ? new Set(shareableMakers.map(m => m.id)) : new Set())}
+                        className="w-4 h-4" />
+                      全選択
+                    </label>
+                    <span className="text-xs text-slate-500">{selectedMakerIds.size}件選択中</span>
+                    <button
+                      disabled={selectedMakerIds.size === 0}
+                      onClick={async () => {
+                        const targets = shareableMakers.filter(m => selectedMakerIds.has(m.id));
+                        if (targets.length === 0) return;
+                        if (!confirm(`選択した${targets.length}件を営業所「${loginInfo?.officeCode||''}」全員で共有しますか？\n（内容が同じ仕切りは自動的に除外され、重複登録はされません）`)) return;
+                        await shareMultipleMakerData(targets);
+                      }}
+                      className={`px-3 py-1.5 rounded text-xs font-bold text-white ${selectedMakerIds.size > 0 ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-300 cursor-not-allowed'}`}>
+                      🏢 選択した仕切りを営業所共有へ
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (!confirm(`表示中の${shareableMakers.length}件全てを営業所「${loginInfo?.officeCode||''}」全員で共有しますか？\n（内容が同じ仕切りは自動的に除外され、重複登録はされません）`)) return;
+                        await shareMultipleMakerData(shareableMakers);
+                      }}
+                      className="ml-auto px-3 py-1.5 rounded text-xs font-bold text-white bg-teal-600 hover:bg-teal-700">
+                      🏢 全件({shareableMakers.length})を営業所共有へ
+                    </button>
+                  </div>
+                )}
                 {ownGroups.length === 0 ? (
                   <div className="text-center py-4 text-slate-400 text-xs">{makerDataList.length === 0 ? 'まだ登録がありません' : '条件に一致するデータがありません'}</div>
                 ) : ownGroups.map(g => {
@@ -5857,6 +5928,10 @@ function App() {
                         <div className="divide-y divide-slate-100">
                           {g.files.map(m => (
                             <div key={m.id} className="px-3 py-2 hover:bg-slate-50">
+                              <label className="flex items-center gap-1.5 mb-1 text-[11px] text-slate-500 font-bold cursor-pointer select-none w-fit">
+                                <input type="checkbox" checked={selectedMakerIds.has(m.id)} onChange={() => toggleMakerSelect(m.id)} className="w-4 h-4" />
+                                共有用に選択
+                              </label>
                               <div className="min-w-0 mb-1.5">
                                 <div onDoubleClick={() => handleMakerRename(m)} title="ダブルクリックで名前を編集" className="text-sm text-slate-800 truncate cursor-text">{m.effectiveDate && <span className="font-bold text-purple-700">📅{m.effectiveDate.replace(/-/g,'/')}〜 </span>}{m.fileName} <span className="text-xs text-slate-400">({Math.round((m.fileSize||0)/1024)}KB)</span></div>
                                 <div className="text-[11px] text-slate-500 font-medium">登録日: {new Date(m.uploadedAt).toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' })}</div>
