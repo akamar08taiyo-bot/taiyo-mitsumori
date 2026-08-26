@@ -888,8 +888,18 @@ function App() {
   const [expandedSharedFacilities, setExpandedSharedFacilities] = useState(null); // 営業所共有：開いている施設名（1つだけ／アコーディオン）
   const [showOfficeMakerReg, setShowOfficeMakerReg] = useState(false); // 営業所共有ビューの「新規登録」フォーム開閉
   const [officeMakerDragOver, setOfficeMakerDragOver] = useState(false); // 営業所共有ビューのドラッグ&ドロップ表示
-  const [officeShareTab, setOfficeShareTab] = useState(null); // 営業所共有：null=選択画面 / 'quotes'=見積もり一覧 / 'makers'=仕切り一覧
+  const [officeShareTab, setOfficeShareTab] = useState(null); // 営業所共有：null=選択画面 / 'quotes'=見積もり一覧 / 'makers'=仕切り一覧 / 'flyers'=チラシ・事例集共有 / 'orders'=発注書共有
   const [expandedSharedMakers, setExpandedSharedMakers] = useState(null); // 営業所共有：開いているメーカー名（1つだけ／アコーディオン）
+  // チラシ・事例集共有／発注書共有：仕切り一覧と同じ仕組み（営業所共有のみ・個人分なし）
+  const [officeSharedFlyers, setOfficeSharedFlyers] = useState([]);
+  const [officeSharedOrders, setOfficeSharedOrders] = useState([]);
+  const [expandedSharedFlyers, setExpandedSharedFlyers] = useState(null);
+  const [expandedSharedOrders, setExpandedSharedOrders] = useState(null);
+  const [showOfficeFlyerReg, setShowOfficeFlyerReg] = useState(false);
+  const [showOfficeOrderReg, setShowOfficeOrderReg] = useState(false);
+  const [officeFlyerDragOver, setOfficeFlyerDragOver] = useState(false);
+  const [officeOrderDragOver, setOfficeOrderDragOver] = useState(false);
+  const [officeQuoteFileDropTarget, setOfficeQuoteFileDropTarget] = useState(null); // 営業所共有：見積の施設行へドラッグ中のドロップ先施設名
   const [showCloseConfirm, setShowCloseConfirm] = useState(false); // 「閉じる」時の保存確認ダイアログ（施設フォルダ内・変更あり時）
   const [pendingPrintProp, setPendingPrintProp] = useState(null); // 管理画面からPDF保存：読込完了後に印刷するための予約ID
   // メーカーデータを IndexedDB から読み込み（旧 localStorage からは自動移行）。
@@ -931,6 +941,62 @@ function App() {
       try { notify('仕切りデータの保存に失敗しました。ファイル容量が大きすぎる可能性があります。', 'error'); } catch {}
     });
   }, [makerDataList]);
+  // 施設フォルダへの添付ファイル（他で作成された見積・価格改定案内等をそのまま格納）。
+  // makerData と同じくIndexedDBに保存（大容量PDF対応、localStorage 5MB上限を回避）。
+  const [folderAttachments, setFolderAttachments] = useState([]);
+  const [folderAttachDragOver, setFolderAttachDragOver] = useState(null); // ドラッグ中のフォルダID（開いたフォルダ内のドロップ枠強調用）
+  const folderAttachLoadedRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let data = [];
+      try {
+        const fromIdb = await idbGet('folderAttachments');
+        if (Array.isArray(fromIdb)) data = fromIdb;
+      } catch (e) { console.warn('folderAttachments idb read error', e); }
+      if (!cancelled) {
+        if (data.length > 0) setFolderAttachments(data);
+        folderAttachLoadedRef.current = true;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!folderAttachLoadedRef.current) return;
+    idbSet('folderAttachments', folderAttachments).catch((e) => {
+      console.warn('folderAttachments save error', e);
+      try { notify('添付ファイルの保存に失敗しました。ファイル容量が大きすぎる可能性があります。', 'error'); } catch {}
+    });
+  }, [folderAttachments]);
+  // ファイルを施設フォルダへ添付登録（表示名はファイルの更新日時+ファイル名から自動生成）
+  const attachFilesToFolder = async (folderId, files) => {
+    files = Array.from(files || []);
+    if (files.length === 0) return;
+    const MAX_SIZE = 10 * 1024 * 1024;
+    for (const f of files) {
+      if (f.size > MAX_SIZE) { notify(`「${f.name}」は10MB超のため添付できません`, 'error'); continue; }
+      try {
+        const data = await fileToBase64(f);
+        const dateLabel = new Date(f.lastModified || Date.now()).toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '/');
+        const baseName = f.name.replace(/\.[^.]+$/, '');
+        const rec = { id: genId('att'), folderId, fileName: f.name, displayName: `${dateLabel} ${baseName}`, fileType: f.type, fileSize: f.size, data, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName || '' };
+        setFolderAttachments(prev => [rec, ...prev]);
+        notify(`「${f.name}」を添付しました`, 'success');
+      } catch (err) { notify('添付エラー: ' + (err?.message || err), 'error'); }
+    }
+  };
+  const renameFolderAttachment = (id) => {
+    const cur = folderAttachments.find(a => a.id === id); if (!cur) return;
+    const nn = prompt('表示名を編集', cur.displayName || cur.fileName || '');
+    if (nn === null) return;
+    setFolderAttachments(prev => prev.map(a => a.id === id ? { ...a, displayName: nn.trim() || a.displayName } : a));
+    notify('名前を変更しました', 'success');
+  };
+  const deleteFolderAttachment = (id) => {
+    if (!confirm('この添付ファイルを削除しますか？')) return;
+    setFolderAttachments(prev => prev.filter(a => a.id !== id));
+    notify('削除しました', 'success');
+  };
   // 営業所共有のメーカーデータ
   const [officeSharedMakerData, setOfficeSharedMakerData] = useState([]);
   const [savedProposals, setSavedProposals] = useState(() => loadStorage(STORAGE_KEYS.PROPOSALS, []));
@@ -1671,6 +1737,136 @@ function App() {
     }, e => console.warn('shared-makers sub', e));
     return () => { try { dbOff(r); } catch {} };
   }, [loginInfo?.officeCode, cloudSyncEnabled]);
+  // チラシ・事例集共有の購読（営業所共有のみ・個人分なし）
+  useEffect(() => {
+    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
+    const r = dbRef(firebaseDB, `office-shared-flyers/${loginInfo.officeCode}`);
+    const unsub = onValue(r, snap => {
+      const v = snap.val();
+      let list = [];
+      if (Array.isArray(v)) list = v.filter(Boolean);
+      else if (v && typeof v === 'object') list = Object.values(v).filter(Boolean);
+      setOfficeSharedFlyers(list);
+    }, e => console.warn('shared-flyers sub', e));
+    return () => { try { dbOff(r); } catch {} };
+  }, [loginInfo?.officeCode, cloudSyncEnabled]);
+  // 発注書共有の購読（営業所共有のみ・個人分なし）
+  useEffect(() => {
+    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
+    const r = dbRef(firebaseDB, `office-shared-orders/${loginInfo.officeCode}`);
+    const unsub = onValue(r, snap => {
+      const v = snap.val();
+      let list = [];
+      if (Array.isArray(v)) list = v.filter(Boolean);
+      else if (v && typeof v === 'object') list = Object.values(v).filter(Boolean);
+      setOfficeSharedOrders(list);
+    }, e => console.warn('shared-orders sub', e));
+    return () => { try { dbOff(r); } catch {} };
+  }, [loginInfo?.officeCode, cloudSyncEnabled]);
+  // チラシ・事例集共有／発注書共有 共通の書込処理（仕切り共有と同じ方式。個人分は持たず営業所共有のみ）
+  const OFFICE_SHARE_CATEGORY_PATH = { flyers: 'office-shared-flyers', orders: 'office-shared-orders' };
+  const registerFilesToOfficeCategory = async (category, files, groupName) => {
+    files = Array.from(files || []);
+    if (files.length === 0) return;
+    if (!groupName?.trim()) { notify('先にメーカー名を入力してからファイルを選んで（またはドロップして）ください', 'error'); return; }
+    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) { notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error'); return; }
+    const MAX_BYTES = 9 * 1024 * 1024;
+    for (const f of files) {
+      if (f.size > MAX_BYTES) { notify(`「${f.name}」は9MB超のため営業所共有に登録できません`, 'error'); continue; }
+      try {
+        const data = await fileToBase64(f);
+        const id = genId('sh');
+        const rec = { id, makerName: groupName.trim(), fileName: f.name, fileType: f.type, fileSize: f.size, data, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName || '' };
+        const r = dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}/${id}`);
+        await dbSet(r, cleanForFirebase({ ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+        notify(`「${groupName}」の「${f.name}」を営業所共有に登録しました`, 'success');
+      } catch (err) { notify('登録エラー: ' + (err?.message || err), 'error'); }
+    }
+  };
+  const deleteFromOfficeCategory = async (category, id) => {
+    if (!firebaseDB || !loginInfo) return;
+    if (!confirm('営業所共有から削除しますか？\n（全員から見えなくなります）')) return;
+    try {
+      const baseR = dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}`);
+      const snap = await dbGet(baseR);
+      const v = snap.val();
+      if (Array.isArray(v)) {
+        await dbSet(baseR, v.filter(m => m && m.id !== id));
+      } else if (v && typeof v === 'object') {
+        const key = Object.prototype.hasOwnProperty.call(v, id) ? id : Object.keys(v).find(k => v[k] && v[k].id === id);
+        if (key) await dbSet(dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}/${key}`), null);
+      }
+      notify('削除しました', 'success');
+    } catch (err) { notify('削除エラー: ' + (err?.message || err), 'error'); }
+  };
+  const renameOfficeCategoryItem = async (category, m) => {
+    if (!firebaseDB || !loginInfo) return;
+    const newMaker = prompt('メーカー名を編集', m.makerName || '');
+    if (newMaker === null) return;
+    const newFile = prompt('ファイル表示名を編集', m.fileName || '');
+    if (newFile === null) return;
+    const updated = { ...m, makerName: (newMaker.trim() || m.makerName), fileName: (newFile.trim() || m.fileName) };
+    try {
+      const baseR = dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}`);
+      const snap = await dbGet(baseR);
+      const v = snap.val();
+      if (Array.isArray(v)) {
+        await dbSet(baseR, v.map(x => (x && x.id === m.id ? updated : x)));
+      } else if (v && typeof v === 'object') {
+        const key = Object.prototype.hasOwnProperty.call(v, m.id) ? m.id : Object.keys(v).find(k => v[k] && v[k].id === m.id);
+        if (key) await dbSet(dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}/${key}`), cleanForFirebase(updated));
+      }
+      notify('名前を変更しました（全員に反映されます）', 'success');
+    } catch (err) { notify('名前変更エラー: ' + (err?.message || err), 'error'); }
+  };
+  // 営業所共有の見積もり一覧（施設名フォルダ）への添付ファイル登録。
+  // 他で作成された見積・価格改定案内等を、施設名を入力し直さずそのまま共有できる（施設名は開いている施設から自動判定）。
+  const [officeSharedQuoteFiles, setOfficeSharedQuoteFiles] = useState([]);
+  useEffect(() => {
+    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
+    const r = dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}`);
+    const unsub = onValue(r, snap => {
+      const v = snap.val();
+      setOfficeSharedQuoteFiles(v && typeof v === 'object' ? Object.values(v).filter(Boolean) : []);
+    }, e => console.warn('shared-quote-files sub', e));
+    return () => { try { dbOff(r); } catch {} };
+  }, [loginInfo?.officeCode, cloudSyncEnabled]);
+  const registerQuoteFileToOffice = async (facilityName, files) => {
+    files = Array.from(files || []);
+    if (files.length === 0) return;
+    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) { notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error'); return; }
+    const MAX_BYTES = 9 * 1024 * 1024;
+    for (const f of files) {
+      if (f.size > MAX_BYTES) { notify(`「${f.name}」は9MB超のため営業所共有に登録できません`, 'error'); continue; }
+      try {
+        const data = await fileToBase64(f);
+        const id = genId('sh');
+        const dateLabel = new Date(f.lastModified || Date.now()).toLocaleDateString('ja-JP');
+        const baseName = f.name.replace(/\.[^.]+$/, '');
+        const rec = { id, facilityName, fileName: f.name, displayName: `${dateLabel} ${baseName}`, fileType: f.type, fileSize: f.size, data, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName || '' };
+        const r = dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}/${id}`);
+        await dbSet(r, cleanForFirebase({ ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+        notify(`「${f.name}」を「${facilityName}」に共有登録しました`, 'success');
+      } catch (err) { notify('登録エラー: ' + (err?.message || err), 'error'); }
+    }
+  };
+  const deleteOfficeQuoteFile = async (id) => {
+    if (!firebaseDB || !loginInfo) return;
+    if (!confirm('営業所共有から削除しますか？\n（全員から見えなくなります）')) return;
+    try {
+      await dbSet(dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}/${id}`), null);
+      notify('削除しました', 'success');
+    } catch (err) { notify('削除エラー: ' + (err?.message || err), 'error'); }
+  };
+  const renameOfficeQuoteFile = async (m) => {
+    if (!firebaseDB || !loginInfo) return;
+    const nn = prompt('表示名を編集', m.displayName || m.fileName || '');
+    if (nn === null) return;
+    try {
+      await dbSet(dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}/${m.id}`), cleanForFirebase({ ...m, displayName: nn.trim() || m.displayName }));
+      notify('名前を変更しました（全員に反映されます）', 'success');
+    } catch (err) { notify('名前変更エラー: ' + (err?.message || err), 'error'); }
+  };
   // 営業所共有メーカーデータを削除（新形式は子ノードをnull、旧形式は配列を書き戻し）
   const deleteSharedMakerData = async (id) => {
     if (!firebaseDB || !loginInfo) return;
@@ -1698,6 +1894,28 @@ function App() {
   const copySharedMakerData = (m) => {
     setMakerDataList(prev => [{ ...m, id: genId('mk'), uploadedAt: Date.now(), uploadedBy: loginInfo?.userName||'', _copiedFromShared: true }, ...prev]);
     notify('自分のデータへコピーしました', 'success');
+  };
+  // 営業所共有メーカーデータの名前を編集（メーカー名・ファイル表示名、全員に反映）
+  const renameSharedMakerData = async (m) => {
+    if (!firebaseDB || !loginInfo) return;
+    const newMaker = prompt('メーカー名を編集', m.makerName || '');
+    if (newMaker === null) return;
+    const newFile = prompt('ファイル表示名を編集', m.fileName || '');
+    if (newFile === null) return;
+    const updated = { ...m, makerName: (newMaker.trim() || m.makerName), fileName: (newFile.trim() || m.fileName) };
+    try {
+      const baseR = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}`);
+      const snap = await dbGet(baseR);
+      const v = snap.val();
+      if (Array.isArray(v)) {
+        // 旧形式: 配列を書き戻し
+        await dbSet(baseR, v.map(x => (x && x.id === m.id ? updated : x)));
+      } else if (v && typeof v === 'object') {
+        const key = Object.prototype.hasOwnProperty.call(v, m.id) ? m.id : Object.keys(v).find(k => v[k] && v[k].id === m.id);
+        if (key) await dbSet(dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${key}`), cleanForFirebase(updated));
+      }
+      notify('名前を変更しました（全員に反映されます）', 'success');
+    } catch (err) { notify('名前変更エラー: ' + (err?.message || err), 'error'); }
   };
 
   // === 手動バックアップ: JSON ファイルとして書き出し ===
@@ -5260,9 +5478,9 @@ function App() {
                       draggable={editingFolderId !== f.id}
                       onDragStart={(e) => { folderDragIdRef.current = f.id; setFolderDragId(f.id); try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', f.id); } catch {} }}
                       onDragEnd={() => { folderDragIdRef.current = null; setFolderDragId(null); setFolderDropId(null); }}
-                      onDragOver={(e) => { const d = folderDragId || folderDragIdRef.current; if (d && d !== f.id) { e.preventDefault(); setFolderDropId(f.id); } }}
+                      onDragOver={(e) => { const d = folderDragId || folderDragIdRef.current; const isExtFile = e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'); if (isExtFile || (d && d !== f.id)) { e.preventDefault(); setFolderDropId(f.id); } }}
                       onDragLeave={() => { if (folderDropId === f.id) setFolderDropId(null); }}
-                      onDrop={(e) => { e.preventDefault(); const src = folderDragIdRef.current || folderDragId || (e.dataTransfer && e.dataTransfer.getData('text/plain')); folderDragIdRef.current = null; setFolderDropId(null); setFolderDragId(null); if (src && src !== f.id) mergeFacilityFolder(src, f.id); }}
+                      onDrop={(e) => { e.preventDefault(); const extFiles = e.dataTransfer?.files; if (extFiles && extFiles.length > 0) { setFolderDropId(null); attachFilesToFolder(f.id, extFiles); return; } const src = folderDragIdRef.current || folderDragId || (e.dataTransfer && e.dataTransfer.getData('text/plain')); folderDragIdRef.current = null; setFolderDropId(null); setFolderDragId(null); if (src && src !== f.id) mergeFacilityFolder(src, f.id); }}
                       title="ドラッグして別の施設へ重ねると統合できます"
                       className={`rounded-lg transition shadow-sm ${isFolderDropHi ? 'ring-2 ring-emerald-400 bg-emerald-50 border border-emerald-400' : isSelected ? 'bg-indigo-600 shadow-md border-l-4 border-l-indigo-800' : 'bg-gradient-to-r from-blue-100 to-sky-50 border border-blue-300 border-l-4 border-l-blue-500 hover:from-blue-200 hover:to-sky-100 hover:border-l-blue-600'}`}>
                       {editingFolderId === f.id ? (
@@ -5314,6 +5532,18 @@ function App() {
                         <div className="text-xs text-slate-500 mt-1">メーカー名フォルダで見る</div>
                         <div className="inline-block mt-3 text-xs bg-purple-100 text-purple-700 rounded-full px-3 py-1 font-bold">{officeSharedMakerData.length}件</div>
                       </button>
+                      <button onClick={() => setOfficeShareTab('flyers')} className="rounded-xl border-2 border-sky-300 bg-white hover:bg-sky-50 hover:border-sky-500 shadow-sm hover:shadow-md transition p-6 text-center">
+                        <div className="text-4xl mb-2">🖼️</div>
+                        <div className="text-lg font-bold text-sky-800">チラシ・事例集共有</div>
+                        <div className="text-xs text-slate-500 mt-1">メーカー名フォルダで見る</div>
+                        <div className="inline-block mt-3 text-xs bg-sky-100 text-sky-700 rounded-full px-3 py-1 font-bold">{officeSharedFlyers.length}件</div>
+                      </button>
+                      <button onClick={() => setOfficeShareTab('orders')} className="rounded-xl border-2 border-orange-300 bg-white hover:bg-orange-50 hover:border-orange-500 shadow-sm hover:shadow-md transition p-6 text-center">
+                        <div className="text-4xl mb-2">📦</div>
+                        <div className="text-lg font-bold text-orange-800">発注書共有</div>
+                        <div className="text-xs text-slate-500 mt-1">メーカー名フォルダで見る</div>
+                        <div className="inline-block mt-3 text-xs bg-orange-100 text-orange-700 rounded-full px-3 py-1 font-bold">{officeSharedOrders.length}件</div>
+                      </button>
                     </div>
                   </div>
                 )}
@@ -5321,9 +5551,11 @@ function App() {
                 {selectedFolderId === '__office_shared__' && officeShareTab === 'makers' && (
                   <div className="flex-1 flex flex-col overflow-hidden">
                     <div className="px-4 py-2.5 border-b border-slate-200 bg-white flex items-center gap-2 flex-wrap">
-                      <div className="inline-flex rounded-lg border-2 border-slate-200 overflow-hidden shadow-sm">
-                        <button onClick={() => setOfficeShareTab('quotes')} className={`px-3.5 py-1.5 text-sm font-bold flex items-center gap-1.5 transition ${officeShareTab === 'quotes' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-emerald-50'}`}>📝 見積もり一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'quotes' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedProposals.length}</span></button>
-                        <button onClick={() => setOfficeShareTab('makers')} className={`px-3.5 py-1.5 text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'makers' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 hover:bg-purple-50'}`}>🏭 仕切り一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'makers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedMakerData.length}</span></button>
+                      <div className="inline-flex rounded-lg border-2 border-slate-200 overflow-hidden shadow-sm flex-wrap">
+                        <button onClick={() => setOfficeShareTab('quotes')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition ${officeShareTab === 'quotes' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-emerald-50'}`}>📝 見積もり一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'quotes' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedProposals.length}</span></button>
+                        <button onClick={() => setOfficeShareTab('makers')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'makers' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 hover:bg-purple-50'}`}>🏭 仕切り一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'makers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedMakerData.length}</span></button>
+                        <button onClick={() => setOfficeShareTab('flyers')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'flyers' ? 'bg-sky-600 text-white' : 'bg-white text-slate-600 hover:bg-sky-50'}`}>🖼️ チラシ・事例集 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'flyers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedFlyers.length}</span></button>
+                        <button onClick={() => setOfficeShareTab('orders')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'orders' ? 'bg-orange-600 text-white' : 'bg-white text-slate-600 hover:bg-orange-50'}`}>📦 発注書 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'orders' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedOrders.length}</span></button>
                       </div>
                       <button onClick={() => setOfficeShareTab(null)} title="選択画面に戻る" className="ml-auto text-xs font-bold text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-2.5 py-1.5 rounded-md">⊞ 選択画面</button>
                     </div>
@@ -5377,7 +5609,152 @@ function App() {
                                   <button onClick={() => openMakerFile(m)} title="この仕切りを開いて表示する" className="px-3.5 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">開く</button>
                                   <button onClick={() => handleMakerDownload(m)} title="ファイルとして保存（ダウンロード）" className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold rounded-md text-xs shrink-0">保存</button>
                                   <button onClick={() => copySharedMakerData(m)} title="自分のメーカーデータへコピー" className="px-3 py-2 bg-slate-700 hover:bg-slate-800 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">自分へコピー</button>
+                                  <button onClick={() => renameSharedMakerData(m)} title="メーカー名・ファイル名を編集（全員に反映）" className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">名前変更</button>
                                   <button onClick={() => deleteSharedMakerData(m.id)} title="営業所共有から削除" className="p-2 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-5 h-5" /></button>
+                                </div>
+                              ))}</div>}
+                            </div>
+                          );
+                        });
+                      })()}
+                    </div>
+                  </div>
+                )}
+                {/* === 営業所共有：チラシ・事例集共有（メーカー名フォルダ・営業所共有のみ） === */}
+                {selectedFolderId === '__office_shared__' && officeShareTab === 'flyers' && (
+                  <div className="flex-1 flex flex-col overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-slate-200 bg-white flex items-center gap-2 flex-wrap">
+                      <div className="inline-flex rounded-lg border-2 border-slate-200 overflow-hidden shadow-sm flex-wrap">
+                        <button onClick={() => setOfficeShareTab('quotes')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition ${officeShareTab === 'quotes' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-emerald-50'}`}>📝 見積もり一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'quotes' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedProposals.length}</span></button>
+                        <button onClick={() => setOfficeShareTab('makers')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'makers' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 hover:bg-purple-50'}`}>🏭 仕切り一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'makers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedMakerData.length}</span></button>
+                        <button onClick={() => setOfficeShareTab('flyers')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'flyers' ? 'bg-sky-600 text-white' : 'bg-white text-slate-600 hover:bg-sky-50'}`}>🖼️ チラシ・事例集 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'flyers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedFlyers.length}</span></button>
+                        <button onClick={() => setOfficeShareTab('orders')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'orders' ? 'bg-orange-600 text-white' : 'bg-white text-slate-600 hover:bg-orange-50'}`}>📦 発注書 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'orders' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedOrders.length}</span></button>
+                      </div>
+                      <button onClick={() => setOfficeShareTab(null)} title="選択画面に戻る" className="ml-auto text-xs font-bold text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-2.5 py-1.5 rounded-md">⊞ 選択画面</button>
+                    </div>
+                    <div className="px-4 py-2.5 bg-sky-50 border-b border-sky-200 space-y-2">
+                      <button onClick={() => setShowOfficeFlyerReg(v => !v)} title="チラシ・事例集を新規登録" className={`flex items-center gap-1 px-3 py-1.5 rounded-md shadow-sm text-xs font-bold transition whitespace-nowrap ${showOfficeFlyerReg ? 'bg-sky-700 text-white' : 'bg-sky-600 hover:bg-sky-500 text-white'}`}>{showOfficeFlyerReg ? '✕ 閉じる' : '＋ 新規登録'}</button>
+                      {showOfficeFlyerReg && (
+                      <div
+                        className={`rounded-md px-2.5 py-2 border transition-colors ${officeFlyerDragOver ? 'bg-sky-200 border-sky-500' : 'bg-white border-sky-200'}`}
+                        onDragOver={e => { e.preventDefault(); setOfficeFlyerDragOver(true); }}
+                        onDragLeave={e => { e.preventDefault(); setOfficeFlyerDragOver(false); }}
+                        onDrop={async e => { e.preventDefault(); setOfficeFlyerDragOver(false); const nm = document.getElementById('office-shared-flyer-name')?.value || ''; await registerFilesToOfficeCategory('flyers', e.dataTransfer?.files, nm); }}
+                      >
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[11px] font-bold text-sky-700 shrink-0">＋ 新規登録</span>
+                          <input type="text" id="office-shared-flyer-name" placeholder="メーカー名 (例: 花王)" className="flex-1 min-w-[150px] px-2.5 py-1.5 border border-sky-300 rounded text-xs outline-none focus:border-sky-500" />
+                          <label className="bg-sky-600 hover:bg-sky-500 text-white px-3 py-1.5 rounded-md shadow-sm text-xs font-bold cursor-pointer whitespace-nowrap transition">
+                            📎 ファイルを選んで登録
+                            <input type="file" accept=".pdf,.xlsx,.xls,.csv,.doc,.docx,.png,.jpg,.jpeg" multiple className="hidden" onChange={async e => { await registerFilesToOfficeCategory('flyers', e.target.files, document.getElementById('office-shared-flyer-name')?.value || ''); e.target.value = ''; }} />
+                          </label>
+                        </div>
+                        <div className={`mt-2 text-center text-[11px] rounded border-2 border-dashed py-1.5 ${officeFlyerDragOver ? 'border-sky-500 text-sky-700 font-bold' : 'border-sky-300 text-sky-400'}`}>
+                          {officeFlyerDragOver ? 'ここにドロップして営業所共有に登録' : '📎 メーカー名を入れて、ここにファイルをドラッグ&ドロップでも登録できます（1ファイル9MBまで）'}
+                        </div>
+                      </div>
+                      )}
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                      {officeSharedFlyers.length === 0 ? (
+                        <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />共有されているチラシ・事例集はありません<div className="text-xs mt-1">上の「＋ 新規登録」から追加できます</div></div>
+                      ) : (() => {
+                        const groups = {};
+                        officeSharedFlyers.forEach(m => { const k = (m.makerName || '(未分類)'); (groups[k] = groups[k] || []).push(m); });
+                        const names = Object.keys(groups).sort((a,b) => a.localeCompare(b,'ja'));
+                        return names.map(nm => {
+                          const open = expandedSharedFlyers === nm;
+                          return (
+                            <div key={nm} className="border border-sky-200 rounded-lg overflow-hidden">
+                              <button onClick={() => setExpandedSharedFlyers(prev => prev === nm ? null : nm)} className="w-full flex items-center gap-2 px-3 py-2.5 bg-sky-100 hover:bg-sky-200 text-left">
+                                <span className="text-sky-600 text-xs w-4">{open ? '▼' : '▶'}</span>
+                                <span className="text-base shrink-0">🖼️</span>
+                                <span className="font-bold text-sky-900 text-sm flex-1 truncate">{nm}</span>
+                                <span className="text-xs bg-sky-300 text-sky-800 rounded-full px-2 py-0.5 font-bold shrink-0">{groups[nm].length}件</span>
+                              </button>
+                              {open && <div className="p-2.5 space-y-2 bg-sky-50/30">{groups[nm].map(m => (
+                                <div key={m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-3">
+                                  <span className="text-2xl shrink-0">📄</span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="text-sm font-bold text-slate-800 truncate">{m.fileName || '(ファイル名なし)'}</div>
+                                    <div className="text-xs text-slate-500 mt-0.5">{m.fileSize ? `${Math.round(m.fileSize/1024)}KB` : ''}{m.uploadedBy ? ` ・ ${m.uploadedBy}` : ''}</div>
+                                  </div>
+                                  <button onClick={() => openMakerFile(m)} title="開いて表示する" className="px-3.5 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">開く</button>
+                                  <button onClick={() => handleMakerDownload(m)} title="ファイルとして保存（ダウンロード）" className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold rounded-md text-xs shrink-0">保存</button>
+                                  <button onClick={() => renameOfficeCategoryItem('flyers', m)} title="メーカー名・ファイル名を編集（全員に反映）" className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">名前変更</button>
+                                  <button onClick={() => deleteFromOfficeCategory('flyers', m.id)} title="営業所共有から削除" className="p-2 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-5 h-5" /></button>
+                                </div>
+                              ))}</div>}
+                            </div>
+                          );
+                        });
+                      })()}
+                    </div>
+                  </div>
+                )}
+                {/* === 営業所共有：発注書共有（メーカー名フォルダ・営業所共有のみ） === */}
+                {selectedFolderId === '__office_shared__' && officeShareTab === 'orders' && (
+                  <div className="flex-1 flex flex-col overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-slate-200 bg-white flex items-center gap-2 flex-wrap">
+                      <div className="inline-flex rounded-lg border-2 border-slate-200 overflow-hidden shadow-sm flex-wrap">
+                        <button onClick={() => setOfficeShareTab('quotes')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition ${officeShareTab === 'quotes' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-emerald-50'}`}>📝 見積もり一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'quotes' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedProposals.length}</span></button>
+                        <button onClick={() => setOfficeShareTab('makers')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'makers' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 hover:bg-purple-50'}`}>🏭 仕切り一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'makers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedMakerData.length}</span></button>
+                        <button onClick={() => setOfficeShareTab('flyers')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'flyers' ? 'bg-sky-600 text-white' : 'bg-white text-slate-600 hover:bg-sky-50'}`}>🖼️ チラシ・事例集 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'flyers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedFlyers.length}</span></button>
+                        <button onClick={() => setOfficeShareTab('orders')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'orders' ? 'bg-orange-600 text-white' : 'bg-white text-slate-600 hover:bg-orange-50'}`}>📦 発注書 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'orders' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedOrders.length}</span></button>
+                      </div>
+                      <button onClick={() => setOfficeShareTab(null)} title="選択画面に戻る" className="ml-auto text-xs font-bold text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-2.5 py-1.5 rounded-md">⊞ 選択画面</button>
+                    </div>
+                    <div className="px-4 py-2.5 bg-orange-50 border-b border-orange-200 space-y-2">
+                      <button onClick={() => setShowOfficeOrderReg(v => !v)} title="発注書を新規登録" className={`flex items-center gap-1 px-3 py-1.5 rounded-md shadow-sm text-xs font-bold transition whitespace-nowrap ${showOfficeOrderReg ? 'bg-orange-700 text-white' : 'bg-orange-600 hover:bg-orange-500 text-white'}`}>{showOfficeOrderReg ? '✕ 閉じる' : '＋ 新規登録'}</button>
+                      {showOfficeOrderReg && (
+                      <div
+                        className={`rounded-md px-2.5 py-2 border transition-colors ${officeOrderDragOver ? 'bg-orange-200 border-orange-500' : 'bg-white border-orange-200'}`}
+                        onDragOver={e => { e.preventDefault(); setOfficeOrderDragOver(true); }}
+                        onDragLeave={e => { e.preventDefault(); setOfficeOrderDragOver(false); }}
+                        onDrop={async e => { e.preventDefault(); setOfficeOrderDragOver(false); const nm = document.getElementById('office-shared-order-name')?.value || ''; await registerFilesToOfficeCategory('orders', e.dataTransfer?.files, nm); }}
+                      >
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[11px] font-bold text-orange-700 shrink-0">＋ 新規登録</span>
+                          <input type="text" id="office-shared-order-name" placeholder="メーカー名 (例: 花王)" className="flex-1 min-w-[150px] px-2.5 py-1.5 border border-orange-300 rounded text-xs outline-none focus:border-orange-500" />
+                          <label className="bg-orange-600 hover:bg-orange-500 text-white px-3 py-1.5 rounded-md shadow-sm text-xs font-bold cursor-pointer whitespace-nowrap transition">
+                            📎 ファイルを選んで登録
+                            <input type="file" accept=".pdf,.xlsx,.xls,.csv,.doc,.docx,.png,.jpg,.jpeg" multiple className="hidden" onChange={async e => { await registerFilesToOfficeCategory('orders', e.target.files, document.getElementById('office-shared-order-name')?.value || ''); e.target.value = ''; }} />
+                          </label>
+                        </div>
+                        <div className={`mt-2 text-center text-[11px] rounded border-2 border-dashed py-1.5 ${officeOrderDragOver ? 'border-orange-500 text-orange-700 font-bold' : 'border-orange-300 text-orange-400'}`}>
+                          {officeOrderDragOver ? 'ここにドロップして営業所共有に登録' : '📎 メーカー名を入れて、ここにファイルをドラッグ&ドロップでも登録できます（1ファイル9MBまで）'}
+                        </div>
+                      </div>
+                      )}
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                      {officeSharedOrders.length === 0 ? (
+                        <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />共有されている発注書はありません<div className="text-xs mt-1">上の「＋ 新規登録」から追加できます</div></div>
+                      ) : (() => {
+                        const groups = {};
+                        officeSharedOrders.forEach(m => { const k = (m.makerName || '(未分類)'); (groups[k] = groups[k] || []).push(m); });
+                        const names = Object.keys(groups).sort((a,b) => a.localeCompare(b,'ja'));
+                        return names.map(nm => {
+                          const open = expandedSharedOrders === nm;
+                          return (
+                            <div key={nm} className="border border-orange-200 rounded-lg overflow-hidden">
+                              <button onClick={() => setExpandedSharedOrders(prev => prev === nm ? null : nm)} className="w-full flex items-center gap-2 px-3 py-2.5 bg-orange-100 hover:bg-orange-200 text-left">
+                                <span className="text-orange-600 text-xs w-4">{open ? '▼' : '▶'}</span>
+                                <span className="text-base shrink-0">📦</span>
+                                <span className="font-bold text-orange-900 text-sm flex-1 truncate">{nm}</span>
+                                <span className="text-xs bg-orange-300 text-orange-800 rounded-full px-2 py-0.5 font-bold shrink-0">{groups[nm].length}件</span>
+                              </button>
+                              {open && <div className="p-2.5 space-y-2 bg-orange-50/30">{groups[nm].map(m => (
+                                <div key={m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-3">
+                                  <span className="text-2xl shrink-0">📄</span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="text-sm font-bold text-slate-800 truncate">{m.fileName || '(ファイル名なし)'}</div>
+                                    <div className="text-xs text-slate-500 mt-0.5">{m.fileSize ? `${Math.round(m.fileSize/1024)}KB` : ''}{m.uploadedBy ? ` ・ ${m.uploadedBy}` : ''}</div>
+                                  </div>
+                                  <button onClick={() => openMakerFile(m)} title="開いて表示する" className="px-3.5 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">開く</button>
+                                  <button onClick={() => handleMakerDownload(m)} title="ファイルとして保存（ダウンロード）" className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold rounded-md text-xs shrink-0">保存</button>
+                                  <button onClick={() => renameOfficeCategoryItem('orders', m)} title="メーカー名・ファイル名を編集（全員に反映）" className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">名前変更</button>
+                                  <button onClick={() => deleteFromOfficeCategory('orders', m.id)} title="営業所共有から削除" className="p-2 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-5 h-5" /></button>
                                 </div>
                               ))}</div>}
                             </div>
@@ -5391,9 +5768,11 @@ function App() {
                 {(selectedFolderId !== '__office_shared__' || officeShareTab === 'quotes') && (<>
                 {selectedFolderId === '__office_shared__' && officeShareTab === 'quotes' && (
                   <div className="px-4 py-2.5 border-b border-slate-200 bg-white flex items-center gap-2 flex-wrap">
-                    <div className="inline-flex rounded-lg border-2 border-slate-200 overflow-hidden shadow-sm">
-                      <button onClick={() => setOfficeShareTab('quotes')} className={`px-3.5 py-1.5 text-sm font-bold flex items-center gap-1.5 transition ${officeShareTab === 'quotes' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-emerald-50'}`}>📝 見積もり一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'quotes' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedProposals.length}</span></button>
-                      <button onClick={() => setOfficeShareTab('makers')} className={`px-3.5 py-1.5 text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'makers' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 hover:bg-purple-50'}`}>🏭 仕切り一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'makers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedMakerData.length}</span></button>
+                    <div className="inline-flex rounded-lg border-2 border-slate-200 overflow-hidden shadow-sm flex-wrap">
+                      <button onClick={() => setOfficeShareTab('quotes')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition ${officeShareTab === 'quotes' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-emerald-50'}`}>📝 見積もり一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'quotes' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedProposals.length}</span></button>
+                      <button onClick={() => setOfficeShareTab('makers')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'makers' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 hover:bg-purple-50'}`}>🏭 仕切り一覧 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'makers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedMakerData.length}</span></button>
+                      <button onClick={() => setOfficeShareTab('flyers')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'flyers' ? 'bg-sky-600 text-white' : 'bg-white text-slate-600 hover:bg-sky-50'}`}>🖼️ チラシ・事例集 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'flyers' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedFlyers.length}</span></button>
+                      <button onClick={() => setOfficeShareTab('orders')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition border-l-2 border-slate-200 ${officeShareTab === 'orders' ? 'bg-orange-600 text-white' : 'bg-white text-slate-600 hover:bg-orange-50'}`}>📦 発注書 <span className={`text-[10px] rounded-full px-1.5 font-bold ${officeShareTab === 'orders' ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-500'}`}>{officeSharedOrders.length}</span></button>
                     </div>
                     <button onClick={() => setOfficeShareTab(null)} title="選択画面に戻る" className="ml-auto text-xs font-bold text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-2.5 py-1.5 rounded-md">⊞ 選択画面</button>
                   </div>
@@ -5474,6 +5853,45 @@ function App() {
                         className={`ml-auto px-3.5 py-1.5 rounded-md text-xs font-bold text-white ${shareCandidates.length > 0 ? 'bg-teal-600 hover:bg-teal-700' : 'bg-slate-300 cursor-not-allowed'}`}>
                         🏢 全件({shareCandidates.length})を営業所共有へ
                       </button>
+                    </div>
+                  );
+                })()}
+                {selectedFolderId !== '__office_shared__' && selectedFolderId !== '__all__' && selectedFolderId !== null && folders.some(x => x.id === selectedFolderId) && (() => {
+                  const atts = folderAttachments.filter(a => a.folderId === selectedFolderId);
+                  return (
+                    <div className="px-4 py-2.5 border-b border-slate-200 bg-indigo-50/50">
+                      <div
+                        className={`rounded-md px-2.5 py-2 border-2 border-dashed transition-colors ${folderAttachDragOver === selectedFolderId ? 'bg-indigo-100 border-indigo-500' : 'border-indigo-300'}`}
+                        onDragOver={e => { e.preventDefault(); setFolderAttachDragOver(selectedFolderId); }}
+                        onDragLeave={() => setFolderAttachDragOver(prev => prev === selectedFolderId ? null : prev)}
+                        onDrop={e => { e.preventDefault(); setFolderAttachDragOver(null); attachFilesToFolder(selectedFolderId, e.dataTransfer?.files); }}
+                      >
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-bold text-indigo-700 shrink-0">📎 他で作成した見積・価格改定案内などを添付</span>
+                          <label className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-md shadow-sm text-xs font-bold cursor-pointer whitespace-nowrap transition">
+                            ファイルを選んで添付
+                            <input type="file" accept=".pdf,.xlsx,.xls,.csv,.doc,.docx,.png,.jpg,.jpeg" multiple className="hidden" onChange={e => { attachFilesToFolder(selectedFolderId, e.target.files); e.target.value = ''; }} />
+                          </label>
+                          <span className="text-[11px] text-indigo-400">またはこの枠にドラッグ&ドロップ（1ファイル10MBまで）</span>
+                        </div>
+                      </div>
+                      {atts.length > 0 && (
+                        <div className="mt-2 space-y-1.5">
+                          {atts.map(a => (
+                            <div key={a.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-2.5">
+                              <span className="text-xl shrink-0">📎</span>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-sm font-bold text-slate-800 truncate">{a.displayName || a.fileName}</div>
+                                <div className="text-[11px] text-slate-500 mt-0.5">{a.fileName}{a.fileSize ? `・${Math.round(a.fileSize/1024)}KB` : ''}{a.uploadedBy ? `・${a.uploadedBy}` : ''}</div>
+                              </div>
+                              <button onClick={() => openMakerFile(a)} title="開いて表示する" className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-md text-xs shrink-0">開く</button>
+                              <button onClick={() => handleMakerDownload(a)} title="ダウンロード" className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold rounded-md text-xs shrink-0">保存</button>
+                              <button onClick={() => renameFolderAttachment(a.id)} title="表示名を編集" className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-md text-xs shrink-0">名前変更</button>
+                              <button onClick={() => deleteFolderAttachment(a.id)} title="削除" className="p-1.5 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-4 h-4" /></button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   );
                 })()}
@@ -5564,15 +5982,48 @@ function App() {
                       const names = Object.keys(groups).sort((a,b) => a.localeCompare(b,'ja'));
                       return <div className="space-y-2">{names.map(nm => {
                         const open = expandedSharedFacilities === nm;
+                        const quoteFiles = officeSharedQuoteFiles.filter(m => m.facilityName === nm);
+                        const isDropHi = officeQuoteFileDropTarget === nm;
                         return (
-                          <div key={nm} className="border border-emerald-200 rounded-lg overflow-hidden">
+                          <div key={nm}
+                            className={`border rounded-lg overflow-hidden transition-colors ${isDropHi ? 'border-emerald-500 ring-2 ring-emerald-300 bg-emerald-50' : 'border-emerald-200'}`}
+                            onDragOver={e => { if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) { e.preventDefault(); setOfficeQuoteFileDropTarget(nm); } }}
+                            onDragLeave={() => setOfficeQuoteFileDropTarget(prev => prev === nm ? null : prev)}
+                            onDrop={e => { e.preventDefault(); setOfficeQuoteFileDropTarget(null); if (e.dataTransfer?.files?.length > 0) registerQuoteFileToOffice(nm, e.dataTransfer.files); }}
+                          >
                             <button onClick={() => setExpandedSharedFacilities(prev => prev === nm ? null : nm)} className="w-full flex items-center gap-2 px-3 py-2.5 bg-emerald-100 hover:bg-emerald-200 text-left">
                               <span className="text-emerald-600 text-xs w-4">{open ? '▼' : '▶'}</span>
                               <span className="text-base shrink-0">🏢</span>
                               <span className="font-bold text-emerald-900 text-sm flex-1 truncate">{nm}</span>
+                              {quoteFiles.length > 0 && <span className="text-xs bg-indigo-200 text-indigo-800 rounded-full px-2 py-0.5 font-bold shrink-0">📎{quoteFiles.length}</span>}
                               <span className="text-xs bg-emerald-300 text-emerald-800 rounded-full px-2 py-0.5 font-bold shrink-0">{groups[nm].length}件</span>
                             </button>
-                            {open && <div className="p-2 space-y-2 bg-emerald-50/30">{groups[nm].map(renderCard)}</div>}
+                            {open && <div className="p-2 space-y-2 bg-emerald-50/30">
+                              <div className="rounded-md px-2.5 py-2 border-2 border-dashed border-indigo-300 bg-white">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-xs font-bold text-indigo-700 shrink-0">📎 他で作成した見積・価格改定案内などを添付</span>
+                                  <label className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-md shadow-sm text-xs font-bold cursor-pointer whitespace-nowrap transition">
+                                    ファイルを選んで添付
+                                    <input type="file" accept=".pdf,.xlsx,.xls,.csv,.doc,.docx,.png,.jpg,.jpeg" multiple className="hidden" onChange={e => { registerQuoteFileToOffice(nm, e.target.files); e.target.value = ''; }} />
+                                  </label>
+                                  <span className="text-[11px] text-indigo-400">またはこの行の枠にドラッグ&ドロップ（1ファイル9MBまで）</span>
+                                </div>
+                              </div>
+                              {quoteFiles.map(m => (
+                                <div key={m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-2.5">
+                                  <span className="text-xl shrink-0">📎</span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="text-sm font-bold text-slate-800 truncate">{m.displayName || m.fileName}</div>
+                                    <div className="text-[11px] text-slate-500 mt-0.5">{m.fileName}{m.fileSize ? `・${Math.round(m.fileSize/1024)}KB` : ''}{m.uploadedBy ? `・${m.uploadedBy}` : ''}</div>
+                                  </div>
+                                  <button onClick={() => openMakerFile(m)} title="開いて表示する" className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-md text-xs shrink-0">開く</button>
+                                  <button onClick={() => handleMakerDownload(m)} title="ダウンロード" className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold rounded-md text-xs shrink-0">保存</button>
+                                  <button onClick={() => renameOfficeQuoteFile(m)} title="表示名を編集（全員に反映）" className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-md text-xs shrink-0">名前変更</button>
+                                  <button onClick={() => deleteOfficeQuoteFile(m.id)} title="営業所共有から削除" className="p-1.5 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-4 h-4" /></button>
+                                </div>
+                              ))}
+                              {groups[nm].map(renderCard)}
+                            </div>}
                           </div>
                         );
                       })}</div>;
