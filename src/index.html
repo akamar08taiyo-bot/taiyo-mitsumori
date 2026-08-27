@@ -5987,7 +5987,7 @@ function App() {
                         return (
                           <div key={nm}
                             className={`border rounded-lg overflow-hidden transition-colors ${isDropHi ? 'border-emerald-500 ring-2 ring-emerald-300 bg-emerald-50' : 'border-emerald-200'}`}
-                            onDragOver={e => { if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) { e.preventDefault(); setOfficeQuoteFileDropTarget(nm); } }}
+                            onDragOver={e => { e.preventDefault(); setOfficeQuoteFileDropTarget(nm); }}
                             onDragLeave={() => setOfficeQuoteFileDropTarget(prev => prev === nm ? null : prev)}
                             onDrop={e => { e.preventDefault(); setOfficeQuoteFileDropTarget(null); if (e.dataTransfer?.files?.length > 0) registerQuoteFileToOffice(nm, e.dataTransfer.files); }}
                           >
