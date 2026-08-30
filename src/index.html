@@ -878,8 +878,11 @@ function App() {
     const src = folders.find(f => f.id === srcId), tgt = folders.find(f => f.id === tgtId);
     if (!src || !tgt) return;
     const cnt = savedProposals.filter(p => p.folderId === srcId).length;
-    if (!confirm(`施設「${src.name}」の見積 ${cnt}件 を「${tgt.name}」へまとめて移動します。\n（「${src.name}」フォルダは削除されますが、見積データは削除されません）\n\nよろしいですか？`)) return;
+    const attCnt = folderAttachments.filter(a => a.folderId === srcId).length;
+    if (!confirm(`施設「${src.name}」の見積 ${cnt}件${attCnt > 0 ? `・添付ファイル ${attCnt}件` : ''} を「${tgt.name}」へまとめて移動します。\n（「${src.name}」フォルダは削除されますが、見積データは削除されません）\n\nよろしいですか？`)) return;
     setSavedProposals(prev => prev.map(p => p.folderId === srcId ? { ...p, folderId: tgtId } : p));
+    // 添付ファイルも一緒に移す（置き去りにすると画面から見えなくなるため）
+    setFolderAttachments(prev => prev.map(a => a.folderId === srcId ? { ...a, folderId: tgtId } : a));
     setFolders(prev => prev.filter(f => f.id !== srcId));
     if (selectedFolderId === srcId) setSelectedFolderId(tgtId);
     notify(`「${src.name}」を「${tgt.name}」へ統合しました`, 'success');
@@ -1920,7 +1923,7 @@ function App() {
 
   // === 手動バックアップ: JSON ファイルとして書き出し ===
   const downloadFullBackup = () => {
-    const data = { savedProposals, folders, makerDataList, officeInfo, attachments: [], _exportedAt: new Date().toISOString(), _exportedBy: `${loginInfo?.officeCode||''}/${loginInfo?.userName||''}` };
+    const data = { savedProposals, folders, makerDataList, folderAttachments, officeInfo, attachments: [], _exportedAt: new Date().toISOString(), _exportedBy: `${loginInfo?.officeCode||''}/${loginInfo?.userName||''}` };
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1928,14 +1931,14 @@ function App() {
     a.href = url; a.download = `taiyo_全データバックアップ_${new Date().toISOString().slice(0,10)}.json`;
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-    notify(`バックアップ保存: フォルダ${folders.length}/見積${savedProposals.length}/メーカー${makerDataList.length}件`);
+    notify(`バックアップ保存: フォルダ${folders.length}/見積${savedProposals.length}/メーカー${makerDataList.length}/添付${folderAttachments.length}件`);
   };
   const importFullBackup = async (e) => {
     const file = e.target.files?.[0]; if (!file) return;
     try {
       const text = await file.text();
       const data = JSON.parse(text);
-      if (!confirm(`このバックアップを取込みますか？\n・フォルダ: ${(data.folders||[]).length}件\n・見積: ${(data.savedProposals||[]).length}件\n・メーカー: ${(data.makerDataList||[]).length}件\n\n既存データに「追加」されます（既存データは保護されます）`)) { e.target.value = ''; return; }
+      if (!confirm(`このバックアップを取込みますか？\n・フォルダ: ${(data.folders||[]).length}件\n・見積: ${(data.savedProposals||[]).length}件\n・メーカー: ${(data.makerDataList||[]).length}件\n・添付ファイル: ${(data.folderAttachments||[]).length}件\n\n既存データに「追加」されます（既存データは保護されます）`)) { e.target.value = ''; return; }
       // マージ（既存ID重複は別IDで追加）
       if (Array.isArray(data.folders)) {
         setFolders(prev => {
@@ -1955,6 +1958,13 @@ function App() {
         setMakerDataList(prev => {
           const existing = new Set(prev.map(m => m.id));
           const newOnes = data.makerDataList.filter(m => !existing.has(m.id));
+          return [...prev, ...newOnes];
+        });
+      }
+      if (Array.isArray(data.folderAttachments)) {
+        setFolderAttachments(prev => {
+          const existing = new Set(prev.map(a => a.id));
+          const newOnes = data.folderAttachments.filter(a => !existing.has(a.id));
           return [...prev, ...newOnes];
         });
       }
@@ -2299,8 +2309,12 @@ function App() {
     const f = folders.find(x => x.id === id);
     if (!f) return;
     const count = savedProposals.filter(p => p.folderId === id).length;
-    if (!confirm(`施設フォルダ「${f.name}」を削除しますか？\n中の見積（${count}件）はフォルダなしへ移動します。`)) return;
+    const attCount = folderAttachments.filter(a => a.folderId === id).length;
+    if (!confirm(`施設フォルダ「${f.name}」を削除しますか？\n中の見積（${count}件）はフォルダなしへ移動します。${attCount > 0 ? `\n添付ファイル${attCount}件も一緒に削除されます。` : ''}`)) return;
     setSavedProposals(prev => prev.map(p => p.folderId === id ? { ...p, folderId: null } : p));
+    // 添付ファイルは行き先がない（フォルダなしには添付欄がない）ため一緒に削除する。
+    // 残すと画面に出ないまま容量だけ消費する「見えないゴミ」になるため。
+    setFolderAttachments(prev => prev.filter(a => a.folderId !== id));
     setFolders(prev => prev.filter(x => x.id !== id));
     if (selectedFolderId === id) setSelectedFolderId(null);
   };
@@ -5912,7 +5926,9 @@ function App() {
                     // 旧設定値(newest/oldest)が残っていても日付順で動作させる
                     else if (proposalSortOrder === 'oldest') filtered = [...filtered].sort((a,b) => _ct(a) - _ct(b));
                     else filtered = [...filtered].sort((a,b) => _ct(b) - _ct(a));
-                    if (filtered.length === 0) {
+                    // 営業所共有では、見積が0件でも添付ファイルだけある施設を表示する必要がある
+                    const hasSharedAttOnly = selectedFolderId === '__office_shared__' && officeSharedQuoteFiles.length > 0;
+                    if (filtered.length === 0 && !hasSharedAttOnly) {
                       return <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />{q || proposalFilterYear || proposalFilterMonth ? '条件に一致する見積はありません' : 'このフォルダには見積がありません'}</div>;
                     }
                     const renderCard = (p) => (
@@ -5979,6 +5995,10 @@ function App() {
                       const facName = (p) => { const f = officeSharedFolders.find(x => x && x.id === p.folderId); return (f && f.name) || p.clientName || '(施設未設定)'; };
                       const groups = {};
                       filtered.forEach(p => { const k = facName(p); (groups[k] = groups[k] || []).push(p); });
+                      // 見積が1件もない施設でも、添付ファイルがあれば施設行を出す。
+                      // これをしないと添付したファイルがどこにも表示されず消えたように見える。
+                      const attNames = new Set(officeSharedQuoteFiles.map(m => m && m.facilityName).filter(Boolean));
+                      attNames.forEach(nm => { if (!groups[nm]) groups[nm] = []; });
                       const names = Object.keys(groups).sort((a,b) => a.localeCompare(b,'ja'));
                       return <div className="space-y-2">{names.map(nm => {
                         const open = expandedSharedFacilities === nm;
