@@ -647,7 +647,7 @@ function LoginScreen({ onLogin }) {
           <button type="submit" disabled={!canSubmit} className={`w-full font-bold py-2.5 rounded-md transition text-sm ${canSubmit ? 'bg-amber-500 hover:bg-amber-600 text-white shadow' : 'bg-stone-200 text-stone-400 cursor-not-allowed'}`}>{mode === 'register' ? '登録してはじめる' : 'ログイン'}</button>
         </form>
         <div className="bg-stone-50 border-t border-stone-200 px-5 py-2.5 text-center text-[10px] text-stone-500">
-          {mode === 'login' ? <><strong className="text-amber-700">同じ営業所+名前+パスワードならどの端末からでも同じ見積データに接続できます</strong>（自宅PC・スマホ含む）。はじめての方は「新規登録」タブから。</> : '※ パスワードは暗号化してこの端末に保存されます'}
+          {mode === 'login' ? <><strong className="text-amber-700">同じ営業所+名前+パスワードならどの端末からでも同じ見積データに接続できます</strong>（自宅PC・スマホ含む）。はじめての方は「新規登録」タブから。</> : '※ パスワード原文は保存せず、照合用の値に変換してこの端末に保存します'}
         </div>
       </div>
     </div>
@@ -692,7 +692,9 @@ function App() {
             const parts = [clientName, clientName2].filter(s => s && s.trim()).join(' ');
             setSaveName(`${parts}_${proposalDate || new Date().toISOString().slice(0,10)}`);
           }
-          setSaveFolderId('__office_shared__'); setLoadTab('save'); setShowLoadModal(true);
+          // 保存先を明示的に選ばない限りローカル保存にする。
+          // 初回ガイドの「このまま保存＝フォルダなし」と実際の選択状態を一致させる。
+          setSaveFolderId(null); setLoadTab('save'); setShowLoadModal(true);
         }
         return;
       }
@@ -1154,6 +1156,13 @@ function App() {
   const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'connecting' | 'synced' | 'error' | 'disabled'
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
   const [syncError, setSyncError] = useState(firebaseInitError ? `Firebase初期化エラー: ${firebaseInitError}` : null);
+  // 個人データ同期とは別に、営業所共有・プレゼンス等の権限エラーを明示する。
+  // これらが失敗しているのにヘッダーが「同期OK」とだけ表示される誤認を防ぐ。
+  const [sharedSyncError, setSharedSyncError] = useState(null);
+  const reportSharedSyncError = (feature, err) => {
+    const code = err?.code || err?.message || String(err || 'unknown');
+    setSharedSyncError(`${feature}: ${code}`);
+  };
   const [reconnectTick, setReconnectTick] = useState(0);
   // Firebase init 状態変化を購読（自動再試行で接続成功した瞬間に再描画）
   const [firebaseReadyTick, setFirebaseReadyTick] = useState(0);
@@ -1171,6 +1180,10 @@ function App() {
   // クラウド同期 ON/OFF（既定ON、永続化）
   const [cloudSyncEnabled, setCloudSyncEnabled] = useState(() => {
     const v = localStorage.getItem('taiyo_cloudSync');
+    // ローカル開発・E2Eでは、検証用データを本番Firebaseへ送らない。
+    // 公開URLでは従来どおり初期ON。ローカルでは過去の保存値も無視して必ずOFFにする。
+    const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    if (isLocalDev) return false;
     return v === null ? true : v === '1';
   });
   useEffect(() => { try { localStorage.setItem('taiyo_cloudSync', cloudSyncEnabled ? '1' : '0'); } catch {} }, [cloudSyncEnabled]);
@@ -1254,6 +1267,7 @@ function App() {
   // 接続：ログイン後 or ログアウト時 or 再接続要求で同期接続を貼り直す
   useEffect(() => {
     remoteLoadedRef.current = false; // 接続のたびにリセット
+    setSharedSyncError(null);
     if (!loginInfo) {
       if (syncRefHandle.current) { try { dbOff(syncRefHandle.current); } catch {} syncRefHandle.current = null; }
       setSyncStatus('idle'); setSyncError(null);
@@ -1358,7 +1372,7 @@ function App() {
       if (typeof unsubVal === 'function') unsubVal();
       else { try { dbOff(r); } catch {} }
     };
-  }, [loginInfo, reconnectTick]);
+  }, [loginInfo, reconnectTick, cloudSyncEnabled, firebaseReadyTick]);
 
   // === 受信トレイ（インボックス）購読：相手から直接共有されたデータを受信 ===
   // インボックスキーは officeCode + name のみから導出（パスワード不要）→ 送信者が知れる
@@ -1390,7 +1404,7 @@ function App() {
         }
       }
       setInbox(fresh);
-    }, (err) => { console.warn('inbox sub error', err); });
+    }, (err) => { reportSharedSyncError('受信トレイ', err); });
     return () => { if (typeof unsub === 'function') unsub(); };
   }, [loginInfo]);
 
@@ -1435,7 +1449,7 @@ function App() {
         .map(([k, u]) => ({ key: k, name: u.name, officeCode: u.officeCode, lastSeen: u.lastSeen }))
         .sort((a, b) => (a.name||'').localeCompare(b.name||'', 'ja'));
       setOnlineColleagues(list);
-    }, e => console.warn('presence sub', e));
+    }, e => { setOnlineColleagues([]); reportSharedSyncError('オンライン表示', e); });
     return () => { try { if (typeof unsub === 'function') unsub(); else dbOff(r); } catch {} };
   }, [loginInfo?.officeCode, loginInfo?.userName, cloudSyncEnabled]);
 
@@ -1457,7 +1471,7 @@ function App() {
       setOfficeSharedFolders(Array.isArray(v.folders) ? v.folders : []);
       setOfficeSharedProposals(Array.isArray(v.savedProposals) ? v.savedProposals : []);
       officeSharedLoadedRef.current = true;
-    }, e => console.warn('office-shared sub', e));
+    }, e => { officeSharedLoadedRef.current = true; reportSharedSyncError('営業所共有', e); });
     return () => { try { if (typeof unsub === 'function') unsub(); else dbOff(r); } catch {} };
   }, [loginInfo?.officeCode, cloudSyncEnabled]);
 
@@ -1734,7 +1748,7 @@ function App() {
       if (Array.isArray(v)) list = v.filter(Boolean);
       else if (v && typeof v === 'object') list = Object.values(v).filter(Boolean);
       setOfficeSharedMakerData(list);
-    }, e => console.warn('shared-makers sub', e));
+    }, e => reportSharedSyncError('メーカー仕切り共有', e));
     return () => { try { dbOff(r); } catch {} };
   }, [loginInfo?.officeCode, cloudSyncEnabled]);
   // チラシ・事例集共有の購読（営業所共有のみ・個人分なし）
@@ -1747,7 +1761,7 @@ function App() {
       if (Array.isArray(v)) list = v.filter(Boolean);
       else if (v && typeof v === 'object') list = Object.values(v).filter(Boolean);
       setOfficeSharedFlyers(list);
-    }, e => console.warn('shared-flyers sub', e));
+    }, e => reportSharedSyncError('チラシ・事例集共有', e));
     return () => { try { dbOff(r); } catch {} };
   }, [loginInfo?.officeCode, cloudSyncEnabled]);
   // 発注書共有の購読（営業所共有のみ・個人分なし）
@@ -1760,7 +1774,7 @@ function App() {
       if (Array.isArray(v)) list = v.filter(Boolean);
       else if (v && typeof v === 'object') list = Object.values(v).filter(Boolean);
       setOfficeSharedOrders(list);
-    }, e => console.warn('shared-orders sub', e));
+    }, e => reportSharedSyncError('発注書共有', e));
     return () => { try { dbOff(r); } catch {} };
   }, [loginInfo?.officeCode, cloudSyncEnabled]);
   // チラシ・事例集共有／発注書共有 共通の書込処理（仕切り共有と同じ方式。個人分は持たず営業所共有のみ）
@@ -1828,7 +1842,7 @@ function App() {
     const unsub = onValue(r, snap => {
       const v = snap.val();
       setOfficeSharedQuoteFiles(v && typeof v === 'object' ? Object.values(v).filter(Boolean) : []);
-    }, e => console.warn('shared-quote-files sub', e));
+    }, e => reportSharedSyncError('見積ファイル共有', e));
     return () => { try { dbOff(r); } catch {} };
   }, [loginInfo?.officeCode, cloudSyncEnabled]);
   const registerQuoteFileToOffice = async (facilityName, files) => {
@@ -2320,6 +2334,8 @@ function App() {
       if (draft.clientName2 !== undefined) setClientName2(draft.clientName2);
       if (draft.clientHonorific !== undefined) setClientHonorific(draft.clientHonorific);
       if (draft.proposalTitle !== undefined) setProposalTitle(draft.proposalTitle);
+      if (draft.proposalDate !== undefined) setProposalDate(draft.proposalDate);
+      if (draft.proposalDateText !== undefined) setProposalDateText(draft.proposalDateText);
       if (draft.proposalNumber !== undefined) setProposalNumber(draft.proposalNumber);
       if (draft.validityPeriod !== undefined) setValidityPeriod(draft.validityPeriod);
       if (draft.paymentTerms !== undefined) setPaymentTerms(draft.paymentTerms);
@@ -2340,6 +2356,16 @@ function App() {
         ? (Array.isArray(draft.quoteGroups) ? draft.quoteGroups : draft.groups)
         : (Array.isArray(draft.proposalGroups) ? draft.proposalGroups : draft.groups);
       if (Array.isArray(activeGroups)) setGroups(activeGroups);
+      // ローカル保存済みの見積だけ編集対象IDを復元する。
+      // 共有見積は権限・購読状態が確定する前に上書き対象へ戻さない。
+      if (draft.currentProposalId) {
+        const saved = savedProposals.find(p => p && p.id === draft.currentProposalId);
+        if (saved) {
+          setCurrentProposalId(saved.id);
+          setEditingSharedQuote(false);
+          savedSnapshotRef.current = quoteSnapshot(saved);
+        }
+      }
       // prevAppModeRefを同期して、初回mountでmode切替useEffectが暴発しないようにする
       prevAppModeRef.current = activeMode;
     }
@@ -2356,7 +2382,7 @@ function App() {
       const _proposalGroups = appMode === 'proposal' ? groups : (proposalGroupsRef.current || null);
       const _quoteNewItems = appMode === 'quote' ? newItems : (quoteNewItemsRef.current || null);
       const _proposalNewItems = appMode === 'proposal' ? newItems : (proposalNewItemsRef.current || null);
-      const d = { clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, quoteGroups: _quoteGroups, proposalGroups: _proposalGroups, quoteNewItems: _quoteNewItems, proposalNewItems: _proposalNewItems };
+      const d = { clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, quoteGroups: _quoteGroups, proposalGroups: _proposalGroups, quoteNewItems: _quoteNewItems, proposalNewItems: _proposalNewItems, currentProposalId: editingSharedQuote ? null : currentProposalId };
       try {
         const s = JSON.stringify(d);
         if (s === lastDraftStringRef.current) return;
@@ -2365,7 +2391,7 @@ function App() {
       } catch {}
     }, 500);
     return () => { if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current); };
-  }, [clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, newItems]);
+  }, [clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, newItems, currentProposalId, editingSharedQuote]);
 
   const notifyTimerRef = useRef(null);
   // type: 'info' (デフォルト) | 'success' | 'error'
@@ -4464,8 +4490,8 @@ function App() {
               <div>
                 <h1 className="font-bold text-lg leading-tight">見積書・提案書作成システム</h1>
                 <span className="text-xs text-slate-300">{loginInfo.office}　/　担当: <strong className="text-amber-200">{loginInfo.userName}</strong>
-                  <button onClick={() => setShowSyncPopover(!showSyncPopover)} className={`ml-2 px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${syncStatus === 'synced' ? 'bg-green-600 text-white hover:bg-green-700' : syncStatus === 'connecting' ? 'bg-amber-500 text-white animate-pulse' : syncStatus === 'error' ? 'bg-rose-600 text-white hover:bg-rose-700' : syncStatus === 'disabled' ? 'bg-slate-500 text-white hover:bg-slate-600' : 'bg-slate-600 text-slate-300 hover:bg-slate-700'}`} title="クリックで同期の詳細を表示">
-                    {syncStatus === 'synced' ? '☁ 同期OK' : syncStatus === 'connecting' ? '⏳ 接続中' : syncStatus === 'error' ? '⚠ 同期エラー' : syncStatus === 'disabled' ? '○ ローカルのみ' : '○ 未接続'}
+                  <button onClick={() => setShowSyncPopover(!showSyncPopover)} className={`ml-2 px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${sharedSyncError && syncStatus === 'synced' ? 'bg-amber-600 text-white hover:bg-amber-700' : syncStatus === 'synced' ? 'bg-green-600 text-white hover:bg-green-700' : syncStatus === 'connecting' ? 'bg-amber-500 text-white animate-pulse' : syncStatus === 'error' ? 'bg-rose-600 text-white hover:bg-rose-700' : syncStatus === 'disabled' ? 'bg-slate-500 text-white hover:bg-slate-600' : 'bg-slate-600 text-slate-300 hover:bg-slate-700'}`} title="クリックで同期の詳細を表示">
+                    {sharedSyncError && syncStatus === 'synced' ? '⚠ 一部共有エラー' : syncStatus === 'synced' ? '☁ 同期OK' : syncStatus === 'connecting' ? '⏳ 接続中' : syncStatus === 'error' ? '⚠ 同期エラー' : syncStatus === 'disabled' ? '○ ローカルのみ' : '○ 未接続'}
                   </button>
                 </span>
               </div>
@@ -4499,7 +4525,7 @@ function App() {
                   const parts = [clientName, clientName2].filter(s => s && s.trim()).join(' ');
                   setSaveName(`${parts}_${proposalDate || new Date().toISOString().slice(0,10)}`);
                 }
-                setSaveFolderId('__office_shared__'); setLoadTab('save'); setShowLoadModal(true);
+                setSaveFolderId(null); setLoadTab('save'); setShowLoadModal(true);
               }} title={currentProposalId ? '名前を付けて保存：別名で複製保存（既存はそのまま残ります）' : '名前を付けて保存：フォルダと名前を指定して保存'} className="flex items-center gap-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-md shadow-sm text-[13px] font-bold transition"><Save className="w-4 h-4" /> 名前を付けて保存</button>
               {currentProposalId && (
                 <button onClick={handleOverwriteSave} title={editingSharedQuote ? '上書き保存：営業所共有の元データを更新（全員に反映）' : '上書き保存：開いている見積を上書き'} className="flex items-center gap-1 px-3 py-2 rounded-md shadow-sm text-[13px] font-bold transition bg-blue-800 hover:bg-blue-900 text-white"><CheckCircle2 className="w-4 h-4" /> 上書き保存{editingSharedQuote && <span className="ml-1 bg-white text-blue-800 rounded px-1.5 py-0.5 text-[10px] font-extrabold">共有</span>}</button>
@@ -5237,8 +5263,9 @@ function App() {
             </div>
             {syncStatus === 'synced' && (
               <div className="text-sm space-y-1.5">
-                <p className="text-green-700 font-bold">✓ 同期は正常に動作しています。</p>
+                <p className="text-green-700 font-bold">✓ 個人の見積・フォルダ同期は正常に動作しています。</p>
                 <p className="text-slate-600 text-xs">同じ <strong>営業所コード＋名前＋パスワード</strong> でログインした<strong>あなたの他のPC・スマホ</strong>に、見積・フォルダの変更が数秒で自動反映されます。</p>
+                {sharedSyncError && <div className="text-amber-800 text-[11px] bg-amber-50 p-2 rounded border border-amber-300"><strong>⚠ 営業所共有の一部を利用できません：</strong>{sharedSyncError}<br/>Firebaseのデータベースルールを管理者が確認してください。ローカル保存と個人同期は継続します。</div>}
                 {lastSyncedAt && <p className="text-slate-500 text-[11px] mt-2">最終同期: {new Date(lastSyncedAt).toLocaleString('ja-JP')}</p>}
               </div>
             )}
