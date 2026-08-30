@@ -1024,11 +1024,24 @@ function App() {
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
-  // 営業所共有で一覧を開いたまま一定時間(3分)経過したら、自動的に選択画面へ戻す（タブ切替でリセット）
+  // 営業所共有で一覧を開いたまま「何も操作しないまま」10分経過したら選択画面へ戻す。
+  // 以前は開いてから3分で無条件に戻していたため、閲覧中や複数ファイルの登録中に
+  // 画面が勝手に戻ってしまっていた。クリック・キー操作・スクロールのたびに時間を数え直す。
+  const officeShareIdleTimerRef = useRef(null);
   useEffect(() => {
     if (selectedFolderId !== '__office_shared__' || officeShareTab === null) return;
-    const t = setTimeout(() => setOfficeShareTab(null), 3 * 60 * 1000);
-    return () => clearTimeout(t);
+    const IDLE_MS = 10 * 60 * 1000;
+    const reset = () => {
+      if (officeShareIdleTimerRef.current) clearTimeout(officeShareIdleTimerRef.current);
+      officeShareIdleTimerRef.current = setTimeout(() => setOfficeShareTab(null), IDLE_MS);
+    };
+    const events = ['mousedown', 'keydown', 'wheel', 'touchstart'];
+    events.forEach(ev => window.addEventListener(ev, reset, { passive: true }));
+    reset();
+    return () => {
+      events.forEach(ev => window.removeEventListener(ev, reset));
+      if (officeShareIdleTimerRef.current) clearTimeout(officeShareIdleTimerRef.current);
+    };
   }, [officeShareTab, selectedFolderId]);
   const [saveFolderId, setSaveFolderId] = useState(null);
   const [newFolderInputName, setNewFolderInputName] = useState('');
@@ -5822,6 +5835,15 @@ function App() {
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm font-bold text-slate-700">📝 {selectedFolderId === '__all__' ? 'すべての見積' : selectedFolderId === '__office_shared__' ? `🏢 営業所「${loginInfo?.officeCode||''}」共有見積` : selectedFolderId === null ? 'フォルダなしの見積' : `「${folders.find(f => f.id === selectedFolderId)?.name||''}」の見積`}</span>
                     <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-bold">{(() => { const _q = normalizeSearch(proposalSearchQuery); return proposalsInFolder.filter(p => !_q || normalizeSearch(p.name).includes(_q) || normalizeSearch(p.clientName).includes(_q) || normalizeSearch(p.clientName2).includes(_q)).length; })()}件</span>
+                    {(() => {
+                      // 添付ファイルの件数は見積と別に出す（合算すると「見積が何件あるか」が読めなくなるため）
+                      const _q = normalizeSearch(proposalSearchQuery);
+                      const _hit = (a) => !_q || normalizeSearch(a.displayName || '').includes(_q) || normalizeSearch(a.fileName || '').includes(_q);
+                      const _n = selectedFolderId === '__office_shared__'
+                        ? officeSharedQuoteFiles.filter(a => a && (_hit(a) || (_q && normalizeSearch(a.facilityName || '').includes(_q)))).length
+                        : folderAttachments.filter(a => a.folderId === selectedFolderId && _hit(a)).length;
+                      return _n > 0 ? <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold ml-1">📎{_n}</span> : null;
+                    })()}
                   </div>
                   <div className="relative">
                     <input value={proposalSearchQuery} onChange={e => setProposalSearchQuery(e.target.value)} placeholder="🔍 名前・宛先で絞り込み (例: A病院 / 2026年4月)" className="w-full pl-3 pr-8 py-2 text-sm border border-slate-300 rounded-md outline-none focus:border-blue-500" />
@@ -5898,7 +5920,10 @@ function App() {
                   );
                 })()}
                 {selectedFolderId !== '__office_shared__' && selectedFolderId !== '__all__' && selectedFolderId !== null && folders.some(x => x.id === selectedFolderId) && (() => {
-                  const atts = folderAttachments.filter(a => a.folderId === selectedFolderId);
+                  // 上部の絞り込みは添付ファイル名（表示名・元のファイル名）にも効かせる
+                  const _aq = normalizeSearch(proposalSearchQuery);
+                  const atts = folderAttachments.filter(a => a.folderId === selectedFolderId
+                    && (!_aq || normalizeSearch(a.displayName || '').includes(_aq) || normalizeSearch(a.fileName || '').includes(_aq)));
                   return (
                     <div className="px-4 py-2.5 border-b border-slate-200 bg-indigo-50/50">
                       <div
@@ -5954,7 +5979,11 @@ function App() {
                     else if (proposalSortOrder === 'oldest') filtered = [...filtered].sort((a,b) => _ct(a) - _ct(b));
                     else filtered = [...filtered].sort((a,b) => _ct(b) - _ct(a));
                     // 営業所共有では、見積が0件でも添付ファイルだけある施設を表示する必要がある
-                    const hasSharedAttOnly = selectedFolderId === '__office_shared__' && officeSharedQuoteFiles.length > 0;
+                    // 見積が0件でも、絞り込みに一致する添付ファイルがあれば一覧を出す
+                    const hasSharedAttOnly = selectedFolderId === '__office_shared__' && officeSharedQuoteFiles.some(m => m && m.facilityName && (!q
+                      || normalizeSearch(m.facilityName).includes(q)
+                      || normalizeSearch(m.displayName || '').includes(q)
+                      || normalizeSearch(m.fileName || '').includes(q)));
                     if (filtered.length === 0 && !hasSharedAttOnly) {
                       return <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />{q || proposalFilterYear || proposalFilterMonth ? '条件に一致する見積はありません' : 'このフォルダには見積がありません'}</div>;
                     }
@@ -6024,12 +6053,22 @@ function App() {
                       filtered.forEach(p => { const k = facName(p); (groups[k] = groups[k] || []).push(p); });
                       // 見積が1件もない施設でも、添付ファイルがあれば施設行を出す。
                       // これをしないと添付したファイルがどこにも表示されず消えたように見える。
-                      const attNames = new Set(officeSharedQuoteFiles.map(m => m && m.facilityName).filter(Boolean));
+                      // 絞り込み中は、施設名か添付ファイル名が一致したものだけ行を足す
+                      const attNames = new Set(officeSharedQuoteFiles
+                        .filter(m => m && m.facilityName && (!q
+                          || normalizeSearch(m.facilityName).includes(q)
+                          || normalizeSearch(m.displayName || '').includes(q)
+                          || normalizeSearch(m.fileName || '').includes(q)))
+                        .map(m => m.facilityName));
                       attNames.forEach(nm => { if (!groups[nm]) groups[nm] = []; });
                       const names = Object.keys(groups).sort((a,b) => a.localeCompare(b,'ja'));
                       return <div className="space-y-2">{names.map(nm => {
                         const open = expandedSharedFacilities === nm;
-                        const quoteFiles = officeSharedQuoteFiles.filter(m => m.facilityName === nm);
+                        // 添付ファイルも上部の絞り込み対象にする（表示名・元のファイル名）。
+                        // ただし施設名そのものが検索に一致している場合は、その施設の添付は全部見せる。
+                        const _facHit = !q || normalizeSearch(nm).includes(q);
+                        const quoteFiles = officeSharedQuoteFiles.filter(m => m.facilityName === nm
+                          && (!q || _facHit || normalizeSearch(m.displayName || '').includes(q) || normalizeSearch(m.fileName || '').includes(q)));
                         const isDropHi = officeQuoteFileDropTarget === nm;
                         return (
                           <div key={nm}
