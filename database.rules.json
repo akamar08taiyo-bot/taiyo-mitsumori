@@ -1,0 +1,56 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "users": {
+      "$syncKey": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "inbox": {
+      "$inboxKey": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "presence": {
+      "$officeCode": {
+        ".read": "auth != null",
+        "$userKey": {
+          ".write": "auth != null"
+        }
+      }
+    },
+    "office-shared": {
+      "$officeCode": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "office-shared-makers": {
+      "$officeCode": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "office-shared-flyers": {
+      "$officeCode": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "office-shared-orders": {
+      "$officeCode": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "office-shared-quote-files": {
+      "$officeCode": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    }
+  }
+}
