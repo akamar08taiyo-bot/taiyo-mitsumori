@@ -128,6 +128,7 @@ import { createRoot } from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import { getDatabase, ref as dbRef, onValue, set as dbSet, get as dbGet, off as dbOff, onDisconnect, update as dbUpdate } from 'firebase/database';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import {
   Trash2, TrendingDown, Plus, Calculator, FileText, BarChart3,
   X as MultiplyIcon, PackagePlus, Percent, LayoutTemplate, ArrowUpDown,
@@ -157,6 +158,7 @@ const firebaseConfig = {
 let firebaseDB = null;
 let firebaseApp = null;
 let firebaseAuth = null;
+let firebaseStorage = null;
 let firebaseInitError = null;
 let firebaseInitAttempts = 0;
 // 接続成功/失敗を通知するイベント（再試行時に React 側で再描画させる）
@@ -169,6 +171,8 @@ const tryInitFirebase = () => {
     // databaseURL を明示渡し → "Service database is not available" エラー対策
     // ESMでdatabaseモジュールが登録される前にgetDatabaseが呼ばれる問題を回避
     firebaseDB = getDatabase(firebaseApp, firebaseConfig.databaseURL);
+    // 営業所共有の大容量ファイル（見積・仕切り・チラシ等）を保存する Cloud Storage
+    firebaseStorage = getStorage(firebaseApp);
     // 匿名認証でトークンを取得（セキュリティルール auth != null を満たすため）。
     // 失敗してもDB初期化自体は継続（ルールが緩い間は未認証でも動作する）。
     try {
@@ -182,6 +186,7 @@ const tryInitFirebase = () => {
   } catch (e) {
     firebaseInitError = (e && (e.code || e.message)) || String(e);
     firebaseDB = null;
+    firebaseStorage = null;
     console.warn('[Firebase] 初期化失敗 (attempt ' + firebaseInitAttempts + '):', firebaseInitError);
     notifyFirebaseInitChange();
     return false;
@@ -1530,8 +1535,34 @@ function App() {
     for (let i = 0; i < len; i++) buf[i] = bin.charCodeAt(i);
     return URL.createObjectURL(new Blob([buf], { type: mime }));
   };
+  // data: URL を Blob に変換（Storage への再アップロード用。dataUrlToBlobUrl と違いURLではなくBlob自体を返す）
+  const dataUrlToBlob = (dataUrl) => {
+    const [head, b64] = String(dataUrl).split(',');
+    const mime = (head.match(/data:([^;]+)/) || [, 'application/octet-stream'])[1];
+    const bin = atob(b64);
+    const len = bin.length;
+    const buf = new Uint8Array(len);
+    for (let i = 0; i < len; i++) buf[i] = bin.charCodeAt(i);
+    return new Blob([buf], { type: mime });
+  };
+  // 営業所共有の添付ファイルを Cloud Storage にアップロードし、ダウンロードURLを返す。
+  // Realtime Database に base64 を直接書き込む方式は書込サイズに厳しい制限（実運用で9MB）が
+  // あったため、大容量ファイル（見積・仕切り・チラシ・発注書の共有添付）は Storage 経由に変更。
+  const uploadFileToOfficeStorage = async (subPath, fileOrBlob, contentType) => {
+    const r = storageRef(firebaseStorage, `office-shared-files/${subPath}`);
+    await uploadBytes(r, fileOrBlob, { contentType: contentType || fileOrBlob.type || 'application/octet-stream' });
+    const url = await getDownloadURL(r);
+    return { url, storagePath: r.fullPath };
+  };
+  // 共有レコード削除時、Storageに実体があれば合わせて削除（失敗してもDB側の削除は続行）
+  const deleteOfficeStorageFile = async (rec) => {
+    if (!rec || !rec.storagePath || !firebaseStorage) return;
+    try { await deleteObject(storageRef(firebaseStorage, rec.storagePath)); } catch (e) { console.warn('[Storage] 削除失敗', e); }
+  };
   const handleMakerDownload = (m) => {
-    if (!m || !m.data) { notify('ファイルデータが見つかりません', 'error'); return; }
+    if (!m) { notify('ファイルデータが見つかりません', 'error'); return; }
+    if (m.url) { window.open(m.url, '_blank'); return; }
+    if (!m.data) { notify('ファイルデータが見つかりません', 'error'); return; }
     // 巨大な data URL を href に直接指定すると失敗することがあるため Blob 経由
     let url = null, isBlob = false;
     try { url = dataUrlToBlobUrl(m.data); isBlob = true; } catch { url = m.data; }
@@ -1542,7 +1573,7 @@ function App() {
   };
   // 仕切りファイルを開いて表示（PDF/画像は新規タブ、Excel等はダウンロード）
   const openMakerFile = (m) => {
-    if (!m || !m.data) { notify('ファイルデータが見つかりません', 'error'); return; }
+    if (!m) { notify('ファイルデータが見つかりません', 'error'); return; }
     const isPdf = (m.fileType || '').includes('pdf') || /\.pdf$/i.test(m.fileName || '');
     const isImg = (m.fileType || '').includes('image') || /\.(png|jpe?g|gif|webp)$/i.test(m.fileName || '');
     if (!isPdf && !isImg) {
@@ -1551,6 +1582,13 @@ function App() {
       notify(`「${m.fileName}」をダウンロードしました（Excel等はブラウザでは表示できません）`, 'success');
       return;
     }
+    // Storage 保存分（url あり）はダウンロードURLをそのまま新規タブで開く
+    if (m.url) {
+      const w = window.open(m.url, '_blank');
+      if (!w) notify('ポップアップがブロックされました。「ダウンロード」からご覧ください。', 'error');
+      return;
+    }
+    if (!m.data) { notify('ファイルデータが見つかりません', 'error'); return; }
     try {
       const url = dataUrlToBlobUrl(m.data);
       const w = window.open(url, '_blank');
@@ -1586,7 +1624,7 @@ function App() {
   // メーカー仕切りを印刷（PDF/画像は新規タブで開いて印刷ダイアログ）
   const handleMakerPrint = (m) => {
     try {
-      if (!m || !m.data) { notify('ファイルデータが見つかりません', 'error'); return; }
+      if (!m || (!m.data && !m.url)) { notify('ファイルデータが見つかりません', 'error'); return; }
       const isPdf = (m.fileType||'').includes('pdf') || /\.pdf$/i.test(m.fileName||'');
       const isImg = (m.fileType||'').includes('image') || /\.(png|jpe?g|gif|webp)$/i.test(m.fileName||'');
       if (!isPdf && !isImg) {
@@ -1595,19 +1633,21 @@ function App() {
         handleMakerDownload(m);
         return;
       }
-      // 巨大な base64 を document.write で埋め込むと固まるため Blob URL で開く
-      const url = dataUrlToBlobUrl(m.data);
+      // Storage 保存分（url あり）はそのままURLを使う。base64は巨大なため document.write に
+      // 直接埋め込まず Blob URL に変換してから使う
+      const url = m.url || dataUrlToBlobUrl(m.data);
+      const isBlobUrl = !m.url;
       if (isPdf) {
         // PDF はビューアの印刷ボタンから印刷してもらう
         const w = window.open(url, '_blank');
-        if (!w) { URL.revokeObjectURL(url); notify('ポップアップがブロックされました。ダウンロードして印刷してください。', 'error'); return; }
+        if (!w) { if (isBlobUrl) URL.revokeObjectURL(url); notify('ポップアップがブロックされました。ダウンロードして印刷してください。', 'error'); return; }
       } else {
         const w = window.open('', '_blank');
-        if (!w) { URL.revokeObjectURL(url); notify('ポップアップがブロックされました。ダウンロードして印刷してください。', 'error'); return; }
+        if (!w) { if (isBlobUrl) URL.revokeObjectURL(url); notify('ポップアップがブロックされました。ダウンロードして印刷してください。', 'error'); return; }
         w.document.write(`<html><head><meta charset="utf-8"><title>${escapeHTML(m.fileName||'')}</title></head><body style="margin:0;text-align:center" onload="setTimeout(function(){window.print()},400)"><img src="${url}" style="max-width:100%"></body></html>`);
         w.document.close();
       }
-      setTimeout(() => { try { URL.revokeObjectURL(url); } catch {} }, 60000);
+      if (isBlobUrl) setTimeout(() => { try { URL.revokeObjectURL(url); } catch {} }, 60000);
     } catch (err) { notify('印刷エラー: '+(err?.message||err), 'error'); }
   };
   // ドラッグ&ドロップでメーカー仕切りを登録
@@ -1633,51 +1673,65 @@ function App() {
   // 書込サイズが肥大化し共有エラーになっていた。1ファイルずつ個別の子ノード
   // (office-shared-makers/{office}/{id}) に書き込む方式へ変更（小さく安全な書込）。
   const shareMakerData = async (m) => {
-    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) {
+    if (!firebaseDB || !firebaseStorage || !loginInfo || !cloudSyncEnabled) {
       notify('クラウド同期がオフのため共有できません。右上の同期設定をオンにしてください。', 'error');
       return;
     }
-    // ファイルサイズ確認（base64長から概算。大きすぎる場合は共有を中止）
-    const approxBytes = m.data ? Math.floor(m.data.length * 0.75) : 0;
-    const MAX_BYTES = 9 * 1024 * 1024; // 9MB/ファイル
+    // ファイルサイズ確認（大きすぎる場合は共有を中止）
+    const approxBytes = m.fileSize || (m.data ? Math.floor(m.data.length * 0.75) : 0);
+    const MAX_BYTES = 50 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
     if (approxBytes > MAX_BYTES) {
-      notify(`このファイルは約${Math.round(approxBytes/1024/1024)}MBで大きすぎます（上限9MB）。共有できません。`, 'error');
+      notify(`このファイルは約${Math.round(approxBytes/1024/1024)}MBで大きすぎます（上限50MB）。共有できません。`, 'error');
       return;
     }
-    // 内容が全く同じ仕切りが既に共有されていれば重複させない
-    const dupMk = (officeSharedMakerData||[]).find(x => x && x.makerName===m.makerName && x.fileName===m.fileName && x.fileSize===m.fileSize && x.data===m.data);
+    // 同じメーカー・ファイル名・サイズの仕切りが既に共有されていれば重複させない
+    const dupMk = (officeSharedMakerData||[]).find(x => x && x.makerName===m.makerName && x.fileName===m.fileName && x.fileSize===m.fileSize);
     if (dupMk) { notify('同じ内容の仕切りが既に営業所共有にあります（重複登録しません）'); return; }
     if (!confirm(`「${m.makerName} / ${m.fileName}」を営業所「${loginInfo.officeCode}」全員で共有しますか？`)) return;
     try {
       const id = m.id || genId('mk');
+      let url = m.url, storagePath = m.storagePath;
+      if (!url) {
+        if (!m.data) throw new Error('ファイルデータが見つかりません');
+        const blob = dataUrlToBlob(m.data);
+        const up = await uploadFileToOfficeStorage(`makers/${loginInfo.officeCode}/${id}_${m.fileName}`, blob, m.fileType);
+        url = up.url; storagePath = up.storagePath;
+      }
       const r = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${id}`);
-      await dbSet(r, cleanForFirebase({ ...m, id, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+      await dbSet(r, cleanForFirebase({ ...m, id, url, storagePath, data: undefined, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
       notify('営業所共有に追加しました', 'success');
     } catch (err) { notify('共有エラー: '+(err?.message||err)+'\nファイル容量が大きい場合は共有できません。', 'error'); }
   };
   // 複数のメーカー仕切りを一括で営業所共有へ送信（一括／選択どちらも共通）。
-  // shareMakerData と同じ「内容が完全一致なら追加しない」「9MB超は不可」のルールを適用し、
-  // 1ファイルずつ個別の子ノードへ書き込む（既存の巨大配列書込エラー対策を踏襲）。
+  // shareMakerData と同じ「メーカー名・ファイル名・サイズが一致なら追加しない」「50MB超は不可」のルールを適用し、
+  // 1ファイルずつ Storage へアップロードしてから個別の子ノードへ書き込む。
   const shareMultipleMakerData = async (list) => {
-    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) {
+    if (!firebaseDB || !firebaseStorage || !loginInfo || !cloudSyncEnabled) {
       notify('クラウド同期がオフのため共有できません。右上の同期設定をオンにしてください。', 'error');
       return;
     }
     if (!list || list.length === 0) return;
-    const MAX_BYTES = 9 * 1024 * 1024;
-    const sig = (m) => `${m.makerName}|${m.fileName}|${m.fileSize}|${m.data}`;
+    const MAX_BYTES = 50 * 1024 * 1024;
+    const sig = (m) => `${m.makerName}|${m.fileName}|${m.fileSize}`;
     const seen = new Set((officeSharedMakerData || []).filter(Boolean).map(sig));
     let addedCount = 0, dupCount = 0, errorCount = 0;
     for (const m of list) {
       const s = sig(m);
       if (seen.has(s)) { dupCount++; continue; }
       seen.add(s);
-      const approxBytes = m.data ? Math.floor(m.data.length * 0.75) : 0;
+      const approxBytes = m.fileSize || (m.data ? Math.floor(m.data.length * 0.75) : 0);
       if (approxBytes > MAX_BYTES) { errorCount++; continue; }
       try {
         const id = m.id || genId('mk');
+        let url = m.url, storagePath = m.storagePath;
+        if (!url) {
+          if (!m.data) throw new Error('ファイルデータが見つかりません');
+          const blob = dataUrlToBlob(m.data);
+          const up = await uploadFileToOfficeStorage(`makers/${loginInfo.officeCode}/${id}_${m.fileName}`, blob, m.fileType);
+          url = up.url; storagePath = up.storagePath;
+        }
         const r = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${id}`);
-        await dbSet(r, cleanForFirebase({ ...m, id, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+        await dbSet(r, cleanForFirebase({ ...m, id, url, storagePath, data: undefined, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
         addedCount++;
       } catch (err) { errorCount++; }
     }
@@ -1692,20 +1746,22 @@ function App() {
     files = Array.from(files || []);
     if (files.length === 0) return;
     if (!makerName?.trim()) { notify('先にメーカー名を入力してからファイルを選んで（またはドロップして）ください', 'error'); return; }
-    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) {
+    if (!firebaseDB || !firebaseStorage || !loginInfo || !cloudSyncEnabled) {
       notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error');
       return;
     }
-    const MAX_BYTES = 9 * 1024 * 1024; // 9MB/ファイル（共有の上限）
+    const MAX_BYTES = 50 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
     for (const f of files) {
-      if (f.size > MAX_BYTES) { notify(`「${f.name}」は9MB超のため営業所共有に登録できません`, 'error'); continue; }
+      if (f.size > MAX_BYTES) { notify(`「${f.name}」は50MB超のため営業所共有に登録できません`, 'error'); continue; }
       try {
         const data = await fileToBase64(f);
         const id = genId('mk');
-        const rec = { id, makerName: makerName.trim(), fileName: f.name, fileType: f.type, fileSize: f.size, data, effectiveDate: new Date().toISOString().slice(0,10), uploadedAt: Date.now(), uploadedBy: loginInfo?.userName||'' };
-        // 自分の手元にも保存
-        setMakerDataList(prev => [rec, ...prev]);
-        // 営業所共有へ書込（個別の子ノードに小さく安全に書込）
+        const effectiveDate = new Date().toISOString().slice(0,10);
+        // 自分の手元にも保存（ローカルはこれまで通り base64 のまま）
+        setMakerDataList(prev => [{ id, makerName: makerName.trim(), fileName: f.name, fileType: f.type, fileSize: f.size, data, effectiveDate, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName||'' }, ...prev]);
+        // 営業所共有へは Cloud Storage にアップロードしURLのみをDBへ書込（個別の子ノードに小さく安全に書込）
+        const { url, storagePath } = await uploadFileToOfficeStorage(`makers/${loginInfo.officeCode}/${id}_${f.name}`, f);
+        const rec = { id, makerName: makerName.trim(), fileName: f.name, fileType: f.type, fileSize: f.size, url, storagePath, effectiveDate, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName||'' };
         const r = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${id}`);
         await dbSet(r, cleanForFirebase({ ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
         notify(`「${makerName}」の「${f.name}」を営業所共有に登録しました`, 'success');
@@ -1769,14 +1825,14 @@ function App() {
     files = Array.from(files || []);
     if (files.length === 0) return;
     if (!groupName?.trim()) { notify('先にメーカー名を入力してからファイルを選んで（またはドロップして）ください', 'error'); return; }
-    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) { notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error'); return; }
-    const MAX_BYTES = 9 * 1024 * 1024;
+    if (!firebaseDB || !firebaseStorage || !loginInfo || !cloudSyncEnabled) { notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error'); return; }
+    const MAX_BYTES = 50 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
     for (const f of files) {
-      if (f.size > MAX_BYTES) { notify(`「${f.name}」は9MB超のため営業所共有に登録できません`, 'error'); continue; }
+      if (f.size > MAX_BYTES) { notify(`「${f.name}」は50MB超のため営業所共有に登録できません`, 'error'); continue; }
       try {
-        const data = await fileToBase64(f);
         const id = genId('sh');
-        const rec = { id, makerName: groupName.trim(), fileName: f.name, fileType: f.type, fileSize: f.size, data, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName || '' };
+        const { url, storagePath } = await uploadFileToOfficeStorage(`${category}/${loginInfo.officeCode}/${id}_${f.name}`, f);
+        const rec = { id, makerName: groupName.trim(), fileName: f.name, fileType: f.type, fileSize: f.size, url, storagePath, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName || '' };
         const r = dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}/${id}`);
         await dbSet(r, cleanForFirebase({ ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
         notify(`「${groupName}」の「${f.name}」を営業所共有に登録しました`, 'success');
@@ -1791,10 +1847,12 @@ function App() {
       const snap = await dbGet(baseR);
       const v = snap.val();
       if (Array.isArray(v)) {
+        const target = v.find(m => m && m.id === id);
         await dbSet(baseR, v.filter(m => m && m.id !== id));
+        await deleteOfficeStorageFile(target);
       } else if (v && typeof v === 'object') {
         const key = Object.prototype.hasOwnProperty.call(v, id) ? id : Object.keys(v).find(k => v[k] && v[k].id === id);
-        if (key) await dbSet(dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}/${key}`), null);
+        if (key) { await dbSet(dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}/${key}`), null); await deleteOfficeStorageFile(v[key]); }
       }
       notify('削除しました', 'success');
     } catch (err) { notify('削除エラー: ' + (err?.message || err), 'error'); }
@@ -1834,16 +1892,16 @@ function App() {
   const registerQuoteFileToOffice = async (facilityName, files) => {
     files = Array.from(files || []);
     if (files.length === 0) return;
-    if (!firebaseDB || !loginInfo || !cloudSyncEnabled) { notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error'); return; }
-    const MAX_BYTES = 9 * 1024 * 1024;
+    if (!firebaseDB || !firebaseStorage || !loginInfo || !cloudSyncEnabled) { notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error'); return; }
+    const MAX_BYTES = 50 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
     for (const f of files) {
-      if (f.size > MAX_BYTES) { notify(`「${f.name}」は9MB超のため営業所共有に登録できません`, 'error'); continue; }
+      if (f.size > MAX_BYTES) { notify(`「${f.name}」は50MB超のため営業所共有に登録できません`, 'error'); continue; }
       try {
-        const data = await fileToBase64(f);
         const id = genId('sh');
         const dateLabel = new Date(f.lastModified || Date.now()).toLocaleDateString('ja-JP');
         const baseName = f.name.replace(/\.[^.]+$/, '');
-        const rec = { id, facilityName, fileName: f.name, displayName: `${dateLabel} ${baseName}`, fileType: f.type, fileSize: f.size, data, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName || '' };
+        const { url, storagePath } = await uploadFileToOfficeStorage(`quote-files/${loginInfo.officeCode}/${id}_${f.name}`, f);
+        const rec = { id, facilityName, fileName: f.name, displayName: `${dateLabel} ${baseName}`, fileType: f.type, fileSize: f.size, url, storagePath, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName || '' };
         const r = dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}/${id}`);
         await dbSet(r, cleanForFirebase({ ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
         notify(`「${f.name}」を「${facilityName}」に共有登録しました`, 'success');
@@ -1854,7 +1912,10 @@ function App() {
     if (!firebaseDB || !loginInfo) return;
     if (!confirm('営業所共有から削除しますか？\n（全員から見えなくなります）')) return;
     try {
-      await dbSet(dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}/${id}`), null);
+      const r = dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}/${id}`);
+      const snap = await dbGet(r);
+      await dbSet(r, null);
+      await deleteOfficeStorageFile(snap.val());
       notify('削除しました', 'success');
     } catch (err) { notify('削除エラー: ' + (err?.message || err), 'error'); }
   };
@@ -1877,14 +1938,17 @@ function App() {
       const v = snap.val();
       if (Array.isArray(v)) {
         // 旧形式: 配列を書き戻し
+        const target = v.find(m => m && m.id === id);
         await dbSet(baseR, v.filter(m => m && m.id !== id));
+        await deleteOfficeStorageFile(target);
       } else {
         // 新形式: 該当する子ノードを削除（idがキーでない場合はvalue.idで探す）
         if (v && typeof v === 'object' && Object.prototype.hasOwnProperty.call(v, id)) {
           await dbSet(dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${id}`), null);
+          await deleteOfficeStorageFile(v[id]);
         } else if (v && typeof v === 'object') {
           const key = Object.keys(v).find(k => v[k] && v[k].id === id);
-          if (key) await dbSet(dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${key}`), null);
+          if (key) { await dbSet(dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${key}`), null); await deleteOfficeStorageFile(v[key]); }
         }
       }
       notify('削除しました', 'success');
@@ -6242,9 +6306,9 @@ function App() {
               {!vm ? (
                 <div className="p-5 text-sm text-slate-500 text-center leading-relaxed">「🏭 メーカー仕切り」からPDFや画像の仕切りを登録すると、<br/>ここに表示しながら見積を入力できます。</div>
               ) : isPdf ? (
-                <embed src={vm.data} type="application/pdf" className="w-full h-full" />
+                <embed src={vm.url || vm.data} type="application/pdf" className="w-full h-full" />
               ) : isImg ? (
-                <div className="w-full h-full overflow-auto bg-slate-200 flex items-start justify-center"><img src={vm.data} alt={vm.fileName} className="max-w-full h-auto" /></div>
+                <div className="w-full h-full overflow-auto bg-slate-200 flex items-start justify-center"><img src={vm.url || vm.data} alt={vm.fileName} className="max-w-full h-auto" /></div>
               ) : (
                 <div className="p-5 text-sm text-slate-600 text-center leading-relaxed">この形式（Excel等）は画面に表示できません。<br/><button onClick={() => handleMakerDownload(vm)} className="mt-2 underline text-blue-600 font-bold">ダウンロードして開く</button></div>
               )}
