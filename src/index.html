@@ -431,6 +431,19 @@ const inferFromProductName = (name) => {
   return { volume, unit, baseScale };
 };
 
+// グループの「○○単価」計算に使う倍率。単価表記(unitPriceLabel)が数値で明示選択されていれば
+// それを最優先する（画面上の 1/10/100/1000 ボタンや自動表記の見た目と必ず一致させるため）。
+// group.baseScale は単位変更時などに更新が漏れて unitPriceLabel と食い違うことがあるため、
+// フォールバック（自動表記時）としてのみ使う。
+const effectiveBaseScale = (group) => {
+  const raw = String(group?.unitPriceLabel || '').trim();
+  if (raw) {
+    const m = raw.match(/^([0-9]+(?:\.[0-9]+)?)/);
+    if (m) { const n = Number(m[1]); if (n > 0) return n; }
+  }
+  return Number(group?.baseScale) || 1;
+};
+
 const getAutoBottomText = (mode) => {
   switch (mode) {
     case 'inclusive': return '本見積書の記載金額は、税込金額となっております。';
@@ -2478,7 +2491,7 @@ function App() {
       const calculatedItems = group.items.map((item) => {
         const vol = Number(item.volume); const pri = Number(item.price); const cost = Number(item.cost)||0;
         const profit = pri - cost; const margin = pri > 0 ? (profit/pri)*100 : 0;
-        const unitPrice = vol > 0 ? (pri/vol)*group.baseScale : 0;
+        const unitPrice = vol > 0 ? (pri/vol)*effectiveBaseScale(group) : 0;
         const monthlyCost = vol > 0 ? (monthlyUsage/vol)*pri : 0;
         return { ...item, profit, margin: Math.round(margin*10)/10, unitPrice: Math.round(unitPrice*10)/10, unitPriceRaw: unitPrice, monthlyCost: Math.round(monthlyCost), yearlyCost: Math.round(monthlyCost*12) };
       });
@@ -2551,6 +2564,12 @@ function App() {
       if (g.id !== id) return g;
       const u = { ...g, [field]: value };
       if (field === 'title') { const inf = inferFromProductName(value); if (inf?.unit) { u.unit = inf.unit; u.baseScale = inf.baseScale; } }
+      // 単位を手入力で変更したとき、単価表記が「自動」（未指定）ならbaseScaleも新しい単位の既定値に追従させる。
+      // これをしないと単位だけ変わってbaseScaleが古いまま残り、○○単価が桁違いに表示される不具合になる。
+      if (field === 'unit' && !String(g.unitPriceLabel || '').trim()) {
+        const opt = UNIT_OPTIONS.find(o => o.value === value);
+        u.baseScale = opt ? opt.defaultBase : 1;
+      }
       // 単価表記（例："10枚", "100ml"）から baseScale を自動抽出して印刷の○○単価を再計算
       if (field === 'unitPriceLabel') {
         const s = String(value || '').trim();
@@ -3514,7 +3533,7 @@ function App() {
           if (!(it.name && String(it.name).trim())) return;
           const po = Number(it.priceOld) || 0, pn = Number(it.priceNew) || 0;
           const d = pn - po, rate = po > 0 ? (d / po * 100) : 0;
-          const vol = Number(it.volume) || 0, bs = g.baseScale || 1;
+          const vol = Number(it.volume) || 0, bs = effectiveBaseScale(g);
           const upo = vol > 0 ? (po / vol) * bs : 0, upn = vol > 0 ? (pn / vol) * bs : 0;
           const unitDisp = it.unitOverride ?? g.unit ?? '';
           const dc = d > 0 ? '#c0392b' : d < 0 ? '#15803d' : '#666';
@@ -3817,7 +3836,7 @@ function App() {
       const po = Number(it.priceOld) || 0, pn = Number(it.priceNew) || 0;
       if (!(it.name && String(it.name).trim()) && !(po || pn)) return;
       const vol = Number(it.volume) || 0;
-      const bScale = g.baseScale || 1;
+      const bScale = effectiveBaseScale(g);
       const upo = vol > 0 ? (po / vol) * bScale : 0;
       const upn = vol > 0 ? (pn / vol) * bScale : 0;
       // ○○単価列を表示するときは、差額・率も ○○単価ベースで算出する
@@ -4052,7 +4071,7 @@ function App() {
             const inp = newItems[g.id];
             const vol = Number(inp.volume) || 0;
             const pri = Number(inp.price) || 0;
-            const unitPrice = vol > 0 ? (pri / vol) * (g.baseScale || 1) : 0;
+            const unitPrice = vol > 0 ? (pri / vol) * effectiveBaseScale(g) : 0;
             const committed = {
               id: genId('itm'),
               name: inp.name || '',
@@ -4098,7 +4117,7 @@ function App() {
       if (!hasPending) return g;
       const vol = Number(inp.volume) || 0;
       const pri = Number(inp.price) || 0;
-      const unitPrice = vol > 0 ? (pri / vol) * (g.baseScale || 1) : 0;
+      const unitPrice = vol > 0 ? (pri / vol) * effectiveBaseScale(g) : 0;
       const tempItem = {
         id: 'pending-' + g.id,
         name: inp.name || '',
@@ -4857,8 +4876,8 @@ function App() {
                             <td className="px-2 py-1.5 text-right"><input type="text" inputMode="decimal" value={item.priceOld === '' ? '' : formatNumber(item.priceOld)} onChange={e => updateItem(group.id, item.id, 'priceOld', parseNumberInput(e.target.value))} placeholder="改定前" className="w-[84px] h-9 bg-white border border-blue-300 rounded px-2 text-right text-sm leading-none outline-none no-spin tabular-nums" /></td>
                             {showCost && <td className="px-2 py-1.5 text-right bg-orange-50/40"><input type="text" inputMode="decimal" value={item.cost === '' || item.cost === 0 || item.cost === undefined ? '' : formatNumber(item.cost)} onChange={e => updateItem(group.id, item.id, 'cost', parseNumberInput(e.target.value))} placeholder="原価" className="w-[80px] h-9 bg-white border border-orange-300 rounded px-2 text-right text-sm leading-none outline-none no-spin tabular-nums" /></td>}
                             <td className="px-2 py-1.5 text-right"><input type="text" inputMode="decimal" value={item.priceNew === '' ? '' : formatNumber(item.priceNew)} onChange={e => updateItem(group.id, item.id, 'priceNew', parseNumberInput(e.target.value))} placeholder="改定後" className="w-[84px] h-9 bg-blue-50/40 border-2 border-blue-400 rounded px-2 text-right text-sm leading-none outline-none no-spin tabular-nums font-bold" /></td>
-                            {kaiteiAdvanced && (() => { const v = Number(item.volume) || 0; const upo = v > 0 ? (po / v) * (group.baseScale || 1) : 0; return <td className="px-2 py-1.5 text-right"><div className="w-[70px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-sky-700 bg-sky-50 border border-sky-200 rounded tabular-nums">{upo > 0 ? ('¥' + upo.toLocaleString(undefined, { maximumFractionDigits: 2 })) : '−'}</div></td>; })()}
-                            {kaiteiAdvanced && (() => { const v = Number(item.volume) || 0; const upn = v > 0 ? (pn / v) * (group.baseScale || 1) : 0; return <td className="px-2 py-1.5 text-right"><div className="w-[70px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-sky-900 bg-sky-100 border border-sky-300 rounded tabular-nums font-bold">{upn > 0 ? ('¥' + upn.toLocaleString(undefined, { maximumFractionDigits: 2 })) : '−'}</div></td>; })()}
+                            {kaiteiAdvanced && (() => { const v = Number(item.volume) || 0; const upo = v > 0 ? (po / v) * effectiveBaseScale(group) : 0; return <td className="px-2 py-1.5 text-right"><div className="w-[70px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-sky-700 bg-sky-50 border border-sky-200 rounded tabular-nums">{upo > 0 ? ('¥' + upo.toLocaleString(undefined, { maximumFractionDigits: 2 })) : '−'}</div></td>; })()}
+                            {kaiteiAdvanced && (() => { const v = Number(item.volume) || 0; const upn = v > 0 ? (pn / v) * effectiveBaseScale(group) : 0; return <td className="px-2 py-1.5 text-right"><div className="w-[70px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-sky-900 bg-sky-100 border border-sky-300 rounded tabular-nums font-bold">{upn > 0 ? ('¥' + upn.toLocaleString(undefined, { maximumFractionDigits: 2 })) : '−'}</div></td>; })()}
                             {kaiteiShowCaseAmount && (() => { const cao = ps * po; return <td className="px-2 py-1.5 text-right"><div className="w-[86px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-emerald-800 bg-emerald-50 border border-emerald-200 rounded tabular-nums">{cao > 0 ? ('¥' + Math.round(cao).toLocaleString()) : '−'}</div></td>; })()}
                             {kaiteiShowCaseAmount && (() => { const can = ps * pn; const caseValue = item.caseAmountDraft !== undefined ? item.caseAmountDraft : (can > 0 ? formatNumber(Math.round(can)) : ''); return <td className="px-2 py-1.5 text-right"><input type="text" inputMode="decimal" value={caseValue} onChange={e => updateItem(group.id, item.id, 'caseAmountDraft', e.target.value)} onBlur={e => { const raw = String(e.target.value).replace(/[^0-9.]/g, ''); const cv = Number(raw); if (raw !== '' && !isNaN(cv) && ps > 0) updateItem(group.id, item.id, 'priceNew', Math.round((cv / ps) * 100) / 100); updateItem(group.id, item.id, 'caseAmountDraft', undefined); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }} placeholder={ps > 0 ? 'ケース金額' : '入数を入力'} title="ケース金額を入力すると、ケース入数から改定後単価を自動計算します" disabled={ps <= 0} className={`w-[86px] h-9 ml-auto block text-right text-sm bg-emerald-100 border border-emerald-300 rounded px-2 tabular-nums font-bold text-emerald-900 outline-none no-spin ${ps <= 0 ? 'bg-slate-50 cursor-not-allowed' : ''}`} /></td>; })()}
                             {showCost && (() => { const c = Number(item.cost) || 0; const m = pn > 0 && c > 0 ? ((pn - c) / pn * 100) : null; const mc = m === null ? 'text-slate-400' : m < 0 ? 'text-red-600' : 'text-orange-700'; const marginValue = item.marginDraft !== undefined ? item.marginDraft : (m === null ? '' : m.toFixed(1)); return <td className="px-2 py-1.5 text-right bg-orange-50/40"><input type="text" inputMode="decimal" value={marginValue} onChange={e => updateItem(group.id, item.id, 'marginDraft', e.target.value)} onBlur={e => { const raw = String(e.target.value).replace(/[^\-0-9.]/g, ''); const mv = Number(raw); if (raw !== '' && !isNaN(mv) && c > 0 && mv < 100) updateItem(group.id, item.id, 'priceNew', Math.round(c / (1 - mv / 100) * 100) / 100); updateItem(group.id, item.id, 'marginDraft', undefined); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }} placeholder={c > 0 ? '利益率' : '原価を入力'} title="利益率(%)を入力すると、原価から改定後単価を自動計算します" disabled={c <= 0} className={`w-[70px] h-9 ml-auto block border border-orange-200 rounded px-2 text-right text-sm leading-none outline-none no-spin tabular-nums font-bold ${mc} ${c <= 0 ? 'bg-slate-50 cursor-not-allowed' : 'bg-white'}`} /></td>; })()}
@@ -4903,8 +4922,8 @@ function App() {
                         </td>}
                         <td className="px-2 py-1.5 text-right"><input type="text" inputMode="decimal" placeholder="改定前" value={inp.priceOld === '' ? '' : formatNumber(inp.priceOld)} onChange={e => handleInputChange(group.id, 'priceOld', parseNumberInput(e.target.value))} className="w-[84px] h-9 border border-blue-300 rounded px-2 text-right text-sm leading-none outline-none no-spin tabular-nums" /></td>
                         <td className="px-2 py-1.5 text-right"><input type="text" inputMode="decimal" placeholder="改定後" value={inp.priceNew === '' ? '' : formatNumber(inp.priceNew)} onChange={e => handleInputChange(group.id, 'priceNew', parseNumberInput(e.target.value))} className="w-[84px] h-9 bg-blue-50/40 border-2 border-blue-400 rounded px-2 text-right text-sm leading-none outline-none no-spin tabular-nums font-bold" /></td>
-                        {kaiteiAdvanced && (() => { const v = Number(inp.volume) || 0; const upo = v > 0 ? (npo0 / v) * (group.baseScale || 1) : 0; return <td className="px-2 py-1.5 text-right"><div className="w-[70px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-sky-700 bg-sky-50 border border-sky-200 rounded tabular-nums">{upo > 0 ? ('¥' + upo.toLocaleString(undefined, { maximumFractionDigits: 2 })) : '自動'}</div></td>; })()}
-                        {kaiteiAdvanced && (() => { const v = Number(inp.volume) || 0; const upn = v > 0 ? (npn0 / v) * (group.baseScale || 1) : 0; return <td className="px-2 py-1.5 text-right"><div className="w-[70px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-sky-900 bg-sky-100 border border-sky-300 rounded tabular-nums font-bold">{upn > 0 ? ('¥' + upn.toLocaleString(undefined, { maximumFractionDigits: 2 })) : '自動'}</div></td>; })()}
+                        {kaiteiAdvanced && (() => { const v = Number(inp.volume) || 0; const upo = v > 0 ? (npo0 / v) * effectiveBaseScale(group) : 0; return <td className="px-2 py-1.5 text-right"><div className="w-[70px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-sky-700 bg-sky-50 border border-sky-200 rounded tabular-nums">{upo > 0 ? ('¥' + upo.toLocaleString(undefined, { maximumFractionDigits: 2 })) : '自動'}</div></td>; })()}
+                        {kaiteiAdvanced && (() => { const v = Number(inp.volume) || 0; const upn = v > 0 ? (npn0 / v) * effectiveBaseScale(group) : 0; return <td className="px-2 py-1.5 text-right"><div className="w-[70px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-sky-900 bg-sky-100 border border-sky-300 rounded tabular-nums font-bold">{upn > 0 ? ('¥' + upn.toLocaleString(undefined, { maximumFractionDigits: 2 })) : '自動'}</div></td>; })()}
                         {kaiteiShowCaseAmount && (() => { const cao = nps * npo0; return <td className="px-2 py-1.5 text-right"><div className="w-[86px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-emerald-800 bg-emerald-50 border border-emerald-200 rounded tabular-nums">{cao > 0 ? ('¥' + Math.round(cao).toLocaleString()) : '自動'}</div></td>; })()}
                         {kaiteiShowCaseAmount && (() => { const can = nps * npn0; return <td className="px-2 py-1.5 text-right"><div className="w-[86px] h-9 ml-auto px-2 flex items-center justify-end text-sm text-emerald-900 bg-emerald-100 border border-emerald-300 rounded tabular-nums font-bold">{can > 0 ? ('¥' + Math.round(can).toLocaleString()) : '自動'}</div></td>; })()}
                         {showCost && <td className="px-2 py-1.5 text-right bg-orange-50/40"><input type="text" inputMode="decimal" placeholder="原価" value={inp.cost === '' || inp.cost === undefined ? '' : formatNumber(inp.cost)} onChange={e => handleInputChange(group.id, 'cost', parseNumberInput(e.target.value))} className="w-[80px] h-9 border border-orange-300 rounded px-2 text-right text-sm leading-none outline-none no-spin tabular-nums" /></td>}
@@ -5035,7 +5054,7 @@ function App() {
                                 const autoLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
                                 const raw = (group.unitPriceLabel && String(group.unitPriceLabel).trim()) ? String(group.unitPriceLabel).trim() : '';
                                 const label = raw ? (/^[0-9]+(?:\.[0-9]+)?$/.test(raw) ? `${raw}${group.unit||''}` : raw) : autoLabel;
-                                const up = (Number(item.price) / Number(item.volume)) * (group.baseScale || 1);
+                                const up = (Number(item.price) / Number(item.volume)) * effectiveBaseScale(group);
                                 const upStr = up % 1 === 0 ? up.toLocaleString('ja-JP') : up.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
                                 return <div className="text-[10px] text-blue-600 font-medium whitespace-nowrap pointer-events-none bg-white px-1 rounded shadow-sm" style={{ position: 'absolute', top: '-16px', right: '4px', lineHeight: '12px', zIndex: 2 }} title="unit-price">{`-> ${label}単価 ¥${upStr}`}</div>;
                               })()
@@ -5048,7 +5067,7 @@ function App() {
                                     const autoLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
                                     const raw = (group.unitPriceLabel && String(group.unitPriceLabel).trim()) ? String(group.unitPriceLabel).trim() : '';
                                     const label = raw ? (/^[0-9]+(?:\.[0-9]+)?$/.test(raw) ? `${raw}${group.unit||''}` : raw) : autoLabel;
-                                    const up = (Number(item.price) / Number(item.volume)) * (group.baseScale || 1);
+                                    const up = (Number(item.price) / Number(item.volume)) * effectiveBaseScale(group);
                                     const upStr = up % 1 === 0 ? up.toLocaleString('ja-JP') : up.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
                                     return `→ ${label}単価 ¥${upStr}`;
                                   })()}
@@ -5062,12 +5081,12 @@ function App() {
                               <input type="text" inputMode="decimal" value={(() => {
                                 const vol = Number(item.volume) || 0;
                                 if (vol <= 0 || !item.price) return '';
-                                const up = (Number(item.price) / vol) * (group.baseScale || 1);
+                                const up = (Number(item.price) / vol) * effectiveBaseScale(group);
                                 return up % 1 === 0 ? up.toLocaleString('ja-JP') : up.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
                               })()} onChange={e => {
                                 const newUp = Number(parseNumberInput(e.target.value)) || 0;
                                 const vol = Number(item.volume) || 0;
-                                const bs = group.baseScale || 1;
+                                const bs = effectiveBaseScale(group);
                                 if (vol > 0 && bs > 0) updateItem(group.id, item.id, 'price', newUp * vol / bs);
                               }} title="○○単価（直接編集可。単価/金額が自動再計算）" className="item-table-input w-[90px] bg-blue-50 border border-blue-300 rounded px-2 py-1 text-right outline-none font-normal text-slate-800 no-spin" placeholder="0" />
                             </td>
@@ -5146,12 +5165,12 @@ function App() {
                       {appMode === 'proposal' && showUnitPriceColumn && (() => {
                         const vol = Number(inp.volume) || 0;
                         const pri = Number(inp.price) || 0;
-                        const upVal = (vol > 0 && pri > 0) ? (pri / vol) * (group.baseScale || 1) : 0;
+                        const upVal = (vol > 0 && pri > 0) ? (pri / vol) * effectiveBaseScale(group) : 0;
                         const upStr = upVal === 0 ? '' : (upVal % 1 === 0 ? upVal.toLocaleString('ja-JP') : upVal.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 }));
                         return <td className="px-2 py-2 text-right"><input type="text" inputMode="decimal" value={upStr} onChange={e => {
                           const newUp = Number(parseNumberInput(e.target.value)) || 0;
                           const v = Number(inp.volume) || 0;
-                          const bs = group.baseScale || 1;
+                          const bs = effectiveBaseScale(group);
                           if (v > 0 && bs > 0) handleInputChange(group.id, 'price', newUp * v / bs);
                         }} placeholder="単価" className="item-table-input w-[90px] bg-blue-50 border border-blue-300 rounded px-2 py-1 text-right outline-none font-normal no-spin" /></td>;
                       })()}
