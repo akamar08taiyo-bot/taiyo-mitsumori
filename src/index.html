@@ -1692,9 +1692,9 @@ function App() {
     }
     // ファイルサイズ確認（大きすぎる場合は共有を中止）
     const approxBytes = m.fileSize || (m.data ? Math.floor(m.data.length * 0.75) : 0);
-    const MAX_BYTES = 50 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
+    const MAX_BYTES = 300 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
     if (approxBytes > MAX_BYTES) {
-      notify(`このファイルは約${Math.round(approxBytes/1024/1024)}MBで大きすぎます（上限50MB）。共有できません。`, 'error');
+      notify(`このファイルは約${Math.round(approxBytes/1024/1024)}MBで大きすぎます（上限300MB）。共有できません。`, 'error');
       return;
     }
     // 同じメーカー・ファイル名・サイズの仕切りが既に共有されていれば重複させない
@@ -1716,7 +1716,7 @@ function App() {
     } catch (err) { notify('共有エラー: '+(err?.message||err)+'\nファイル容量が大きい場合は共有できません。', 'error'); }
   };
   // 複数のメーカー仕切りを一括で営業所共有へ送信（一括／選択どちらも共通）。
-  // shareMakerData と同じ「メーカー名・ファイル名・サイズが一致なら追加しない」「50MB超は不可」のルールを適用し、
+  // shareMakerData と同じ「メーカー名・ファイル名・サイズが一致なら追加しない」「300MB超は不可」のルールを適用し、
   // 1ファイルずつ Storage へアップロードしてから個別の子ノードへ書き込む。
   const shareMultipleMakerData = async (list) => {
     if (!firebaseDB || !firebaseStorage || !loginInfo || !cloudSyncEnabled) {
@@ -1724,7 +1724,7 @@ function App() {
       return;
     }
     if (!list || list.length === 0) return;
-    const MAX_BYTES = 50 * 1024 * 1024;
+    const MAX_BYTES = 300 * 1024 * 1024;
     const sig = (m) => `${m.makerName}|${m.fileName}|${m.fileSize}`;
     const seen = new Set((officeSharedMakerData || []).filter(Boolean).map(sig));
     let addedCount = 0, dupCount = 0, errorCount = 0;
@@ -1763,9 +1763,9 @@ function App() {
       notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error');
       return;
     }
-    const MAX_BYTES = 50 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
+    const MAX_BYTES = 300 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
     for (const f of files) {
-      if (f.size > MAX_BYTES) { notify(`「${f.name}」は50MB超のため営業所共有に登録できません`, 'error'); continue; }
+      if (f.size > MAX_BYTES) { notify(`「${f.name}」は300MB超のため営業所共有に登録できません`, 'error'); continue; }
       try {
         const data = await fileToBase64(f);
         const id = genId('mk');
@@ -1839,9 +1839,9 @@ function App() {
     if (files.length === 0) return;
     if (!groupName?.trim()) { notify('先にメーカー名を入力してからファイルを選んで（またはドロップして）ください', 'error'); return; }
     if (!firebaseDB || !firebaseStorage || !loginInfo || !cloudSyncEnabled) { notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error'); return; }
-    const MAX_BYTES = 50 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
+    const MAX_BYTES = 300 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
     for (const f of files) {
-      if (f.size > MAX_BYTES) { notify(`「${f.name}」は50MB超のため営業所共有に登録できません`, 'error'); continue; }
+      if (f.size > MAX_BYTES) { notify(`「${f.name}」は300MB超のため営業所共有に登録できません`, 'error'); continue; }
       try {
         const id = genId('sh');
         const { url, storagePath } = await uploadFileToOfficeStorage(`${category}/${loginInfo.officeCode}/${id}_${f.name}`, f);
@@ -1906,9 +1906,9 @@ function App() {
     files = Array.from(files || []);
     if (files.length === 0) return;
     if (!firebaseDB || !firebaseStorage || !loginInfo || !cloudSyncEnabled) { notify('クラウド同期がオフのため営業所共有に登録できません。右上の同期設定をオンにしてください。', 'error'); return; }
-    const MAX_BYTES = 50 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
+    const MAX_BYTES = 300 * 1024 * 1024; // Cloud Storage経由のため base64 時代の9MB制限より大幅に緩和
     for (const f of files) {
-      if (f.size > MAX_BYTES) { notify(`「${f.name}」は50MB超のため営業所共有に登録できません`, 'error'); continue; }
+      if (f.size > MAX_BYTES) { notify(`「${f.name}」は300MB超のため営業所共有に登録できません`, 'error'); continue; }
       try {
         const id = genId('sh');
         const dateLabel = new Date(f.lastModified || Date.now()).toLocaleDateString('ja-JP');
@@ -5660,7 +5660,7 @@ function App() {
                           </label>
                         </div>
                         <div className={`mt-2 text-center text-[11px] rounded border-2 border-dashed py-1.5 ${officeMakerDragOver ? 'border-purple-500 text-purple-700 font-bold' : 'border-purple-300 text-purple-400'}`}>
-                          {officeMakerDragOver ? 'ここにドロップして営業所共有に登録' : '📎 メーカー名を入れて、ここにファイルをドラッグ&ドロップでも登録できます（1ファイル9MBまで）'}
+                          {officeMakerDragOver ? 'ここにドロップして営業所共有に登録' : '📎 メーカー名を入れて、ここにファイルをドラッグ&ドロップでも登録できます（1ファイル300MBまで）'}
                         </div>
                       </div>
                       )}
@@ -5733,7 +5733,7 @@ function App() {
                           </label>
                         </div>
                         <div className={`mt-2 text-center text-[11px] rounded border-2 border-dashed py-1.5 ${officeFlyerDragOver ? 'border-sky-500 text-sky-700 font-bold' : 'border-sky-300 text-sky-400'}`}>
-                          {officeFlyerDragOver ? 'ここにドロップして営業所共有に登録' : '📎 メーカー名を入れて、ここにファイルをドラッグ&ドロップでも登録できます（1ファイル9MBまで）'}
+                          {officeFlyerDragOver ? 'ここにドロップして営業所共有に登録' : '📎 メーカー名を入れて、ここにファイルをドラッグ&ドロップでも登録できます（1ファイル300MBまで）'}
                         </div>
                       </div>
                       )}
@@ -5805,7 +5805,7 @@ function App() {
                           </label>
                         </div>
                         <div className={`mt-2 text-center text-[11px] rounded border-2 border-dashed py-1.5 ${officeOrderDragOver ? 'border-orange-500 text-orange-700 font-bold' : 'border-orange-300 text-orange-400'}`}>
-                          {officeOrderDragOver ? 'ここにドロップして営業所共有に登録' : '📎 メーカー名を入れて、ここにファイルをドラッグ&ドロップでも登録できます（1ファイル9MBまで）'}
+                          {officeOrderDragOver ? 'ここにドロップして営業所共有に登録' : '📎 メーカー名を入れて、ここにファイルをドラッグ&ドロップでも登録できます（1ファイル300MBまで）'}
                         </div>
                       </div>
                       )}
@@ -6089,7 +6089,7 @@ function App() {
                                     ファイルを選んで添付
                                     <input type="file" accept=".pdf,.xlsx,.xls,.csv,.doc,.docx,.png,.jpg,.jpeg" multiple className="hidden" onChange={e => { registerQuoteFileToOffice(nm, e.target.files); e.target.value = ''; }} />
                                   </label>
-                                  <span className="text-[11px] text-indigo-400">またはこの行の枠にドラッグ&ドロップ（1ファイル9MBまで）</span>
+                                  <span className="text-[11px] text-indigo-400">またはこの行の枠にドラッグ&ドロップ（1ファイル300MBまで）</span>
                                 </div>
                               </div>
                               {quoteFiles.map(m => (
