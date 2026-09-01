@@ -918,6 +918,9 @@ function App() {
   const [officeFlyerDragOver, setOfficeFlyerDragOver] = useState(false);
   const [officeOrderDragOver, setOfficeOrderDragOver] = useState(false);
   const [officeQuoteFileDropTarget, setOfficeQuoteFileDropTarget] = useState(null); // 営業所共有：見積の施設行へドラッグ中のドロップ先施設名
+  const [officeFlyerFolderDropTarget, setOfficeFlyerFolderDropTarget] = useState(null); // 営業所共有：チラシ・事例集フォルダへドラッグ中のドロップ先メーカー名
+  const [officeOrderFolderDropTarget, setOfficeOrderFolderDropTarget] = useState(null); // 営業所共有：発注書フォルダへドラッグ中のドロップ先メーカー名
+  const [officeMakerFolderDropTarget, setOfficeMakerFolderDropTarget] = useState(null); // 営業所共有：仕切りフォルダへドラッグ中のドロップ先メーカー名
   const [showCloseConfirm, setShowCloseConfirm] = useState(false); // 「閉じる」時の保存確認ダイアログ（施設フォルダ内・変更あり時）
   const [pendingPrintProp, setPendingPrintProp] = useState(null); // 管理画面からPDF保存：読込完了後に印刷するための予約ID
   // メーカーデータを IndexedDB から読み込み（旧 localStorage からは自動移行）。
@@ -5761,8 +5764,14 @@ function App() {
                         const names = Object.keys(groups).sort((a,b) => a.localeCompare(b,'ja'));
                         return names.map(nm => {
                           const open = expandedSharedFlyers === nm;
+                          const isDropHi = officeFlyerFolderDropTarget === nm;
                           return (
-                            <div key={nm} className="border border-sky-200 rounded-lg overflow-hidden">
+                            <div key={nm}
+                              className={`border rounded-lg overflow-hidden transition-colors ${isDropHi ? 'border-emerald-500 ring-2 ring-emerald-300 bg-emerald-50' : 'border-sky-200'}`}
+                              onDragOver={e => { e.preventDefault(); setOfficeFlyerFolderDropTarget(nm); }}
+                              onDragLeave={() => setOfficeFlyerFolderDropTarget(prev => prev === nm ? null : prev)}
+                              onDrop={e => { e.preventDefault(); setOfficeFlyerFolderDropTarget(null); if (e.dataTransfer?.files?.length > 0) registerFilesToOfficeCategory('flyers', e.dataTransfer.files, nm); }}
+                            >
                               <button onClick={() => setExpandedSharedFlyers(prev => prev === nm ? null : nm)} className="w-full flex items-center gap-2 px-3 py-2.5 bg-sky-100 hover:bg-sky-200 text-left">
                                 <span className="text-sky-600 text-xs w-4">{open ? '▼' : '▶'}</span>
                                 <span className="text-base shrink-0">🖼️</span>
@@ -5833,8 +5842,14 @@ function App() {
                         const names = Object.keys(groups).sort((a,b) => a.localeCompare(b,'ja'));
                         return names.map(nm => {
                           const open = expandedSharedOrders === nm;
+                          const isDropHi = officeOrderFolderDropTarget === nm;
                           return (
-                            <div key={nm} className="border border-orange-200 rounded-lg overflow-hidden">
+                            <div key={nm}
+                              className={`border rounded-lg overflow-hidden transition-colors ${isDropHi ? 'border-emerald-500 ring-2 ring-emerald-300 bg-emerald-50' : 'border-orange-200'}`}
+                              onDragOver={e => { e.preventDefault(); setOfficeOrderFolderDropTarget(nm); }}
+                              onDragLeave={() => setOfficeOrderFolderDropTarget(prev => prev === nm ? null : prev)}
+                              onDrop={e => { e.preventDefault(); setOfficeOrderFolderDropTarget(null); if (e.dataTransfer?.files?.length > 0) registerFilesToOfficeCategory('orders', e.dataTransfer.files, nm); }}
+                            >
                               <button onClick={() => setExpandedSharedOrders(prev => prev === nm ? null : nm)} className="w-full flex items-center gap-2 px-3 py-2.5 bg-orange-100 hover:bg-orange-200 text-left">
                                 <span className="text-orange-600 text-xs w-4">{open ? '▼' : '▶'}</span>
                                 <span className="text-base shrink-0">📦</span>
@@ -6509,8 +6524,14 @@ function App() {
                     <div className="text-center py-4 text-slate-400 text-xs">条件に一致するデータがありません</div>
                   ) : sharedGroups.map(g => {
                     const key = 'shr:'+g.name; const open = isOpen(key);
+                    const isDropHi = officeMakerFolderDropTarget === g.name;
                     return (
-                      <div key={key} className="border border-emerald-200 rounded-lg mb-2 overflow-hidden">
+                      <div key={key}
+                        className={`border rounded-lg mb-2 overflow-hidden transition-colors ${isDropHi ? 'border-emerald-500 ring-2 ring-emerald-300 bg-emerald-50' : 'border-emerald-200'}`}
+                        onDragOver={e => { e.preventDefault(); setOfficeMakerFolderDropTarget(g.name); }}
+                        onDragLeave={() => setOfficeMakerFolderDropTarget(prev => prev === g.name ? null : prev)}
+                        onDrop={e => { e.preventDefault(); setOfficeMakerFolderDropTarget(null); if (e.dataTransfer?.files?.length > 0) registerMakerFilesToOffice(e.dataTransfer.files, g.name); }}
+                      >
                         <button onClick={() => toggle(key)} className="w-full flex items-center gap-2 px-3 py-2 bg-emerald-100 hover:bg-emerald-200 text-left">
                           <span className="text-emerald-600 text-xs w-4">{open ? '▼' : '▶'}</span>
                           <span className="font-bold text-emerald-900 text-sm flex-1 truncate">📁 {g.name}</span>
