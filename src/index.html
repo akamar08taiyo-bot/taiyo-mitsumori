@@ -2491,7 +2491,10 @@ function App() {
       const calculatedItems = group.items.map((item) => {
         const vol = Number(item.volume); const pri = Number(item.price); const cost = Number(item.cost)||0;
         const profit = pri - cost; const margin = pri > 0 ? (profit/pri)*100 : 0;
-        const unitPrice = vol > 0 ? (pri/vol)*effectiveBaseScale(group) : 0;
+        // ○○単価（例:1枚単価）＝ ケース金額(ケース入数×単価) ÷ ケース内数量（合計）。
+        // 「1袋あたりの数量」×倍率のような分かりにくい掛け算はやめ、ケース内の合計数量を
+        // そのまま入力してもらう方式に変更（単位表記の倍率設定は不要になった）。
+        const unitPrice = vol > 0 ? ((Number(item.packSize)||0) * pri) / vol : 0;
         const monthlyCost = vol > 0 ? (monthlyUsage/vol)*pri : 0;
         return { ...item, profit, margin: Math.round(margin*10)/10, unitPrice: Math.round(unitPrice*10)/10, unitPriceRaw: unitPrice, monthlyCost: Math.round(monthlyCost), yearlyCost: Math.round(monthlyCost*12) };
       });
@@ -4071,7 +4074,7 @@ function App() {
             const inp = newItems[g.id];
             const vol = Number(inp.volume) || 0;
             const pri = Number(inp.price) || 0;
-            const unitPrice = vol > 0 ? (pri / vol) * effectiveBaseScale(g) : 0;
+            const unitPrice = vol > 0 ? ((Number(inp.packSize) || 1) * pri) / vol : 0;
             const committed = {
               id: genId('itm'),
               name: inp.name || '',
@@ -4117,7 +4120,7 @@ function App() {
       if (!hasPending) return g;
       const vol = Number(inp.volume) || 0;
       const pri = Number(inp.price) || 0;
-      const unitPrice = vol > 0 ? (pri / vol) * effectiveBaseScale(g) : 0;
+      const unitPrice = vol > 0 ? ((Number(inp.packSize) || 1) * pri) / vol : 0;
       const tempItem = {
         id: 'pending-' + g.id,
         name: inp.name || '',
@@ -4154,11 +4157,8 @@ function App() {
     }, 0), 0);
     const printGrandTotal = Math.max(0, grandTotal - printHiddenSum);
     const groupsHTML = groupsForPrintVisible.filter(g => !g._emptiedByHide && (g.items.length > 0 || (g.title && g.title.trim()))).map((group) => {
-      // 単価ラベル：自動生成（例：100ml）。group.unitPriceLabel が設定されていれば優先。
-      const autoBaseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
-      const rawLabel = (group.unitPriceLabel && String(group.unitPriceLabel).trim()) ? String(group.unitPriceLabel).trim() : '';
-      // 単価表記が数字のみ（例:"100"）の場合は単位を補完して「100ml」と表示
-      const baseLabel = rawLabel ? (/^[0-9]+(?:\.[0-9]+)?$/.test(rawLabel) ? `${rawLabel}${group.unit||''}` : rawLabel) : autoBaseLabel;
+      // 単価ラベル：ケース内数量(合計)で割った1単位あたりの価格なので常に「1○○単価」
+      const baseLabel = `1${group.unit || ''}`;
       const rows = group.items.map((item) => {
         // 行のクラス：マーカー(yellow) と 赤字 は独立して併用可能
         const classes = [];
@@ -4784,18 +4784,20 @@ function App() {
                   <input value={group.title} onChange={e => updateGroupField(group.id, 'title', e.target.value)} placeholder="商品カテゴリ名・メーカー名 (例: ビニール手袋 / ○○株式会社)" className="bg-white border border-slate-300 rounded px-2.5 py-1.5 font-normal text-slate-800 text-sm outline-none flex-1 max-w-[320px] focus:border-blue-500" />
                 </div>
                 {((appMode === 'proposal' && showUnitPriceColumn) || (appMode === 'kaitei' && kaiteiAdvanced)) && (
-                  <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-white border border-slate-200 rounded px-2 py-1.5 no-print" title="単位と単価表記。「自動」ボタンで商品名から推測。手入力で上書きも可能。">
+                  <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-white border border-slate-200 rounded px-2 py-1.5 no-print" title="単位（例：ml, 枚, m, 個）">
                     <span className="text-slate-500 text-[10px] font-bold">単位:</span>
-                    <input value={group.unit||''} onChange={e => updateGroupField(group.id, 'unit', e.target.value)} placeholder="ml" className="w-12 px-1.5 py-1 border border-slate-300 rounded text-center text-xs font-bold focus:border-blue-500 outline-none" title="単位（例：ml, 枚, m, 個）" />
-                    <span className="text-slate-400">/</span>
-                    <span className="text-slate-500 text-[10px] font-bold">単価表記:</span>
-                    {[1,10,100,1000].map(n => {
-                      const cur = String(group.unitPriceLabel || '').trim();
-                      const isActive = cur === String(n) || (!cur && group.baseScale === n);
-                      return <button key={n} onClick={() => updateGroupField(group.id, 'unitPriceLabel', String(n))} title={`${n}${group.unit||''}単価で表示`} className={`text-[10px] px-1.5 py-1 rounded font-bold border ${isActive ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}>{n}</button>;
-                    })}
-                    <input value={group.unitPriceLabel || ''} onChange={e => updateGroupField(group.id, 'unitPriceLabel', e.target.value)} placeholder={group.baseScale === 1 ? `1${group.unit||''}` : `${group.baseScale||100}${group.unit||''}`} className="w-20 px-1.5 py-1 border border-slate-300 rounded text-center text-xs font-bold focus:border-blue-500 outline-none" title="手入力で上書き（例：100ml、1枚、1m）。空欄なら自動生成" />
-                    <button onClick={() => updateGroupField(group.id, 'unitPriceLabel', '')} title="自動表記に戻す" className="text-[10px] bg-amber-100 hover:bg-amber-200 text-amber-700 px-1.5 py-1 rounded font-bold">自動</button>
+                    <input value={group.unit||''} onChange={e => updateGroupField(group.id, 'unit', e.target.value)} placeholder="枚" className="w-12 px-1.5 py-1 border border-slate-300 rounded text-center text-xs font-bold focus:border-blue-500 outline-none" title="単位（例：ml, 枚, m, 個）" />
+                    {appMode === 'kaitei' && (<>
+                      <span className="text-slate-400">/</span>
+                      <span className="text-slate-500 text-[10px] font-bold">単価表記:</span>
+                      {[1,10,100,1000].map(n => {
+                        const cur = String(group.unitPriceLabel || '').trim();
+                        const isActive = cur === String(n) || (!cur && group.baseScale === n);
+                        return <button key={n} onClick={() => updateGroupField(group.id, 'unitPriceLabel', String(n))} title={`${n}${group.unit||''}単価で表示`} className={`text-[10px] px-1.5 py-1 rounded font-bold border ${isActive ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}>{n}</button>;
+                      })}
+                      <input value={group.unitPriceLabel || ''} onChange={e => updateGroupField(group.id, 'unitPriceLabel', e.target.value)} placeholder={group.baseScale === 1 ? `1${group.unit||''}` : `${group.baseScale||100}${group.unit||''}`} className="w-20 px-1.5 py-1 border border-slate-300 rounded text-center text-xs font-bold focus:border-blue-500 outline-none" title="手入力で上書き（例：100ml、1枚、1m）。空欄なら自動生成" />
+                      <button onClick={() => updateGroupField(group.id, 'unitPriceLabel', '')} title="自動表記に戻す" className="text-[10px] bg-amber-100 hover:bg-amber-200 text-amber-700 px-1.5 py-1 rounded font-bold">自動</button>
+                    </>)}
                   </div>
                 )}
                 <button onClick={() => removeGroup(group.id)} aria-label="カテゴリを削除" className={`p-1.5 rounded transition ${deleteConfirmMap[group.id] ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-red-500 hover:bg-red-50'}`}>{deleteConfirmMap[group.id] ? <AlertTriangle className="w-4 h-4" /> : <X className="w-4 h-4" />}</button>
@@ -4972,13 +4974,12 @@ function App() {
                         </th>;
                       })()}
                       {(() => {
-                        const cont = inferContainerLabel(group.title) || inferContainerLabel(group.items[0]?.name) || '袋';
                         const u = group.unit || '';
                         const isVolume = ['ml','L','g','kg','m','cm'].includes(u);
                         const what = isVolume ? '容量' : '数量';
                         return <th className="px-2 py-2 text-right font-bold w-[92px] bg-sky-50 border-l border-slate-300">
-                          <div>{appMode === 'proposal' ? `1${cont}あたりの${what}` : '数量'}</div>
-                          <div className="text-[9px] text-slate-400 font-normal">{appMode === 'proposal' ? '例 500ml、200枚' : '入力'}</div>
+                          <div>{appMode === 'proposal' ? `ケース内${what}(計)` : '数量'}</div>
+                          <div className="text-[9px] text-slate-400 font-normal">{appMode === 'proposal' ? '例 600（内訳は備考へ）' : '入力'}</div>
                         </th>;
                       })()}
                       {showCost && <th className="px-2 py-2 text-right font-bold text-orange-700 bg-orange-50 w-[95px] border-l border-slate-300">
@@ -4992,15 +4993,12 @@ function App() {
                           <div className="text-[9px] text-slate-400 font-normal">{appMode === 'proposal' ? `1${cont}単価` : '1個あたり'}</div>
                         </th>;
                       })()}
-                      {appMode === 'proposal' && showUnitPriceColumn && (() => {
-                        const autoBaseLabel = group.baseScale === 1 ? `1${group.unit||''}` : `${group.baseScale}${group.unit||''}`;
-                        const raw = (group.unitPriceLabel && String(group.unitPriceLabel).trim()) ? String(group.unitPriceLabel).trim() : '';
-                        const label = raw ? (/^[0-9]+(?:\.[0-9]+)?$/.test(raw) ? `${raw}${group.unit||''}` : raw) : autoBaseLabel;
-                        return <th className="px-2 py-2 text-right font-bold w-[110px] bg-blue-100 text-blue-800 border-l border-slate-300">
-                          <div>{label}単価</div>
-                          <div className="text-[9px] text-blue-500 font-normal">&nbsp;</div>
-                        </th>;
-                      })()}
+                      {appMode === 'proposal' && showUnitPriceColumn && (
+                        <th className="px-2 py-2 text-right font-bold w-[110px] bg-blue-100 text-blue-800 border-l border-slate-300">
+                          <div>1{group.unit || ''}単価</div>
+                          <div className="text-[9px] text-blue-500 font-normal">ケース金額÷数量</div>
+                        </th>
+                      )}
                       <th className="px-2 py-2 text-right font-bold w-[112px] bg-emerald-100 border-l-2 border-emerald-300">
                         <div className="text-emerald-900 text-[13px]">{appMode === 'proposal' ? 'ケース金額' : '金額'}</div>
                         <div className="text-[9px] text-emerald-600 font-normal">{appMode === 'proposal' ? '入数×単価' : '合計'}</div>
@@ -5080,15 +5078,16 @@ function App() {
                             <td className="px-2 py-2 text-right align-middle">
                               <input type="text" inputMode="decimal" value={(() => {
                                 const vol = Number(item.volume) || 0;
-                                if (vol <= 0 || !item.price) return '';
-                                const up = (Number(item.price) / vol) * effectiveBaseScale(group);
+                                const ps = Number(item.packSize) || 0;
+                                if (vol <= 0 || ps <= 0 || !item.price) return '';
+                                const up = (ps * Number(item.price)) / vol;
                                 return up % 1 === 0 ? up.toLocaleString('ja-JP') : up.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
                               })()} onChange={e => {
                                 const newUp = Number(parseNumberInput(e.target.value)) || 0;
                                 const vol = Number(item.volume) || 0;
-                                const bs = effectiveBaseScale(group);
-                                if (vol > 0 && bs > 0) updateItem(group.id, item.id, 'price', newUp * vol / bs);
-                              }} title="○○単価（直接編集可。単価/金額が自動再計算）" className="item-table-input w-[90px] bg-blue-50 border border-blue-300 rounded px-2 py-1 text-right outline-none font-normal text-slate-800 no-spin" placeholder="0" />
+                                const ps = Number(item.packSize) || 0;
+                                if (vol > 0 && ps > 0) updateItem(group.id, item.id, 'price', newUp * vol / ps);
+                              }} title="1個あたりの単価（直接編集可。単価が自動再計算されます）" className="item-table-input w-[90px] bg-blue-50 border border-blue-300 rounded px-2 py-1 text-right outline-none font-normal text-slate-800 no-spin" placeholder="0" />
                             </td>
                           )}
                           <td className="px-2 py-2 text-right align-middle">
@@ -5139,7 +5138,7 @@ function App() {
                             <td colSpan={qpCols} className="px-3 pt-0 pb-2">
                               <div className="flex items-center gap-2 pl-4">
                                 <span className="text-[10px] font-bold text-blue-700 shrink-0">└ 備考</span>
-                                <input value={item.memo || ''} onChange={e => updateItem(group.id, item.id, 'memo', e.target.value)} placeholder="任意：例 定価¥1,200／6月〜改定／セット内容 など（未入力なら印刷に出ません）" className="flex-1 max-w-[640px] text-xs px-2 py-1.5 border border-blue-200 rounded outline-none focus:border-blue-500 bg-white text-slate-700" />
+                                <input value={item.memo || ''} onChange={e => updateItem(group.id, item.id, 'memo', e.target.value)} placeholder="任意：例 30枚×20袋／定価¥1,200／6月〜改定 など（未入力なら印刷に出ません）" className="flex-1 max-w-[640px] text-xs px-2 py-1.5 border border-blue-200 rounded outline-none focus:border-blue-500 bg-white text-slate-700" />
                               </div>
                             </td>
                           </tr>
@@ -5165,13 +5164,14 @@ function App() {
                       {appMode === 'proposal' && showUnitPriceColumn && (() => {
                         const vol = Number(inp.volume) || 0;
                         const pri = Number(inp.price) || 0;
-                        const upVal = (vol > 0 && pri > 0) ? (pri / vol) * effectiveBaseScale(group) : 0;
+                        const ps = Number(inp.packSize) || 0;
+                        const upVal = (vol > 0 && ps > 0 && pri > 0) ? (ps * pri) / vol : 0;
                         const upStr = upVal === 0 ? '' : (upVal % 1 === 0 ? upVal.toLocaleString('ja-JP') : upVal.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 }));
                         return <td className="px-2 py-2 text-right"><input type="text" inputMode="decimal" value={upStr} onChange={e => {
                           const newUp = Number(parseNumberInput(e.target.value)) || 0;
                           const v = Number(inp.volume) || 0;
-                          const bs = effectiveBaseScale(group);
-                          if (v > 0 && bs > 0) handleInputChange(group.id, 'price', newUp * v / bs);
+                          const p = Number(inp.packSize) || 0;
+                          if (v > 0 && p > 0) handleInputChange(group.id, 'price', newUp * v / p);
                         }} placeholder="単価" className="item-table-input w-[90px] bg-blue-50 border border-blue-300 rounded px-2 py-1 text-right outline-none font-normal no-spin" /></td>;
                       })()}
                       <td className="px-2 py-2 text-right font-bold text-emerald-800 bg-emerald-50/40">¥{((appMode === 'proposal' ? Number(inp.packSize)||0 : Number(inp.volume)||0) * (Number(inp.price)||0)).toLocaleString()}</td>
@@ -5205,7 +5205,7 @@ function App() {
                         <td colSpan={qpCols} className="px-3 pt-0 pb-2">
                           <div className="flex items-center gap-2 pl-4">
                             <span className="text-[10px] font-bold text-blue-700 shrink-0">└ 備考</span>
-                            <input value={inp.memo || ''} onChange={e => handleInputChange(group.id, 'memo', e.target.value)} placeholder="任意：例 定価¥1,200／6月〜改定 など（未入力なら印刷に出ません）" className="flex-1 max-w-[640px] text-xs px-2 py-1.5 border border-blue-200 rounded outline-none focus:border-blue-500 bg-white text-slate-700" />
+                            <input value={inp.memo || ''} onChange={e => handleInputChange(group.id, 'memo', e.target.value)} placeholder="任意：例 30枚×20袋／定価¥1,200／6月〜改定 など（未入力なら印刷に出ません）" className="flex-1 max-w-[640px] text-xs px-2 py-1.5 border border-blue-200 rounded outline-none focus:border-blue-500 bg-white text-slate-700" />
                           </div>
                         </td>
                       </tr>
