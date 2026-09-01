@@ -1681,6 +1681,20 @@ function App() {
       } catch (err) { notify('登録エラー: ' + (err?.message||err), 'error'); }
     }
   };
+  // 既存のメーカーフォルダへ直接ドラッグ&ドロップで登録（上の「新規登録」欄を経由しなくてよい）
+  const registerFilesToMakerFolder = async (files, makerName) => {
+    files = Array.from(files || []);
+    if (files.length === 0) return;
+    const MAX_SIZE = 10 * 1024 * 1024;
+    for (const f of files) {
+      if (f.size > MAX_SIZE) { notify(`「${f.name}」は10MB超のため登録できません`, 'error'); continue; }
+      try {
+        const data = await fileToBase64(f);
+        setMakerDataList(prev => [{ id: genId('mk'), makerName, fileName: f.name, fileType: f.type, fileSize: f.size, data, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName||'' }, ...prev]);
+        notify(`「${makerName}」に「${f.name}」を登録しました`, 'success');
+      } catch (err) { notify('登録エラー: ' + (err?.message||err), 'error'); }
+    }
+  };
   // メーカーデータを営業所共有へ送信
   // 【修正】従来は配列全体を毎回書き込んでいたため、ファイルが増えると
   // 書込サイズが肥大化し共有エラーになっていた。1ファイルずつ個別の子ノード
@@ -6442,16 +6456,16 @@ function App() {
                   <div className="text-center py-4 text-slate-400 text-xs">{makerDataList.length === 0 ? 'まだ登録がありません' : '条件に一致するデータがありません'}</div>
                 ) : ownGroups.map(g => {
                   const key = 'own:'+g.name; const open = isOpen(key);
-                  const isDropHi = makerDropTarget === g.name && makerDragName && makerDragName !== g.name;
+                  const isDropHi = makerDropTarget === g.name && (!makerDragName || makerDragName !== g.name);
                   return (
                     <div key={key}
                       draggable
                       onDragStart={(e) => { makerDragNameRef.current = g.name; setMakerDragName(g.name); try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', g.name); } catch {} }}
                       onDragEnd={() => { makerDragNameRef.current = null; setMakerDragName(null); setMakerDropTarget(null); }}
-                      onDragOver={(e) => { const d = makerDragName || makerDragNameRef.current; if (d && d !== g.name) { e.preventDefault(); setMakerDropTarget(g.name); } }}
+                      onDragOver={(e) => { const isExtFile = e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'); const d = makerDragName || makerDragNameRef.current; if (isExtFile || (d && d !== g.name)) { e.preventDefault(); setMakerDropTarget(g.name); } }}
                       onDragLeave={() => { if (makerDropTarget === g.name) setMakerDropTarget(null); }}
-                      onDrop={(e) => { e.preventDefault(); const src = makerDragNameRef.current || makerDragName || (e.dataTransfer && e.dataTransfer.getData('text/plain')); makerDragNameRef.current = null; setMakerDropTarget(null); setMakerDragName(null); if (src && src !== g.name) mergeMakerFolder(src, g.name); }}
-                      title="ドラッグして別のメーカーへ重ねると統合できます"
+                      onDrop={(e) => { e.preventDefault(); const extFiles = e.dataTransfer?.files; if (extFiles && extFiles.length > 0) { setMakerDropTarget(null); registerFilesToMakerFolder(extFiles, g.name); return; } const src = makerDragNameRef.current || makerDragName || (e.dataTransfer && e.dataTransfer.getData('text/plain')); makerDragNameRef.current = null; setMakerDropTarget(null); setMakerDragName(null); if (src && src !== g.name) mergeMakerFolder(src, g.name); }}
+                      title="ここにファイルをドラッグ&ドロップで登録／別のメーカーフォルダをドラッグして重ねると統合できます"
                       className={`border rounded-lg mb-2 overflow-hidden ${isDropHi ? 'border-emerald-500 ring-2 ring-emerald-300 bg-emerald-50' : 'border-slate-200'}`}>
                       <button onClick={() => toggle(key)} className="w-full flex items-center gap-2 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-left cursor-move">
                         <span className="text-slate-400 text-xs">⠿</span>
