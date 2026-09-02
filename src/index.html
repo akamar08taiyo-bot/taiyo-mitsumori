@@ -4212,14 +4212,17 @@ function App() {
         // 商品名 + 任意の備考メモ（あれば下に薄い色で表示）
         const memoHtml = (item.memo && String(item.memo).trim()) ? `<div class="memo">${escapeHTML(String(item.memo).trim())}</div>` : '';
         let cols = `<td class="pname"><div class="name">${escapeHTML(item.name).replace(/\n/g, '<br>')}</div>${memoHtml}</td>`;
+        // 商品名が空の行（行追加しただけで未入力の空白行）は、単位・¥0のような
+        // 意味のない数字を印刷に出さない（印刷が水増しされて見えるのを防ぐ）
+        const isBlankRow = !(item.name && String(item.name).trim());
         if (appMode === 'proposal') {
           // 数量：整数ならそのまま、小数なら1桁まで表示（例: 200 → 200、1.55 → 1.6）
           const volNum = Number(item.volume);
           const volStr = (item.volume === '' || item.volume === null || item.volume === undefined) ? '' :
             (!isFinite(volNum) ? String(item.volume) :
             (volNum % 1 === 0 ? volNum.toLocaleString('ja-JP') : volNum.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 })));
-          cols += `<td class="num">${escapeHTML(volStr)}${showUnit ? `<span class="unit">${escapeHTML(item.unitOverride ?? group.unit)}</span>` : ''}</td>`;
-          if (showCaseMode) cols += `<td class="num">${formatNumber(item.packSize)}</td>`;
+          cols += `<td class="num">${escapeHTML(volStr)}${(showUnit && !isBlankRow) ? `<span class="unit">${escapeHTML(item.unitOverride ?? group.unit)}</span>` : ''}</td>`;
+          if (showCaseMode) cols += `<td class="num">${isBlankRow ? '' : formatNumber(item.packSize)}</td>`;
         } else {
           // 見積モードの数量も同様に整数/小数1桁で表示
           const volNum2 = Number(item.volume);
@@ -4228,27 +4231,33 @@ function App() {
             (volNum2 % 1 === 0 ? volNum2.toLocaleString('ja-JP') : volNum2.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 })));
           cols += `<td class="num">${escapeHTML(volStr2)}</td>`;
         }
-        cols += `<td class="price strong">¥${(Number(item.price)||0).toLocaleString('ja-JP')}</td>`;
+        cols += `<td class="price strong">${isBlankRow ? '' : `¥${(Number(item.price)||0).toLocaleString('ja-JP')}`}</td>`;
         const factor = appMode === 'proposal' ? (Number(item.packSize)||0) : (Number(item.volume)||0);
         const _amt = factor*(Number(item.price)||0);
-        cols += `<td class="price">¥${_amt.toLocaleString()}</td>`;
+        cols += `<td class="price">${isBlankRow ? '' : `¥${_amt.toLocaleString()}`}</td>`;
         if (appMode === 'quote' || (appMode === 'proposal' && showGrandTotal)) {
-          const _tm = item.taxMode || 'exclusive';
-          let _tx = 0;
-          if (_amt > 0) {
-            if (_tm === 'inclusive') _tx = _amt - Math.round(_amt / 1.1);
-            else if (_tm === 'exclusive') _tx = Math.round(_amt * 0.1);
+          let _txCell = '';
+          if (!isBlankRow) {
+            const _tm = item.taxMode || 'exclusive';
+            let _tx = 0;
+            if (_amt > 0) {
+              if (_tm === 'inclusive') _tx = _amt - Math.round(_amt / 1.1);
+              else if (_tm === 'exclusive') _tx = Math.round(_amt * 0.1);
+            }
+            // 税込→内消費税として控えめ表示、税抜→通常表示、非課税→「非課税」
+            _txCell = _tm === 'nontax' ? '<span class="tax-nontax">非課税</span>'
+              : _tm === 'inclusive' ? `<span class="tax-incl">内¥${_tx.toLocaleString()}</span>`
+              : `¥${_tx.toLocaleString()}`;
           }
-          // 税込→内消費税として控えめ表示、税抜→通常表示、非課税→「非課税」
-          const _txCell = _tm === 'nontax' ? '<span class="tax-nontax">非課税</span>'
-            : _tm === 'inclusive' ? `<span class="tax-incl">内¥${_tx.toLocaleString()}</span>`
-            : `¥${_tx.toLocaleString()}`;
           cols += `<td class="price tax-cell">${_txCell}</td>`;
         }
         if (appMode === 'proposal' && showUnitPriceColumn) {
-          const up = Number(item.unitPrice || 0);
-          const upStr = up % 1 === 0 ? up.toLocaleString('ja-JP') : up.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-          cols += `<td class="unit-price">¥${upStr}</td>`;
+          let upStr = '';
+          if (!isBlankRow) {
+            const up = Number(item.unitPrice || 0);
+            upStr = up % 1 === 0 ? `¥${up.toLocaleString('ja-JP')}` : `¥${up.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}`;
+          }
+          cols += `<td class="unit-price">${upStr}</td>`;
         }
         return `<tr${trClass}>${cols}</tr>`;
       }).join('');
