@@ -921,6 +921,10 @@ function App() {
   const [officeFlyerFolderDropTarget, setOfficeFlyerFolderDropTarget] = useState(null); // 営業所共有：チラシ・事例集フォルダへドラッグ中のドロップ先メーカー名
   const [officeOrderFolderDropTarget, setOfficeOrderFolderDropTarget] = useState(null); // 営業所共有：発注書フォルダへドラッグ中のドロップ先メーカー名
   const [officeMakerFolderDropTarget, setOfficeMakerFolderDropTarget] = useState(null); // 営業所共有：仕切りフォルダへドラッグ中のドロップ先メーカー名
+  // 見積カードに「この見積で使った仕切り」を紐付けるピッカー
+  const [makerPickerProposalId, setMakerPickerProposalId] = useState(null); // 開いている見積のid（nullなら閉じている）
+  const [makerPickerSelected, setMakerPickerSelected] = useState(() => new Set());
+  const [makerPickerSearch, setMakerPickerSearch] = useState('');
   const [showCloseConfirm, setShowCloseConfirm] = useState(false); // 「閉じる」時の保存確認ダイアログ（施設フォルダ内・変更あり時）
   const [pendingPrintProp, setPendingPrintProp] = useState(null); // 管理画面からPDF保存：読込完了後に印刷するための予約ID
   // メーカーデータを IndexedDB から読み込み（旧 localStorage からは自動移行）。
@@ -2402,6 +2406,29 @@ function App() {
   const renameProposal = (pid, name) => {
     const n = (name||'').trim(); if (!n) return;
     setSavedProposals(prev => prev.map(p => p.id === pid ? { ...p, name: n } : p));
+  };
+  // 見積カードへ「この見積で使った仕切り」を紐付けるピッカーを開く
+  const openMakerPicker = (p) => {
+    setMakerPickerProposalId(p.id);
+    setMakerPickerSelected(new Set((p.linkedMakers || []).map(m => m.id)));
+    setMakerPickerSearch('');
+  };
+  const closeMakerPicker = () => { setMakerPickerProposalId(null); setMakerPickerSelected(new Set()); setMakerPickerSearch(''); };
+  const toggleMakerPickerSelect = (id) => setMakerPickerSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  // 選択を確定：makerDataList / officeSharedMakerData から該当レコードを探し、
+  // 見積側には data(base64本体)を持たせず軽量な参照情報だけを保存する
+  const confirmMakerPicker = () => {
+    if (!makerPickerProposalId) return;
+    const all = [...makerDataList, ...officeSharedMakerData];
+    const linked = all.filter(m => m && makerPickerSelected.has(m.id)).map(m => ({
+      id: m.id, makerName: m.makerName || '', fileName: m.fileName || '', effectiveDate: m.effectiveDate || '', _shared: !!m._sharedBy,
+    }));
+    setSavedProposals(prev => prev.map(p => p.id === makerPickerProposalId ? { ...p, linkedMakers: linked } : p));
+    notify(linked.length > 0 ? `仕切り${linked.length}件を紐付けました` : '仕切りの紐付けを解除しました', 'success');
+    closeMakerPicker();
+  };
+  const unlinkMakerFromProposal = (pid, makerId) => {
+    setSavedProposals(prev => prev.map(p => p.id === pid ? { ...p, linkedMakers: (p.linkedMakers || []).filter(m => m.id !== makerId) } : p));
   };
 
   const draftLoadedRef = useRef(false);
@@ -6051,6 +6078,9 @@ function App() {
                             <div className="flex gap-1.5 shrink-0">
                               <button onClick={() => { handleLoad(p); setPendingPrintProp(p.id); }} title="この見積を開いてPDF（印刷）プレビューを表示" className="px-3.5 py-2 bg-red-100 text-red-700 font-bold rounded-md text-sm hover:bg-red-200">📄 PDF</button>
                               {!p._isShared && (
+                                <button onClick={() => openMakerPicker(p)} title="この見積で使った仕切りを選んでセットにする" className="px-3.5 py-2 bg-purple-100 text-purple-700 font-bold rounded-md text-sm hover:bg-purple-200">🏭 仕切りを選ぶ{(p.linkedMakers||[]).length > 0 ? `（${p.linkedMakers.length}）` : ''}</button>
+                              )}
+                              {!p._isShared && (
                                 <button onClick={async () => {
                                   if (!confirm(`「${p.name}」を営業所「${loginInfo?.officeCode||''}」全員で共有しますか？\n（同営業所の全員が閲覧・コピーできるようになります）`)) return;
                                   const folder = p.folderId ? folders.find(f => f.id === p.folderId) : null;
@@ -6084,6 +6114,17 @@ function App() {
                           </select>
                           <span className="text-xs text-slate-400">← 別の施設フォルダへ移動</span>
                         </div>
+                        {(p.linkedMakers || []).length > 0 && (
+                          <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                            <span className="text-xs text-purple-700 font-bold shrink-0">🏭 この見積で使った仕切り:</span>
+                            {p.linkedMakers.map(m => (
+                              <span key={m.id} className="inline-flex items-center gap-1 text-xs bg-purple-100 text-purple-800 rounded-full pl-2.5 pr-1 py-1 font-bold">
+                                {m.makerName}{m.effectiveDate ? `（${String(m.effectiveDate).replace(/-/g,'/')}〜）` : ''}
+                                {!p._isShared && <button onClick={(e) => { e.stopPropagation(); unlinkMakerFromProposal(p.id, m.id); }} title="紐付けを解除" className="w-4 h-4 flex items-center justify-center rounded-full hover:bg-purple-300 text-purple-700"><X className="w-3 h-3" /></button>}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     );
                     // 営業所共有では施設（フォルダ）ごとにまとめ、既定で閉じた状態で一覧表示する
@@ -6253,6 +6294,85 @@ function App() {
           </div>
         </div>
       )}
+      {/* === この見積で使った仕切りを選ぶピッカー === */}
+      {makerPickerProposalId && (() => {
+        const q = makerPickerSearch.trim().toLowerCase();
+        const matchQ = (m) => !q || (m.makerName||'').toLowerCase().includes(q) || (m.fileName||'').toLowerCase().includes(q);
+        const groupList = (list, sharedFlag) => {
+          const groups = {};
+          list.filter(m => m && matchQ(m)).forEach(m => { const k = m.makerName || '(未分類)'; (groups[k] = groups[k] || []).push(m); });
+          return Object.keys(groups).sort((a,b) => a.localeCompare(b,'ja')).map(name => ({ name, files: groups[name].sort((a,b) => (b.uploadedAt||0)-(a.uploadedAt||0)), shared: sharedFlag }));
+        };
+        const ownList = groupList(makerDataList, false);
+        const sharedList = groupList(officeSharedMakerData, true);
+        const pName = (savedProposals.find(x => x.id === makerPickerProposalId) || {}).name || '';
+        return (
+        <div className="fixed inset-0 bg-black/50 z-[72] flex items-center justify-center p-3" onClick={closeMakerPicker}>
+          <div onClick={e => e.stopPropagation()} className="bg-white rounded-lg shadow-2xl w-full max-w-[640px] max-h-[86vh] flex flex-col overflow-hidden">
+            <div className="px-4 py-2.5 bg-purple-600 text-white shrink-0 flex items-center gap-2">
+              <span className="font-bold truncate">🏭 「{pName}」で使った仕切りを選ぶ</span>
+              <button onClick={closeMakerPicker} className="ml-auto hover:bg-purple-700 rounded px-2.5 py-1 text-sm font-bold shrink-0">✕</button>
+            </div>
+            <div className="px-4 py-2 border-b border-slate-200 shrink-0">
+              <input type="text" value={makerPickerSearch} onChange={e => setMakerPickerSearch(e.target.value)} placeholder="メーカー名・ファイル名で検索" className="w-full px-3 py-1.5 border border-slate-300 rounded text-sm outline-none focus:border-purple-500" />
+              <div className="text-[11px] text-slate-400 mt-1">複数選択できます。選んだ仕切りはこの見積のカードに表示されます</div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3 space-y-3">
+              {ownList.length === 0 && sharedList.length === 0 && (
+                <div className="text-center py-10 text-slate-400 text-sm">{q ? '条件に一致する仕切りがありません' : '登録されている仕切りがありません'}</div>
+              )}
+              {ownList.length > 0 && (
+                <div>
+                  <div className="text-xs font-bold text-slate-500 mb-1">自分の仕切り</div>
+                  <div className="space-y-1.5">
+                    {ownList.map(g => (
+                      <div key={'o:'+g.name} className="border border-slate-200 rounded-lg overflow-hidden">
+                        <div className="px-2.5 py-1.5 bg-slate-100 text-xs font-bold text-slate-700">📁 {g.name}</div>
+                        <div className="divide-y divide-slate-100">
+                          {g.files.map(m => (
+                            <label key={m.id} className="flex items-center gap-2 px-2.5 py-1.5 hover:bg-purple-50 cursor-pointer">
+                              <input type="checkbox" checked={makerPickerSelected.has(m.id)} onChange={() => toggleMakerPickerSelect(m.id)} className="w-4 h-4 shrink-0" />
+                              <span className="text-sm text-slate-800 truncate flex-1">{m.effectiveDate && <span className="font-bold text-purple-700">📅{String(m.effectiveDate).replace(/-/g,'/')}〜 </span>}{m.fileName}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {sharedList.length > 0 && (
+                <div>
+                  <div className="text-xs font-bold text-emerald-600 mb-1">営業所共有の仕切り</div>
+                  <div className="space-y-1.5">
+                    {sharedList.map(g => (
+                      <div key={'s:'+g.name} className="border border-emerald-200 rounded-lg overflow-hidden">
+                        <div className="px-2.5 py-1.5 bg-emerald-100 text-xs font-bold text-emerald-800">📁 {g.name}</div>
+                        <div className="divide-y divide-emerald-100">
+                          {g.files.map(m => (
+                            <label key={m.id} className="flex items-center gap-2 px-2.5 py-1.5 hover:bg-purple-50 cursor-pointer">
+                              <input type="checkbox" checked={makerPickerSelected.has(m.id)} onChange={() => toggleMakerPickerSelect(m.id)} className="w-4 h-4 shrink-0" />
+                              <span className="text-sm text-slate-800 truncate flex-1">{m.effectiveDate && <span className="font-bold text-purple-700">📅{String(m.effectiveDate).replace(/-/g,'/')}〜 </span>}{m.fileName}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="px-4 py-3 border-t border-slate-200 shrink-0 flex items-center justify-between gap-2">
+              <span className="text-xs text-slate-500 font-bold">{makerPickerSelected.size}件選択中</span>
+              <div className="flex gap-2">
+                <button onClick={closeMakerPicker} className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-md text-sm">キャンセル</button>
+                <button onClick={confirmMakerPicker} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-md text-sm">この内容で決定</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
       {/* === 月間使用個数の入力モーダル（→年間コスト試算書） === */}
       {showUsageInput && (
         <div className="fixed inset-0 bg-black/50 z-[68] flex items-center justify-center p-3" onClick={() => setShowUsageInput(false)}>
