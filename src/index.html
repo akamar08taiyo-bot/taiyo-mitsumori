@@ -498,6 +498,20 @@ const getUnitHeaderLabel = (unit) => {
   if (unit === '台') return '台数';
   return '数量';
 };
+// 帳票の日付表記を「2026年9月13日」に統一する（見積書・価格改定・提案資料で表記がばらついていた）
+const formatJpDate = (ymd) => {
+  const p = String(ymd || '').split('-');
+  if (p.length === 3) return `${p[0]}年${parseInt(p[1], 10)}月${parseInt(p[2], 10)}日`;
+  return String(ymd || '');
+};
+// ファイルサイズを読みやすく整形（1KB未満を 0KB と表示しない）
+const formatFileSize = (bytes) => {
+  const n = Number(bytes) || 0;
+  if (n <= 0) return '0KB';
+  if (n < 1024) return n + 'B';
+  if (n < 1024 * 1024) return Math.round(n / 1024) + 'KB';
+  return (Math.round(n / 1024 / 1024 * 10) / 10) + 'MB';
+};
 // 小数1桁表示
 const formatDecimal1 = (v) => {
   if (v === null || v === undefined || v === '') return '';
@@ -711,6 +725,10 @@ function App() {
       if (showSyncPopover) { setShowSyncPopover(false); return; }
       if (showShareMenu) { setShowShareMenu(false); return; }
       if (showUtilMenu) { setShowUtilMenu(false); return; }
+      if (previewAttachment) { closeAttachmentPreview(); return; }
+      if (proposalDocHtml) { setProposalDocHtml(null); return; }
+      if (showUsageInput) { setShowUsageInput(false); return; }
+      if (showMakerModal) { setShowMakerModal(false); return; }
       if (showImportShareModal) { setShowImportShareModal(false); return; }
       if (showFavoritesModal) { setShowFavoritesModal(false); return; }
       if (showSaveModal) { setShowSaveModal(false); return; }
@@ -840,6 +858,85 @@ function App() {
   }, [appMode]);
 
   const [attachments, setAttachments] = useState([]);
+  // === 見積添付ファイルの本体（base64）は IndexedDB に置く ===
+  // 以前は添付の base64 を見積データにそのまま埋め込んで localStorage に保存していた。
+  // localStorage の上限は約5MBしかないため、スマホ写真を1枚添付しただけで
+  //   ・見積の保存が失敗する
+  //   ・自動バックアップ（5世代）が容量超過で丸ごと動かなくなる
+  // という状態になっていた。仕切りデータ・フォルダ添付と同じく IndexedDB に本体を保存し、
+  // 見積データ側には id・ファイル名・サイズ等のメタ情報だけを持たせる。
+  const [attachmentBlobs, setAttachmentBlobs] = useState({});
+  const attachBlobsLoadedRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let data = {};
+      try {
+        const fromIdb = await idbGet('quoteAttachmentBlobs');
+        if (fromIdb && typeof fromIdb === 'object' && !Array.isArray(fromIdb)) data = fromIdb;
+      } catch (e) { console.warn('quoteAttachmentBlobs idb read error', e); }
+      if (!cancelled) {
+        // 読込完了前に添付された分（prev）を消さないようマージする
+        if (Object.keys(data).length > 0) setAttachmentBlobs(prev => ({ ...data, ...prev }));
+        attachBlobsLoadedRef.current = true;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!attachBlobsLoadedRef.current) return;
+    idbSet('quoteAttachmentBlobs', attachmentBlobs).catch((e) => {
+      console.warn('quoteAttachmentBlobs save error', e);
+      try { notify('添付ファイルの保存に失敗しました。ファイル容量が大きすぎる可能性があります。', 'error'); } catch {}
+    });
+  }, [attachmentBlobs]);
+  // 添付1件の本体を取り出す（古い形式＝見積に直接埋め込まれた data も読める）
+  const attachmentData = (att) => (att && (att.data || attachmentBlobs[att.id])) || null;
+  // 保存用：本体を落としてメタ情報だけにする
+  const stripAttachmentData = (list) => (Array.isArray(list) ? list : []).map(a => {
+    if (!a) return a;
+    const { data, ...rest } = a;
+    return rest;
+  });
+  // 共有・書き出し用：本体を復元して埋め込む（相手の端末でも開けるように）
+  const withAttachmentData = (list) => (Array.isArray(list) ? list : []).map(a => {
+    if (!a) return a;
+    const d = attachmentData(a);
+    return d ? { ...a, data: d } : { ...a };
+  });
+  // 読み込んだ見積に本体が埋まっていたら IndexedDB 側へ移す（旧データ・共有データの移行）
+  const rememberAttachmentData = (list) => {
+    const add = {};
+    (Array.isArray(list) ? list : []).forEach(a => { if (a && a.id && a.data) add[a.id] = a.data; });
+    if (Object.keys(add).length > 0) setAttachmentBlobs(prev => ({ ...prev, ...add }));
+  };
+  // 画像添付のサムネイル用 Blob URL。
+  // 数MBの data URL を <img src> に直接渡すと描画が固まるため、必ず Blob URL に変換する。
+  const [attachmentThumbs, setAttachmentThumbs] = useState({});
+  const isImageAttachment = (a) => !!a && (((a.type || '').startsWith('image/')) || /\.(png|jpe?g|gif|webp|bmp)$/i.test(a.name || ''));
+  useEffect(() => {
+    const urls = {};
+    (attachments || []).forEach(a => {
+      if (!isImageAttachment(a)) return;
+      const d = (a.data || attachmentBlobs[a.id]);
+      if (!d) return;
+      try { urls[a.id] = dataUrlToBlobUrl(d); } catch (e) { /* 壊れたデータは無視してアイコン表示に落とす */ }
+    });
+    setAttachmentThumbs(urls);
+    return () => { Object.keys(urls).forEach(k => { try { URL.revokeObjectURL(urls[k]); } catch {} }); };
+  }, [attachments, attachmentBlobs]);
+  // どの見積からも参照されなくなった本体を IndexedDB から捨てる
+  const pruneAttachmentBlobs = (proposals, liveAttachments) => {
+    const used = new Set();
+    (proposals || []).forEach(p => (p?.attachments || []).forEach(a => { if (a?.id) used.add(a.id); }));
+    (liveAttachments || []).forEach(a => { if (a?.id) used.add(a.id); });
+    setAttachmentBlobs(prev => {
+      const next = {};
+      let changed = false;
+      Object.keys(prev).forEach(k => { if (used.has(k)) next[k] = prev[k]; else changed = true; });
+      return changed ? next : prev;
+    });
+  };
   // メーカー仕切りデータ管理
   const [makerDataList, setMakerDataList] = useState([]);
   const makerLoadedRef = useRef(false);
@@ -1004,6 +1101,25 @@ function App() {
   };
   // 営業所共有のメーカーデータ
   const [officeSharedMakerData, setOfficeSharedMakerData] = useState([]);
+
+  // === 仕切りサイドビューア：表示中ファイルの Blob URL ===
+  // 数MBの base64 data URL を <embed>/<img> の src に直接渡すと、ブラウザが固まったり
+  // 白紙になったりする（PDFや写真の仕切りで発生）。表示対象が変わるたびに Blob URL を
+  // 作り直し、古い URL は必ず解放する。
+  const [viewerBlobUrl, setViewerBlobUrl] = useState(null);
+  const viewerFile = useMemo(() => {
+    if (!showShikiriViewer) return null;
+    const all = [...makerDataList, ...officeSharedMakerData].filter(Boolean);
+    return all.find(m => m.id === viewerMakerId) || all[0] || null;
+  }, [showShikiriViewer, makerDataList, officeSharedMakerData, viewerMakerId]);
+  useEffect(() => {
+    if (!viewerFile || !viewerFile.data) { setViewerBlobUrl(null); return; }
+    let url = null;
+    try { url = dataUrlToBlobUrl(viewerFile.data); } catch (e) { console.warn('viewer blob url error', e); }
+    setViewerBlobUrl(url);
+    return () => { if (url) { try { URL.revokeObjectURL(url); } catch {} } };
+  }, [viewerFile?.id, viewerFile?.data]);
+
   const [savedProposals, setSavedProposals] = useState(() => loadStorage(STORAGE_KEYS.PROPOSALS, []));
   const [folders, setFolders] = useState(() => loadStorage(STORAGE_KEYS.FOLDERS, []));
   const [selectedFolderId, setSelectedFolderId] = useState(null);
@@ -1065,7 +1181,8 @@ function App() {
       version: 1,
       from: { officeCode: loginInfo?.officeCode || '', name: loginInfo?.userName || '', hash: (loadStorage(STORAGE_KEYS.USERS, []).find(u => u.key === `${loginInfo?.officeCode}__${loginInfo?.userName}`)?.hash) || '' },
       exportedAt: Date.now(),
-      folders, savedProposals,
+      folders,
+      savedProposals: savedProposals.map(p => ({ ...p, attachments: withAttachmentData(p.attachments) })),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1093,7 +1210,8 @@ function App() {
       if (ex) nameToNewId[f.id] = ex.id;
       else { const nf = newFolders.find(x => x.name === f.name); if (nf) nameToNewId[f.id] = nf.id; }
     });
-    const remappedProposals = importedProposals.map(p => ({ ...p, id: genId('prop'), folderId: p.folderId ? (nameToNewId[p.folderId] || null) : null, _importedFrom: `${from.officeCode||''}/${from.name||''}` }));
+    importedProposals.forEach(p => rememberAttachmentData(p?.attachments));
+    const remappedProposals = importedProposals.map(p => ({ ...p, id: genId('prop'), attachments: stripAttachmentData(p.attachments), folderId: p.folderId ? (nameToNewId[p.folderId] || null) : null, _importedFrom: `${from.officeCode||''}/${from.name||''}` }));
     setFolders(prev => [...newFolders, ...prev]);
     setSavedProposals(prev => [...remappedProposals, ...prev]);
     notify(`${remappedProposals.length}件の見積を取り込みました`);
@@ -1509,21 +1627,42 @@ function App() {
       if (f.size > MAX_SIZE) { notify(`「${f.name}」は10MB超のため添付できません`, 'error'); continue; }
       try {
         const data = await fileToBase64(f);
-        setAttachments(prev => [...prev, { id: genId('att'), name: f.name, size: f.size, type: f.type, data, uploadedAt: Date.now() }]);
+        const attId = genId('att');
+        // 本体は IndexedDB（attachmentBlobs）へ。見積データ側はメタ情報だけ持つ。
+        setAttachmentBlobs(prev => ({ ...prev, [attId]: data }));
+        setAttachments(prev => [...prev, { id: attId, name: f.name, size: f.size, type: f.type, uploadedAt: Date.now() }]);
         notify(`「${f.name}」を添付しました`);
       } catch (err) { notify('添付エラー: ' + (err?.message||err), 'error'); }
     }
     e.target.value = '';
   };
   const handleAttachmentDownload = (att) => {
+    const data = attachmentData(att);
+    if (!data) { notify('添付ファイルの本体が見つかりません', 'error'); return; }
+    // 数MBの data URL を href に直接入れるとブラウザが固まることがあるため Blob 経由で保存する
+    let url = null, revoke = false;
+    try { url = dataUrlToBlobUrl(data); revoke = true; } catch { url = data; }
     const a = document.createElement('a');
-    a.href = att.data; a.download = att.name;
+    a.href = url; a.download = att.name || 'attachment';
     document.body.appendChild(a); a.click();
-    setTimeout(() => a.remove(), 1000);
+    setTimeout(() => { a.remove(); if (revoke) { try { URL.revokeObjectURL(url); } catch {} } }, 1000);
   };
   const handleAttachmentDelete = (id) => {
     if (!confirm('この添付ファイルを削除しますか？')) return;
-    setAttachments(prev => prev.filter(a => a.id !== id));
+    const next = attachments.filter(a => a.id !== id);
+    setAttachments(next);
+    pruneAttachmentBlobs(savedProposals, next);
+  };
+  // 画像添付をその場でプレビュー表示する（写真を開くのにダウンロード不要にする）
+  const [previewAttachment, setPreviewAttachment] = useState(null); // { name, url }
+  const openAttachmentPreview = (att) => {
+    const data = attachmentData(att);
+    if (!data) { notify('添付ファイルの本体が見つかりません', 'error'); return; }
+    try { setPreviewAttachment({ name: att.name || '', url: dataUrlToBlobUrl(data), type: att.type || '' }); }
+    catch (e) { notify('プレビューできませんでした', 'error'); }
+  };
+  const closeAttachmentPreview = () => {
+    setPreviewAttachment(prev => { if (prev?.url) { try { URL.revokeObjectURL(prev.url); } catch {} } return null; });
   };
 
   // === メーカー仕切りデータ：アップロード/削除/ダウンロード ===
@@ -1950,7 +2089,7 @@ function App() {
 
   // === 手動バックアップ: JSON ファイルとして書き出し ===
   const downloadFullBackup = () => {
-    const data = { savedProposals, folders, makerDataList, folderAttachments, officeInfo, attachments: [], _exportedAt: new Date().toISOString(), _exportedBy: `${loginInfo?.officeCode||''}/${loginInfo?.userName||''}` };
+    const data = { savedProposals: savedProposals.map(p => ({ ...p, attachments: withAttachmentData(p.attachments) })), folders, makerDataList, folderAttachments, officeInfo, attachments: [], _exportedAt: new Date().toISOString(), _exportedBy: `${loginInfo?.officeCode||''}/${loginInfo?.userName||''}` };
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1975,9 +2114,10 @@ function App() {
         });
       }
       if (Array.isArray(data.savedProposals)) {
+        data.savedProposals.forEach(p => rememberAttachmentData(p?.attachments));
         setSavedProposals(prev => {
           const existing = new Set(prev.map(p => p.id));
-          const newOnes = data.savedProposals.filter(p => !existing.has(p.id)).map(p => ({ ...p, _importedAt: Date.now() }));
+          const newOnes = data.savedProposals.filter(p => !existing.has(p.id)).map(p => ({ ...p, attachments: stripAttachmentData(p.attachments), _importedAt: Date.now() }));
           return [...prev, ...newOnes];
         });
       }
@@ -2020,6 +2160,8 @@ function App() {
 
   const saveToOfficeShared = async (folder, proposal) => {
     if (!firebaseDB || !loginInfo || !cloudSyncEnabled) { notify('Firebase未接続のため営業所共有はできません', 'error'); return false; }
+    // 添付の本体はローカルの IndexedDB にあるため、共有時だけ埋め戻して送る
+    if (proposal && Array.isArray(proposal.attachments)) proposal = { ...proposal, attachments: withAttachmentData(proposal.attachments) };
     try {
       const r = dbRef(firebaseDB, `office-shared/${loginInfo.officeCode}`);
       const snap = await dbGet(r);
@@ -2117,7 +2259,7 @@ function App() {
         ...curProposals[idx],
         clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber,
         validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal,
-        groups, attachments, updatedAt: Date.now(), _editedBy: loginInfo.userName, _editedAt: Date.now(),
+        groups, attachments: withAttachmentData(attachments), updatedAt: Date.now(), _editedBy: loginInfo.userName, _editedAt: Date.now(),
       };
       const next = [...curProposals]; next[idx] = updated;
       await dbSet(r, cleanForFirebase({ ...cur, savedProposals: next, _updatedAt: Date.now(), _updatedBy: loginInfo.userName }));
@@ -2372,6 +2514,8 @@ function App() {
       if (draft.taxMode !== undefined) setTaxMode(draft.taxMode);
       if (draft.appMode !== undefined) setAppMode(draft.appMode);
       if (draft.showGrandTotal !== undefined) setShowGrandTotal(draft.showGrandTotal);
+      // 添付ファイル（本体は IndexedDB。ここではメタ情報だけを復元する）
+      if (Array.isArray(draft.attachments)) setAttachments(draft.attachments);
       // 他モード分のgroups/newItemsもrefに復元（モード切替時の消失を防止）
       if (Array.isArray(draft.quoteGroups)) quoteGroupsRef.current = draft.quoteGroups;
       if (Array.isArray(draft.proposalGroups)) proposalGroupsRef.current = draft.proposalGroups;
@@ -2409,7 +2553,7 @@ function App() {
       const _proposalGroups = appMode === 'proposal' ? groups : (proposalGroupsRef.current || null);
       const _quoteNewItems = appMode === 'quote' ? newItems : (quoteNewItemsRef.current || null);
       const _proposalNewItems = appMode === 'proposal' ? newItems : (proposalNewItemsRef.current || null);
-      const d = { clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, quoteGroups: _quoteGroups, proposalGroups: _proposalGroups, quoteNewItems: _quoteNewItems, proposalNewItems: _proposalNewItems, currentProposalId: editingSharedQuote ? null : currentProposalId };
+      const d = { clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, quoteGroups: _quoteGroups, proposalGroups: _proposalGroups, quoteNewItems: _quoteNewItems, proposalNewItems: _proposalNewItems, attachments: stripAttachmentData(attachments), currentProposalId: editingSharedQuote ? null : currentProposalId };
       try {
         const s = JSON.stringify(d);
         if (s === lastDraftStringRef.current) return;
@@ -2418,7 +2562,7 @@ function App() {
       } catch {}
     }, 500);
     return () => { if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current); };
-  }, [clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, newItems, currentProposalId, editingSharedQuote]);
+  }, [clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, newItems, attachments, currentProposalId, editingSharedQuote]);
 
   const notifyTimerRef = useRef(null);
   // type: 'info' (デフォルト) | 'success' | 'error'
@@ -2754,7 +2898,7 @@ function App() {
     }));
   };
   const handleClearAll = () => {
-    if (confirmClearAll) { setGroups([]); setNewItems({}); setAttachments([]); setCurrentProposalId(null); setConfirmClearAll(false); notify('全データをリセットしました'); }
+    if (confirmClearAll) { setGroups([]); setNewItems({}); setAttachments([]); pruneAttachmentBlobs(savedProposals, []); setCurrentProposalId(null); setConfirmClearAll(false); notify('全データをリセットしました'); }
     else { setConfirmClearAll(true); setTimeout(() => setConfirmClearAll(false), 3000); }
   };
 
@@ -2764,7 +2908,7 @@ function App() {
     let shareToOffice = false;
     if (folderId === '__office_shared__') { shareToOffice = true; folderId = null; } // 営業所共有：自分の控えはフォルダなしで保持し、共有へ複製
     if (folderId === '__new__') folderId = addFolder(newFolderInputName);
-    const np = { id: genId('prop'), name: saveName, folderId: folderId || null, clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal, groups, attachments, createdAt: Date.now(), updatedAt: Date.now() };
+    const np = { id: genId('prop'), name: saveName, folderId: folderId || null, clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal, groups, attachments: stripAttachmentData(attachments), createdAt: Date.now(), updatedAt: Date.now() };
     setSavedProposals(prev => [np, ...prev]);
     setCurrentProposalId(np.id);
     savedSnapshotRef.current = quoteSnapshot(np); // 保存時点を基準に
@@ -2786,7 +2930,7 @@ function App() {
       ...p,
       clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber,
       validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, appMode, showGrandTotal,
-      groups, attachments, updatedAt: Date.now(),
+      groups, attachments: stripAttachmentData(attachments), updatedAt: Date.now(),
     } : p));
     const target = savedProposals.find(p => p.id === currentProposalId);
     savedSnapshotRef.current = liveQuoteSnapshot(); // 上書き保存時点を基準に
@@ -2802,7 +2946,7 @@ function App() {
     setProposalDateText(`${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`);
     setRemarks(''); setBottomRemarks('');
     setGroups(makeEmptyGroups()); setNewItems({ 'g-1': getEmptyItem() });
-    setAttachments([]); setSaveName('');
+    setAttachments([]); pruneAttachmentBlobs(savedProposals, []); setSaveName('');
     setShowCloseConfirm(false);
     if (openedFromManageRef.current) {
       // フォルダ管理から開いた見積を閉じた→フォルダ管理画面に戻す
@@ -2899,7 +3043,8 @@ function App() {
       _type: 'taiyo-share', version: 2,
       from: { officeCode: loginInfo?.officeCode || '', name: loginInfo?.userName || '', hash: loginInfo?.passwordHash || (loadStorage(STORAGE_KEYS.USERS, []).find(u => u.key === `${loginInfo?.officeCode}__${loginInfo?.userName}`)?.hash) || '' },
       exportedAt: Date.now(),
-      folders, savedProposals,
+      folders,
+      savedProposals: savedProposals.map(p => ({ ...p, attachments: withAttachmentData(p.attachments) })),
     };
     const json = JSON.stringify(payload, null, 2);
     const date = new Date().toISOString().slice(0,10);
@@ -2945,7 +3090,8 @@ function App() {
       _type: 'taiyo-share', version: 2,
       from: { officeCode: loginInfo?.officeCode || '', name: loginInfo?.userName || '', hash: loginInfo?.passwordHash || '' },
       exportedAt: Date.now(),
-      folders, savedProposals,
+      folders,
+      savedProposals: savedProposals.map(p => ({ ...p, attachments: withAttachmentData(p.attachments) })),
     };
     const json = JSON.stringify(payload, null, 2);
     const date = new Date().toISOString().slice(0,10);
@@ -3020,7 +3166,9 @@ function App() {
         };
       }).filter(Boolean);
       setGroups(safeGroups.length > 0 ? safeGroups : makeEmptyGroups());
-      setAttachments(Array.isArray(p.attachments) ? p.attachments : []);
+      // 共有データ・旧データは本体が埋め込まれていることがあるので IndexedDB 側へ引き取る
+      rememberAttachmentData(p.attachments);
+      setAttachments(stripAttachmentData(p.attachments));
       const ni = {}; safeGroups.forEach(g => { ni[g.id] = getEmptyItem(); });
       if (safeGroups.length === 0) ni['g-1'] = getEmptyItem();
       setNewItems(ni);
@@ -3056,7 +3204,12 @@ function App() {
       notify('読込エラー: ' + (err?.message || err), 'error');
     }
   };
-  const handleDeleteProposal = (id) => setSavedProposals(prev => prev.filter(p => p.id !== id));
+  const handleDeleteProposal = (id) => {
+    const next = savedProposals.filter(p => p.id !== id);
+    setSavedProposals(next);
+    // 削除した見積だけが持っていた添付の本体を IndexedDB からも消す
+    pruneAttachmentBlobs(next, attachments);
+  };
 
   const escapeHTML = (str) => str === null || str === undefined ? '' : String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
@@ -3130,7 +3283,7 @@ function App() {
       return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%">' + grid + body + lg + '</svg>';
     })();
     const rows = cats.map(c => '<tr><td>' + esc(c.title) + '</td><td>' + esc(c.baseName) + '</td><td class="r">' + yen(c.baseAmt) + '</td><td>' + esc(c.propName) + '</td><td class="r">' + yen(c.propAmt) + '</td><td class="r save">' + (c.saving > 0 ? '−' + yen(c.saving) : '−') + '</td></tr>').join('');
-    const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : new Date().toLocaleDateString('ja-JP'));
+    const dateStr = proposalDateText || (proposalDate ? formatJpDate(proposalDate) : new Date().toLocaleDateString('ja-JP'));
     const client = [clientName, clientName2].filter(s => s && s.trim()).join(' ') || 'ご担当者';
     const company = (officeInfo && officeInfo.companyName) || '太陽シルバーサービス㈱';
     const officeNm = (officeInfo && officeInfo.officeName) || (loginInfo && loginInfo.office) || '';
@@ -3239,7 +3392,7 @@ function App() {
     })();
     const trows = rows.map(r => '<tr><td>' + esc(r.name) + '</td><td class="r">' + r.yq.toLocaleString('ja-JP') + '</td><td class="r">' + (r.oldP ? yen(r.oldP) : '−') + '</td><td class="r">' + (r.newP ? yen(r.newP) : '−') + '</td><td class="r imp">' + (r.impact >= 0 ? '+' : '−') + yen(Math.abs(r.impact)) + '</td></tr>').join('');
     const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || 'ご担当者';
-    const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : new Date().toLocaleDateString('ja-JP'));
+    const dateStr = proposalDateText || (proposalDate ? formatJpDate(proposalDate) : new Date().toLocaleDateString('ja-JP'));
     const oi = officeInfo || {};
     const company = oi.companyName || '太陽シルバーサービス㈱';
     const officeNm = oi.officeName || (loginInfo && loginInfo.office) || '';
@@ -3356,7 +3509,7 @@ function App() {
       return s;
     };
     const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || '';
-    const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : '');
+    const dateStr = proposalDateText || (proposalDate ? formatJpDate(proposalDate) : '');
     const oi = officeInfo || {};
     const issuerHtml = [
       oi.companyName ? '<div class="company">' + esc(oi.companyName) + '</div>' : '<div class="company">太陽シルバーサービス㈱</div>',
@@ -3793,8 +3946,23 @@ function App() {
   };
 
   // === 価格改定モード専用の印刷HTML（改定前/後の横並び比較 / A4縦） ===
+  // 帳票タイトルの自動縮小。
+  // 22pt + 字間0.5em のままだと「価格改定のご案内」のような長めのタイトルが
+  // 左カラム（約86mm）に収まらず2行に折り返し、枠から飛び出して見える。
+  // 文字数に応じてフォントサイズと字間を落とし、1行に収まるようにする。
+  const printTitleStyle = (title) => {
+    const n = Array.from(String(title || '')).length;
+    if (n <= 5) return { fs: 22, ls: 0.5 };
+    if (n <= 7) return { fs: 19, ls: 0.4 };
+    if (n <= 9) return { fs: 16, ls: 0.3 };
+    if (n <= 12) return { fs: 13.5, ls: 0.2 };
+    return { fs: 11.5, ls: 0.12 };
+  };
+
   const buildKaiteiPrintHtml = () => {
     const esc = escapeHTML;
+    const kaiteiTitleText = (proposalTitle && proposalTitle.trim() && proposalTitle.trim() !== '御見積書') ? proposalTitle.trim() : '御見積り';
+    const kaiteiTitleStyle = printTitleStyle(kaiteiTitleText);
     const yen = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
     const yen2 = (n) => '¥' + (Math.round(n * 100) / 100).toLocaleString('ja-JP', { maximumFractionDigits: 2 });
     let rowsHtml = '';
@@ -3838,7 +4006,7 @@ function App() {
       return lbl;
     })();
     const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || '';
-    const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : '');
+    const dateStr = proposalDateText || (proposalDate ? formatJpDate(proposalDate) : '');
     const oi = officeInfo || {};
     const nm = (s) => esc((s || '').toString());
     // 見積帳票と同形式の発行元ブロック
@@ -3865,7 +4033,7 @@ function App() {
       + '#print-content-holder .doc-header{display:flex;justify-content:space-between;gap:10mm;margin-bottom:5mm;align-items:flex-start;page-break-inside:avoid;}'
       + '#print-content-holder .doc-header .left{flex:1;min-width:0;}'
       + '#print-content-holder .doc-header .right{width:70mm;flex-shrink:0;}'
-      + '#print-content-holder .title{font-family:"BIZ UDPMincho","BIZ UDMincho","Yu Mincho","YuMincho","Hiragino Mincho ProN",serif;font-size:22pt;font-weight:600;letter-spacing:0.5em;color:#1e3a8a;padding:0 0 6px 0;margin:0 0 10px 0;text-indent:0.5em;border-bottom:1.5px solid #3b82f6;}'
+      + '#print-content-holder .title{font-family:"BIZ UDPMincho","BIZ UDMincho","Yu Mincho","YuMincho","Hiragino Mincho ProN",serif;font-size:' + kaiteiTitleStyle.fs + 'pt;font-weight:600;letter-spacing:' + kaiteiTitleStyle.ls + 'em;color:#1e3a8a;padding:0 0 6px 0;margin:0 0 10px 0;text-indent:' + kaiteiTitleStyle.ls + 'em;border-bottom:1.5px solid #3b82f6;overflow-wrap:anywhere;}'
       + '#print-content-holder .client{font-size:15pt;font-weight:normal;padding:4px 4px 6px;color:#111827;border-bottom:1px solid #93c5fd;letter-spacing:0.05em;}'
       + '#print-content-holder .client .suffix{font-size:10.5pt;font-weight:400;margin-left:8px;color:#3b82f6;}'
       + '#print-content-holder .greeting{font-size:8.5pt;margin-top:8px;padding-left:2px;line-height:1.7;color:#4b5563;}'
@@ -3914,7 +4082,7 @@ function App() {
       + '<div class="kaitei-doc"><div class="page">'
       + '<div class="doc-header">'
       + '<div class="left">'
-      + '<h1 class="title">' + esc((proposalTitle && proposalTitle.trim() && proposalTitle.trim() !== '御見積書') ? proposalTitle.trim() : '御見積り') + '</h1>'
+      + '<h1 class="title">' + esc(kaiteiTitleText) + '</h1>'
       + '<div class="client">' + (client || '　') + '<span class="suffix">御中</span></div>'
       + '<div class="greeting">いつもお世話になっております。下記の通り、価格改定のご案内をお送りいたします。ご確認のほどよろしくお願いいたします。</div>'
       + '</div>'
@@ -4063,9 +4231,13 @@ function App() {
           }));
           setNewItems(committedNewItems);
           notify(`入力途中の ${pendingGroupIds.length}件を商品リストへ追加しました`);
-          // setState 反映を待ってから印刷を再実行（再帰で newItems がクリアされた状態でhandlePrintを呼ぶ）
-          setTimeout(() => handlePrint(mode), 100);
-          return;
+          // ここで handlePrint を再帰呼び出ししてはいけない。
+          // setTimeout で呼び出すのは「今の描画時点の」handlePrint（＝newItems がまだ
+          // 未コミットのままの古いクロージャ）なので、同じ確認ダイアログが再び出て
+          // 永久ループになる（二重クリックガードに握り潰されて何も印刷されない状態だった）。
+          // 実データへの追加は上の setGroups/setNewItems で完了しているので、
+          // そのまま下の通常フローへ進む。下の groupsForPrint は未追加分を取り込んで
+          // 組み立てるため、印刷内容は追加後の状態と一致する。
         }
         // キャンセル：そのまま既存ロジック（pendingをgroupsForPrintに含めて印刷）
       }
@@ -4227,6 +4399,8 @@ function App() {
         <div class="tax-row tax-row-total"><span class="tax-label">合計（税込）</span><span class="tax-value">¥${taxTotalIncl.toLocaleString()}</span></div>
       </div>` : '';
 
+    const quoteTitleText = proposalTitle || '御見積書';
+    const quoteTitleStyle = printTitleStyle(quoteTitleText);
     const html = `
 <style>
   @page { size: A4 portrait; margin: 12mm 10mm; }
@@ -4239,7 +4413,7 @@ function App() {
   #print-content-holder .doc-header .left { flex: 1; min-width: 0; }
   #print-content-holder .doc-header .right { width: 70mm; flex-shrink: 0; }
   #print-content-holder .grand-total { page-break-inside: avoid; }
-  #print-content-holder .title { font-family: 'BIZ UDPMincho','BIZ UDMincho','Yu Mincho','YuMincho','Hiragino Mincho ProN',serif; font-size: 22pt; font-weight: 600; letter-spacing: 0.5em; color: #1e3a8a; padding: 0 0 6px 0; margin: 0 0 10px 0; text-indent: 0.5em; border-bottom: 1.5px solid #3b82f6; }
+  #print-content-holder .title { font-family: 'BIZ UDPMincho','BIZ UDMincho','Yu Mincho','YuMincho','Hiragino Mincho ProN',serif; font-size: ${quoteTitleStyle.fs}pt; font-weight: 600; letter-spacing: ${quoteTitleStyle.ls}em; color: #1e3a8a; padding: 0 0 6px 0; margin: 0 0 10px 0; text-indent: ${quoteTitleStyle.ls}em; border-bottom: 1.5px solid #3b82f6; overflow-wrap: anywhere; }
   #print-content-holder .client { font-size: 15pt; font-weight: normal; padding: 4px 4px 6px; color: #111827; border-bottom: 1px solid #93c5fd; letter-spacing: 0.05em; }
   #print-content-holder .client .suffix { font-size: 10.5pt; font-weight: 400; margin-left: 8px; color: #3b82f6; }
   #print-content-holder .greeting { font-size: 8.5pt; margin-top: 8px; padding-left: 2px; line-height: 1.7; color: #4b5563; }
@@ -4327,7 +4501,7 @@ function App() {
 <div class="page">
   <div class="doc-header">
     <div class="left">
-      <div class="title">${escapeHTML(proposalTitle||'御見積書')}</div>
+      <div class="title">${escapeHTML(quoteTitleText)}</div>
       <div class="client">${escapeHTML(clientName||'　')}${clientName2 ? `<br/>${escapeHTML(clientName2)}` : ''}<span class="suffix">${escapeHTML(clientHonorific||'御中')}</span></div>
       <div class="greeting">下記の通り、お見積り申し上げます。<br>ご検討のほど、よろしくお願い申し上げます。</div>
       <div class="terms-small"><table class="terms-table-sm">
@@ -4689,20 +4863,32 @@ function App() {
             </label>
           </div>
           {attachments.length === 0 ? (
-            <div className="text-sm text-slate-400 text-center py-3">PDF / Excel / 画像などを添付できます (10MBまで)</div>
+            <div className="text-sm text-slate-400 text-center py-3">PDF / Excel / 画像などを添付できます (10MBまで)<br/><span className="text-[11px]">※ 添付ファイルはこの端末に保存されます（見積本体とは別保存）</span></div>
           ) : (
             <div className="space-y-1">
-              {attachments.map(a => (
+              {attachments.map(a => {
+                const isImg = isImageAttachment(a);
+                const thumb = attachmentThumbs[a.id];
+                const canPreview = isImg || (a.type || '').includes('pdf') || /\.pdf$/i.test(a.name || '');
+                return (
                 <div key={a.id} className="flex items-center gap-2 bg-purple-50 border border-purple-100 rounded px-2 py-1.5">
-                  <span className="text-purple-600">📄</span>
+                  {thumb ? (
+                    <button onClick={() => openAttachmentPreview(a)} title="クリックで拡大表示" className="shrink-0 w-12 h-12 rounded border border-purple-200 bg-white overflow-hidden flex items-center justify-center">
+                      <img src={thumb} alt={a.name} className="w-full h-full object-cover" onError={e => { e.currentTarget.style.display = 'none'; e.currentTarget.parentElement.textContent = '📄'; }} />
+                    </button>
+                  ) : (
+                    <span className="text-purple-600 w-12 text-center text-xl shrink-0">{isImg ? '🖼' : '📄'}</span>
+                  )}
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-bold text-slate-800 truncate">{a.name}</div>
-                    <div className="text-[10px] text-slate-500">{Math.round((a.size||0)/1024)}KB / {new Date(a.uploadedAt).toLocaleString('ja-JP')}</div>
+                    <div className="text-[10px] text-slate-500">{formatFileSize(a.size)} / {new Date(a.uploadedAt).toLocaleString('ja-JP')}</div>
                   </div>
+                  {canPreview && <button onClick={() => openAttachmentPreview(a)} title="この画面で開く" className="px-2 py-1 bg-purple-500 hover:bg-purple-600 text-white rounded text-xs font-bold">👁 表示</button>}
                   <button onClick={() => handleAttachmentDownload(a)} title="ダウンロード" className="px-2 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-bold">⬇</button>
                   <button onClick={() => handleAttachmentDelete(a.id)} title="削除" className="px-2 py-1 bg-red-500 hover:bg-red-600 text-white rounded text-xs font-bold">🗑</button>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -6290,10 +6476,26 @@ function App() {
           </div>
         </div>
       )}
+      {/* === 添付ファイルのプレビュー（写真・PDFをその場で確認） === */}
+      {previewAttachment && (
+        <div className="fixed inset-0 bg-slate-900/70 z-[97] flex items-center justify-center p-4" onClick={closeAttachmentPreview}>
+          <div className="bg-white rounded-xl shadow-2xl max-w-5xl w-full max-h-[92vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="bg-purple-600 text-white px-4 py-2.5 flex items-center justify-between gap-3">
+              <h2 className="font-bold text-sm truncate">📎 {previewAttachment.name}</h2>
+              <button onClick={closeAttachmentPreview} className="hover:bg-purple-700 rounded px-2.5 py-1 text-sm font-bold shrink-0">✕ 閉じる</button>
+            </div>
+            <div className="flex-1 min-h-0 bg-slate-200 overflow-auto flex items-start justify-center">
+              {(previewAttachment.type || '').includes('pdf') || /\.pdf$/i.test(previewAttachment.name || '')
+                ? <embed src={previewAttachment.url} type="application/pdf" className="w-full h-[80vh]" />
+                : <img src={previewAttachment.url} alt={previewAttachment.name} className="max-w-full h-auto" />}
+            </div>
+          </div>
+        </div>
+      )}
       {/* === 仕切りサイド表示（見積を入力しながら仕切りPDF/画像を参照） === */}
       {showShikiriViewer && (() => {
         const allMakers = [...makerDataList, ...officeSharedMakerData].filter(Boolean);
-        const vm = allMakers.find(m => m.id === viewerMakerId) || allMakers[0];
+        const vm = viewerFile || allMakers[0];
         const isPdf = vm && (((vm.fileType||'').includes('pdf')) || /\.pdf$/i.test(vm.fileName||''));
         const isImg = vm && (((vm.fileType||'').includes('image')) || /\.(png|jpe?g|gif|webp|bmp)$/i.test(vm.fileName||''));
         return (
@@ -6327,10 +6529,12 @@ function App() {
             <div className="flex-1 min-h-0 bg-slate-100">
               {!vm ? (
                 <div className="p-5 text-sm text-slate-500 text-center leading-relaxed">「🏭 メーカー仕切り」からPDFや画像の仕切りを登録すると、<br/>ここに表示しながら見積を入力できます。</div>
+              ) : (isPdf || isImg) && !viewerBlobUrl ? (
+                <div className="p-5 text-sm text-slate-500 text-center">読み込んでいます…</div>
               ) : isPdf ? (
-                <embed src={vm.data} type="application/pdf" className="w-full h-full" />
+                <embed src={viewerBlobUrl} type="application/pdf" className="w-full h-full" />
               ) : isImg ? (
-                <div className="w-full h-full overflow-auto bg-slate-200 flex items-start justify-center"><img src={vm.data} alt={vm.fileName} className="max-w-full h-auto" /></div>
+                <div className="w-full h-full overflow-auto bg-slate-200 flex items-start justify-center"><img src={viewerBlobUrl} alt={vm.fileName} className="max-w-full h-auto" /></div>
               ) : (
                 <div className="p-5 text-sm text-slate-600 text-center leading-relaxed">この形式（Excel等）は画面に表示できません。<br/><button onClick={() => handleMakerDownload(vm)} className="mt-2 underline text-blue-600 font-bold">ダウンロードして開く</button></div>
               )}
@@ -6779,7 +6983,7 @@ function App() {
                   <div className="font-bold text-indigo-800 mb-1">📁 「フォルダ管理」タブ：施設フォルダと過去の見積を管理</div>
                   <ul className="list-disc pl-5 space-y-0.5 text-[13px]">
                     <li><strong>左サイドバー：</strong>施設フォルダの一覧。「すべての見積」「フォルダなし」「各施設フォルダ」を切り替え</li>
-                    <li><strong>右ペイン：</strong>選択中フォルダ内の見積一覧。「開く」ボタンで<strong>過去の見積を呼び戻せます</strong>（編集中の内容は上書きされるので保存してから）</li>
+                    <li><strong>右ペイン：</strong>選択中フォルダ内の見積一覧。見積のカード（名前の部分）を<strong>クリックすると過去の見積を呼び戻せます</strong>（編集中の内容は上書きされるので保存してから）</li>
                     <li><strong>名前の編集：</strong>フォルダ名・見積名はいずれも<strong>ダブルクリック</strong>でその場編集できます（Enterで確定、Escで取消）。⚙ボタンでも編集できます</li>
                     <li><strong>新規施設フォルダ追加：</strong>左サイドバー下部の入力欄から、見積を保存せずにフォルダだけ作成可能</li>
                     <li><strong>見積のリネーム：</strong>各見積の⚙ボタンでインライン編集</li>
