@@ -332,8 +332,9 @@ const saveStorage = (key, data) => {
   try {
     const s = JSON.stringify(data);
     if (saveStorageCache[key] === s) return true;
-    saveStorageCache[key] = s;
     localStorage.setItem(key, s);
+    // 書込みに成功してから記録する（失敗時に記録すると、同じ内容での再保存がスキップされる）
+    saveStorageCache[key] = s;
     return true;
   } catch { return false; }
 };
