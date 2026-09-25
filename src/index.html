@@ -284,7 +284,9 @@ const getEmptyItem = () => ({
   price: '', casePrice: '', cost: '', caseCost: '', targetMargin: '',
   priceOld: '', priceNew: '', // 価格改定モード用：改定前単価／改定後単価
   caseOld: '', caseNew: '', // 価格改定モード「詳細入力」用：ケース単価（改定前／改定後）
-  isHighlighted: false, isHiddenFromPrint: false, memoOpen: false, taxMode: 'exclusive'
+  // taxMode は空＝「全体の税区分デフォルトに従う」。以前は常に 'exclusive' だったため、
+  // 税区分デフォルトを税込にしても新しく追加した行だけ税抜になり、合計の表示と食い違っていた。
+  isHighlighted: false, isHiddenFromPrint: false, memoOpen: false, taxMode: ''
 });
 
 const genId = (prefix = 'id') =>
@@ -424,6 +426,16 @@ const inferFromProductName = (name) => {
     if (unit) { const option = UNIT_OPTIONS.find(o => o.value === unit); baseScale = option?.defaultBase || 1; }
   }
   return { volume, unit, baseScale };
+};
+
+// 商品名から推測した容量を、カテゴリの単位にそろえる（例：カテゴリがmlで商品名が「1L」→1000）。
+// 換算できない組み合わせは null を返す。
+const UNIT_TO_BASE = { ml: ['ml', 1], L: ['ml', 1000], g: ['g', 1], kg: ['g', 1000], cm: ['cm', 1], m: ['cm', 100] };
+const convertVolumeUnit = (vol, fromUnit, toUnit) => {
+  const f = UNIT_TO_BASE[fromUnit], t = UNIT_TO_BASE[toUnit];
+  const n = Number(vol);
+  if (!f || !t || f[0] !== t[0] || !isFinite(n)) return null;
+  return Math.round(n * f[1] / t[1] * 1000) / 1000;
 };
 
 const getAutoBottomText = (mode) => {
@@ -775,12 +787,15 @@ function App() {
     if (typeof grandTotalTaxInfo !== 'undefined' && grandTotalTaxInfo.hasInclusive) return '（税込）';
     return taxMode === 'inclusive' ? '（税込）' : taxMode === 'nontax' ? '（非課税）' : '（税抜）';
   };
+  // 行の税区分（行で未指定なら全体の税区分デフォルト）。画面・印刷・合計で同じ判定を使う。
+  const rowTaxMode = (it) => (it && it.taxMode) ? it.taxMode : taxMode;
 
   useEffect(() => {
     setBottomRemarks(prev => (prev && !KNOWN_BOTTOM_TEXTS.includes(prev)) ? prev : getAutoBottomText(taxMode));
   }, [taxMode]);
 
-  // taxMode が変わったら全商品の taxMode を自動で上書き
+  // taxMode が変わったら全商品の taxMode を自動で上書き（ユーザーが税区分デフォルトを変更した時のみ）。
+  // 下書き復元・保存データ読込では prevTaxModeRef を読込値に合わせておき、行ごとの税区分を守る。
   const prevTaxModeRef = useRef(taxMode);
   useEffect(() => {
     if (prevTaxModeRef.current !== taxMode) {
@@ -790,7 +805,11 @@ function App() {
   }, [taxMode]);
 
   // モード切替時のデフォルト合計表示: 見積=ON, 提案書=OFF
+  // 下書き復元・保存データ読込でモードが変わった場合は、保存されていた「合計表示」を
+  // 既定値で上書きしないよう1回だけスキップする。
+  const skipModeDefaultsRef = useRef(false);
   useEffect(() => {
+    if (skipModeDefaultsRef.current) { skipModeDefaultsRef.current = false; return; }
     setShowCaseMode(appMode === 'proposal');
     setShowGrandTotal(appMode === 'quote');
     // 価格改定モードのデフォルト題名。ユーザーが既に何か入力済みなら上書きしない。
@@ -2369,20 +2388,27 @@ function App() {
       if (draft.deliveryInfo !== undefined) setDeliveryInfo(draft.deliveryInfo);
       if (draft.remarks !== undefined) setRemarks(draft.remarks);
       if (draft.bottomRemarks !== undefined) setBottomRemarks(draft.bottomRemarks);
-      if (draft.taxMode !== undefined) setTaxMode(draft.taxMode);
-      if (draft.appMode !== undefined) setAppMode(draft.appMode);
+      if (draft.taxMode !== undefined) { prevTaxModeRef.current = draft.taxMode; setTaxMode(draft.taxMode); }
+      if (draft.appMode !== undefined) {
+        if (draft.appMode !== appMode) skipModeDefaultsRef.current = true;
+        setAppMode(draft.appMode);
+      }
       if (draft.showGrandTotal !== undefined) setShowGrandTotal(draft.showGrandTotal);
       // 他モード分のgroups/newItemsもrefに復元（モード切替時の消失を防止）
       if (Array.isArray(draft.quoteGroups)) quoteGroupsRef.current = draft.quoteGroups;
       if (Array.isArray(draft.proposalGroups)) proposalGroupsRef.current = draft.proposalGroups;
       if (draft.quoteNewItems && typeof draft.quoteNewItems === 'object') quoteNewItemsRef.current = draft.quoteNewItems;
       if (draft.proposalNewItems && typeof draft.proposalNewItems === 'object') proposalNewItemsRef.current = draft.proposalNewItems;
+      if (Array.isArray(draft.kaiteiGroups)) kaiteiGroupsRef.current = draft.kaiteiGroups;
+      if (draft.kaiteiNewItems && typeof draft.kaiteiNewItems === 'object') kaiteiNewItemsRef.current = draft.kaiteiNewItems;
       // 現在モードのgroupsを優先（後方互換：旧draft.groupsもfallback）
+      // 以前は価格改定モードでも proposalGroups を優先していたため、提案書の明細に置き換わっていた。
       const activeMode = draft.appMode || 'quote';
-      const activeGroups = activeMode === 'quote'
-        ? (Array.isArray(draft.quoteGroups) ? draft.quoteGroups : draft.groups)
-        : (Array.isArray(draft.proposalGroups) ? draft.proposalGroups : draft.groups);
+      const modeGroups = { quote: draft.quoteGroups, proposal: draft.proposalGroups, kaitei: draft.kaiteiGroups }[activeMode];
+      const modeNewItems = { quote: draft.quoteNewItems, proposal: draft.proposalNewItems, kaitei: draft.kaiteiNewItems }[activeMode];
+      const activeGroups = Array.isArray(modeGroups) ? modeGroups : draft.groups;
       if (Array.isArray(activeGroups)) setGroups(activeGroups);
+      if (modeNewItems && typeof modeNewItems === 'object') setNewItems(modeNewItems);
       // ローカル保存済みの見積だけ編集対象IDを復元する。
       // 共有見積は権限・購読状態が確定する前に上書き対象へ戻さない。
       if (draft.currentProposalId) {
@@ -2409,7 +2435,10 @@ function App() {
       const _proposalGroups = appMode === 'proposal' ? groups : (proposalGroupsRef.current || null);
       const _quoteNewItems = appMode === 'quote' ? newItems : (quoteNewItemsRef.current || null);
       const _proposalNewItems = appMode === 'proposal' ? newItems : (proposalNewItemsRef.current || null);
-      const d = { clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, quoteGroups: _quoteGroups, proposalGroups: _proposalGroups, quoteNewItems: _quoteNewItems, proposalNewItems: _proposalNewItems, currentProposalId: editingSharedQuote ? null : currentProposalId };
+      // 価格改定モードも保存する（以前は保存されず、再読込で提案書モードの明細に置き換わっていた）
+      const _kaiteiGroups = appMode === 'kaitei' ? groups : (kaiteiGroupsRef.current || null);
+      const _kaiteiNewItems = appMode === 'kaitei' ? newItems : (kaiteiNewItemsRef.current || null);
+      const d = { clientName, clientName2, clientHonorific, proposalTitle, proposalDate, proposalDateText, proposalNumber, validityPeriod, paymentTerms, deliveryInfo, remarks, bottomRemarks, taxMode, showGrandTotal, appMode, groups, quoteGroups: _quoteGroups, proposalGroups: _proposalGroups, kaiteiGroups: _kaiteiGroups, quoteNewItems: _quoteNewItems, proposalNewItems: _proposalNewItems, kaiteiNewItems: _kaiteiNewItems, currentProposalId: editingSharedQuote ? null : currentProposalId };
       try {
         const s = JSON.stringify(d);
         if (s === lastDraftStringRef.current) return;
@@ -2594,8 +2623,17 @@ function App() {
           }
           if (inferredUnit) u.unitOverride = inferredUnit;
         } else if (inf?.unit) {
-          updateGroupField(gid, 'unit', inf.unit);
-          updateGroupField(gid, 'baseScale', inf.baseScale);
+          // カテゴリの単位はカテゴリ内の全商品の容量・○○単価の基準になる。
+          // 既に商品があるカテゴリで単位を切り替えると、既存商品の「500ml」が「500L」扱いになり
+          // 単価が誤って計算されていたため、単位を切り替えるのはカテゴリが空のときだけにする。
+          const grp = groups.find(g => g.id === gid);
+          if (grp && grp.items.length > 0 && grp.unit && grp.unit !== inf.unit) {
+            const conv = inf.volume ? convertVolumeUnit(inf.volume, inf.unit, grp.unit) : null;
+            if (conv !== null) u.volume = conv;
+          } else {
+            updateGroupField(gid, 'unit', inf.unit);
+            updateGroupField(gid, 'baseScale', inf.baseScale);
+          }
         }
       }
       return { ...prev, [gid]: calculatePrices(u, field) };
@@ -2650,7 +2688,7 @@ function App() {
     setGroups(prev => prev.map(g => {
       if (g.id !== gid) return g;
       return { ...g, items: [...g.items, {
-        id: genId('i'), ...inp,
+        id: genId('i'), ...inp, taxMode: inp.taxMode || taxMode,
         volume: inp.volume === '' ? '' : Number(inp.volume),
         packSize: inp.packSize === '' ? '' : (Number(inp.packSize)||1),
         price: inp.price === '' ? '' : Number(inp.price),
@@ -2682,8 +2720,14 @@ function App() {
           } else {
             // 提案書モード: グループ単位を推測した単位に同期（既存維持）
             if (inf?.unit && !u.unitOverride && (!g.unit || g.unit === 'ml')) {
-              updateGroupField(g.id, 'unit', inf.unit);
-              updateGroupField(g.id, 'baseScale', inf.baseScale);
+              if (g.items.length > 1 && g.unit && g.unit !== inf.unit) {
+                // 他の商品がある場合はカテゴリ単位を変えず、容量をカテゴリ単位へ換算する
+                const conv = inf.volume ? convertVolumeUnit(inf.volume, inf.unit, g.unit) : null;
+                if (conv !== null) u.volume = conv;
+              } else {
+                updateGroupField(g.id, 'unit', inf.unit);
+                updateGroupField(g.id, 'baseScale', inf.baseScale);
+              }
             }
           }
         }
@@ -2977,7 +3021,11 @@ function App() {
       setProposalNumber(p.proposalNumber||'');
       setValidityPeriod(p.validityPeriod||'お見積日より30日間'); setPaymentTerms(p.paymentTerms||'月末締め翌月末払い');
       setDeliveryInfo(p.deliveryInfo||'ご注文後、通常2〜3営業日'); setRemarks(p.remarks||'');
+      // 読込で税区分デフォルトが変わっても、保存されていた行ごとの税区分を一括上書きしない
+      prevTaxModeRef.current = p.taxMode||'exclusive';
       setBottomRemarks(p.bottomRemarks||''); setTaxMode(p.taxMode||'exclusive');
+      // 読込でモードが変わっても、保存されていた「合計表示」をモード既定値で上書きしない
+      if ((p.appMode||'quote') !== appMode) skipModeDefaultsRef.current = true;
       setAppMode(p.appMode||'quote'); setShowGrandTotal(p.showGrandTotal !== undefined ? p.showGrandTotal : true);
       // === 旧データ互換：groups と items の必須フィールドを補完 ===
       const safeGroups = (Array.isArray(p.groups) ? p.groups : []).map(g => {
@@ -3004,7 +3052,7 @@ function App() {
             isHiddenFromPrint: !!it.isHiddenFromPrint,
             memoOpen: !!it.memoOpen,
             unitOverride: it.unitOverride,
-            taxMode: it.taxMode || 'exclusive',
+            taxMode: it.taxMode || p.taxMode || 'exclusive',
           };
         }).filter(Boolean);
         return {
@@ -3527,7 +3575,7 @@ function App() {
         if (it.isHiddenFromPrint) return; // 非表示にした行は社内用印刷でも出さない
         const factor = appMode === 'proposal' ? (Number(it.packSize)||0) : (Number(it.volume)||0);
         const amt = factor * (Number(it.price)||0);
-        const tm = it.taxMode || 'exclusive';
+        const tm = rowTaxMode(it);
         let taxAmt = 0;
         if (amt > 0) {
           if (tm === 'inclusive') taxAmt = amt - Math.round(amt / 1.1);
@@ -3557,11 +3605,13 @@ function App() {
     }
     let total = 0, totalTax = 0, totalCost = 0;
     computedGroups.forEach(g => g.items.forEach(it => {
+      // 「隠す」行は明細に出ないため、合計・粗利にも含めない（明細と合計を一致させる）
+      if (it.isHiddenFromPrint) return;
       const f = appMode === 'proposal' ? (Number(it.packSize)||0) : (Number(it.volume)||0);
       const amt = f * (Number(it.price)||0);
       total += amt;
       totalCost += f * (Number(it.cost)||0);
-      const tm = it.taxMode || 'exclusive';
+      const tm = rowTaxMode(it);
       if (amt > 0) {
         if (tm === 'inclusive') totalTax += amt - Math.round(amt / 1.1);
         else if (tm === 'exclusive') totalTax += Math.round(amt * 0.1);
@@ -4056,6 +4106,8 @@ function App() {
               unitPrice: Math.round(unitPrice*10)/10,
               unitPriceRaw: unitPrice,
               isHighlighted: !!inp.isHighlighted,
+              isRedText: !!inp.isRedText,
+              taxMode: inp.taxMode || taxMode,
               unitOverride: inp.unitOverride,
             };
             committedNewItems[g.id] = getEmptyItem();
@@ -4103,14 +4155,17 @@ function App() {
         unitPriceRaw: unitPrice,
         profit: 0, margin: 0, monthlyCost: 0, yearlyCost: 0,
         isHighlighted: !!inp.isHighlighted,
+        isRedText: !!inp.isRedText,
+        taxMode: inp.taxMode || taxMode,
         unitOverride: inp.unitOverride,
       };
       return { ...g, items: [...g.items, tempItem] };
     });
     // 「印刷で隠す」指定の行は客先印刷に出さない（小計・合計・消費税からも除外して整合）
+    // 小計・合計は「実際に印刷される行」から算出する。以前は入力途中（未追加）の行を
+    // 印刷に含めた場合でも小計・合計には含めておらず、明細と金額が一致しなかった。
     const groupsForPrintVisible = groupsForPrint.map(g => {
       const visible = g.items.filter(it => !it.isHiddenFromPrint);
-      if (visible.length === g.items.length) return g;
       const subtotal = visible.reduce((s, it) => {
         const factor = appMode === 'proposal' ? (Number(it.packSize)||0) : (Number(it.volume)||0);
         return s + factor * (Number(it.price)||0);
@@ -4118,11 +4173,7 @@ function App() {
       // 全行が「印刷で隠す」になりカテゴリが空になった場合は、空ヘッダーを出さないよう印可
       return { ...g, items: visible, subtotal, _emptiedByHide: g.items.length > 0 && visible.length === 0 };
     });
-    const printHiddenSum = computedGroups.reduce((s, g) => s + g.items.filter(i => i.isHiddenFromPrint).reduce((ss, i) => {
-      const factor = appMode === 'proposal' ? (Number(i.packSize)||0) : (Number(i.volume)||0);
-      return ss + factor * (Number(i.price)||0);
-    }, 0), 0);
-    const printGrandTotal = Math.max(0, grandTotal - printHiddenSum);
+    const printGrandTotal = Math.max(0, groupsForPrintVisible.reduce((s, g) => s + g.subtotal, 0));
     const groupsHTML = groupsForPrintVisible.filter(g => !g._emptiedByHide && (g.items.length > 0 || (g.title && g.title.trim()))).map((group) => {
       // 単価ラベル：自動生成（例：100ml）。group.unitPriceLabel が設定されていれば優先。
       const autoBaseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
@@ -4159,7 +4210,7 @@ function App() {
         const _amt = factor*(Number(item.price)||0);
         cols += `<td class="price">¥${_amt.toLocaleString()}</td>`;
         if (appMode === 'quote' || (appMode === 'proposal' && showGrandTotal)) {
-          const _tm = item.taxMode || 'exclusive';
+          const _tm = rowTaxMode(item);
           let _tx = 0;
           if (_amt > 0) {
             if (_tm === 'inclusive') _tx = _amt - Math.round(_amt / 1.1);
@@ -4508,7 +4559,7 @@ function App() {
         }
         @media print { .no-print { display: none !important; } }
       `}</style>
-      <header className="no-print bg-gradient-to-r from-slate-800 to-slate-900 text-white shadow-lg sticky top-0 z-50">
+      <header className="no-print bg-gradient-to-r from-slate-800 to-slate-900 text-white shadow-lg md:sticky top-0 z-50">
         <div className="max-w-[1320px] mx-auto px-4 py-3">
           <a href="https://akamar08taiyo-bot.github.io/taiyo-portal/" className="inline-block text-[10.5px] text-slate-400 hover:text-slate-200 mb-1">← 業務アプリポータルへ戻る</a>
           <div className="flex flex-col gap-2">
@@ -4651,8 +4702,8 @@ function App() {
         <div className="bg-white rounded-lg shadow-sm border border-slate-200 border-l-4 border-l-blue-500 mb-3 p-3">
           <div className="flex flex-wrap items-center gap-3">
             <input value={proposalTitle} onChange={e => setProposalTitle(e.target.value)} className="text-lg font-bold text-slate-900 outline-none bg-transparent border-b border-dashed border-slate-300 focus:border-blue-500 w-32" placeholder="御見積書" />
-            <div className="flex items-start gap-1.5">
-              <div className="flex flex-col gap-1">
+            <div className="flex flex-wrap items-start gap-1.5 max-w-full">
+              <div className="flex flex-col gap-1 min-w-0 max-w-full">
                 <input value={clientName} onChange={e => setClientName(e.target.value)} placeholder="施設名（1段目）" className="text-base font-normal text-slate-800 border-b-2 border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] md:w-[340px] bg-transparent" />
                 <input value={clientName2} onChange={e => setClientName2(e.target.value)} placeholder="施設名（2段目・任意）" className="text-base font-normal text-slate-800 border-b border-dashed border-slate-300 px-2 py-1 outline-none focus:border-blue-500 w-[260px] md:w-[340px] bg-transparent" />
               </div>
@@ -4660,7 +4711,7 @@ function App() {
                 <option value="御中">御中</option><option value="様">様</option>
               </select>
             </div>
-            <div className="flex items-center gap-2 ml-auto text-slate-600">
+            <div className="flex flex-wrap items-center gap-2 ml-auto text-slate-600">
               <span className="text-sm font-bold">No.</span>
               <input value={proposalNumber} onChange={e => setProposalNumber(e.target.value)} placeholder="見積番号" className="font-mono outline-none w-24 border-b border-dotted border-slate-300 text-sm px-1.5 py-1" />
               <span className="text-sm font-bold text-blue-700 whitespace-nowrap">📅 見積日</span>
@@ -5074,7 +5125,7 @@ function App() {
                           </td>
                           {(appMode === 'quote' || (appMode === 'proposal' && showGrandTotal)) && (() => {
                             const amount = factor * (Number(item.price)||0);
-                            const tm = item.taxMode || 'exclusive';
+                            const tm = rowTaxMode(item);
                             let taxAmt = 0;
                             if (amount > 0) {
                               if (tm === 'inclusive') taxAmt = amount - Math.round(amount / 1.1);
@@ -5148,7 +5199,7 @@ function App() {
                       {(appMode === 'quote' || (appMode === 'proposal' && showGrandTotal)) && (() => {
                         const f = appMode === 'proposal' ? (Number(inp.packSize)||0) : (Number(inp.volume)||0);
                         const amt = f * (Number(inp.price)||0);
-                        const tm = inp.taxMode || 'exclusive';
+                        const tm = rowTaxMode(inp);
                         let taxAmt = 0;
                         if (amt > 0) {
                           if (tm === 'inclusive') taxAmt = amt - Math.round(amt / 1.1);
@@ -6033,7 +6084,7 @@ function App() {
                         )}
                         <div className="flex items-center gap-2 mt-2 bg-slate-50 px-2.5 py-1.5 rounded">
                           <span className="text-xs text-slate-500 font-bold">📁 移動先フォルダ:</span>
-                          <select value={p._isShared ? (p.folderId || '') : '__office_shared__'} onChange={e => {
+                          <select value={p.folderId || ''} onChange={e => {
                             const v = e.target.value;
                             if (v === '__office_shared__') { if (p._isShared) return; if (!confirm(`「${p.name}」を営業所「${loginInfo?.officeCode||''}」全員で共有しますか？\n（自分の控えはそのまま残ります）`)) return; saveToOfficeShared(p.folderId ? folders.find(f => f.id === p.folderId) : null, p); return; }
                             moveProposal(p.id, v || null); notify('移動しました');
