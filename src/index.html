@@ -252,6 +252,17 @@ const OFFICE_MASTER = [
   { name: '大分営業所',   postal: '870-0953', address: '大分県大分市下郡東1-4-35',            phone: '097-504-8001', fax: '097-504-8002', manager: '山下 厚' },
 ];
 
+// 久留米・大分は 2026-08 に自社の見積書カバーと照合して所在地・電話を訂正した。
+// 訂正前にログインした端末では発行元情報（taiyo_office_info_v1）に旧所在地が残り、
+// 見積書に古い住所・電話が印字され続けるため、旧値のままの場合だけ最新のマスタ値に置き換える。
+const STALE_OFFICE_ADDRESSES = { '久留米営業所': '福岡県朝倉郡筑前町高田585-1', '大分営業所': '大分県大分市三川下2-7-8' };
+const migrateStaleOfficeInfo = (info) => {
+  if (!info || !STALE_OFFICE_ADDRESSES[info.officeName]) return info;
+  if (String(info.address || '').trim() !== STALE_OFFICE_ADDRESSES[info.officeName]) return info;
+  const m = OFFICE_MASTER.find(o => o.name === info.officeName);
+  return m ? { ...info, postal: m.postal, address: m.address, phone: m.phone, fax: m.fax } : info;
+};
+
 // 業務アプリポータル(taiyo-portal)でログイン時に選んだ営業所名を引き継ぐ。
 // パスワード・ユーザー名はFirebase同期のキーに直結するため一切自動入力しない。
 const portalSessionOfficeShort = () => {
@@ -676,12 +687,12 @@ function App() {
     if (v && (!v.officeCode || !v.userName)) return null;
     return v;
   });
-  const [officeInfo, setOfficeInfo] = useState(() => loadStorage(STORAGE_KEYS.OFFICE_INFO, {
+  const [officeInfo, setOfficeInfo] = useState(() => migrateStaleOfficeInfo(loadStorage(STORAGE_KEYS.OFFICE_INFO, {
     companyName: '太陽シルバーサービス㈱', officeName: '小倉営業所',
     postal: '802-0011', address: '福岡県北九州市小倉北区重住3丁目11-21',
     phone: '093-952-1616', fax: '093-952-1627', manager: '森口 賢一',
     staffName: '', email: '',
-  }));
+  })));
   const [showOfficeModal, setShowOfficeModal] = useState(false);
 
   // === Escキー / Ctrl+Z キーバインド ===
