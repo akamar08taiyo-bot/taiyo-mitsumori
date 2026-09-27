@@ -369,6 +369,8 @@ const cleanForFirebase = (obj) => {
 // localStorage(約5MB)はPDF/Excelで容量超過し黙って保存失敗→再読込で消える。
 // IndexedDBは数百MB～使えるため、ファイルを含むデータはこちらに保存する。
 const IDB_NAME = 'taiyo_db';
+const PROPOSALS_IDB_KEY = 'savedProposals';
+const PROPOSALS_TS_KEY = 'taiyo_proposals_ts';
 const IDB_STORE = 'kv';
 let _idbPromise = null;
 function idbOpen() {
@@ -487,9 +489,9 @@ const formatNumber = (v) => {
 };
 const parseNumberInput = (raw) => {
   if (raw === null || raw === undefined) return '';
-  // 全角数字→半角、カンマ・スペース除去（マイナス記号 -, ー, －, ‐ は保持して - に正規化）
+  // 全角数字・全角ピリオド（９９．５）→半角、カンマ・スペース除去（マイナス記号 -, ー, －, ‐ は保持して - に正規化）
   return String(raw)
-    .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .normalize('NFKC')
     .replace(/[ー−－‐―‒–]/g, '-')  // 全角ハイフン・ダッシュ類を - に
     .replace(/[,，\s]/g, '');
 };
@@ -1036,6 +1038,33 @@ function App() {
   // 営業所共有のメーカーデータ
   const [officeSharedMakerData, setOfficeSharedMakerData] = useState([]);
   const [savedProposals, setSavedProposals] = useState(() => loadStorage(STORAGE_KEYS.PROPOSALS, []));
+  // IndexedDB 側の見積一覧が localStorage より新しければそちらを使う（localStorage に入りきらなかった場合）
+  const proposalsHydratedRef = useRef(false);
+  const draftRestoredIdRef = useRef(null); // 下書きから編集対象の見積を復元済みなら、そのID
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const rec = await idbGet(PROPOSALS_IDB_KEY);
+        const lsTs = Number(localStorage.getItem(PROPOSALS_TS_KEY) || 0);
+        if (!cancelled && rec && Array.isArray(rec.list) && Number(rec.ts) > lsTs) {
+          setSavedProposals(rec.list);
+          // localStorage 側に無かった見積を下書きで編集中だった場合は、ここで編集対象と添付を戻す
+          const draftId = (loadStorage(STORAGE_KEYS.DRAFT, null) || {}).currentProposalId;
+          const saved = draftId && !draftRestoredIdRef.current ? rec.list.find(p => p && p.id === draftId) : null;
+          if (saved) {
+            setCurrentProposalId(saved.id);
+            setEditingSharedQuote(false);
+            setAttachments(Array.isArray(saved.attachments) ? saved.attachments : []);
+            savedSnapshotRef.current = quoteSnapshot(saved);
+            draftRestoredIdRef.current = saved.id;
+          }
+        }
+      } catch (e) { console.warn('proposals idb read error', e); }
+      if (!cancelled) proposalsHydratedRef.current = true;
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const [folders, setFolders] = useState(() => loadStorage(STORAGE_KEYS.FOLDERS, []));
   const [selectedFolderId, setSelectedFolderId] = useState(null);
   // 営業所共有以外のフォルダへ移動したら、次に営業所共有へ戻った時は必ず選択画面から始める
@@ -1190,7 +1219,19 @@ function App() {
 
   useEffect(() => { saveStorage(STORAGE_KEYS.OFFICE_INFO, officeInfo); }, [officeInfo]);
   useEffect(() => { saveStorage(STORAGE_KEYS.FAVORITES, favorites); }, [favorites]);
-  useEffect(() => { const ok = saveStorage(STORAGE_KEYS.PROPOSALS, savedProposals); if (ok === false) { try { notify('見積データの保存に失敗しました。容量超過の可能性があります。不要な添付ファイルを削除してください。', 'error'); } catch {} } }, [savedProposals]);
+  // 見積一覧は localStorage に加えて IndexedDB にも保存する。添付ファイル（最大10MB）入りの見積があると
+  // localStorage(約5MB) に入りきらず、保存失敗のまま再読込で見積ごと消えていたため。
+  // どちらが新しいかは保存時刻で判定する（localStorage に書けたときは同じ時刻を taiyo_proposals_ts に記録）。
+  useEffect(() => {
+    // IndexedDB の読込が終わるまでは書き込まない。起動直後に localStorage 側の古い一覧を
+    // 新しい時刻で書くと、IndexedDB 側の新しい一覧（大きな添付入り）より新しいと判定されて消えてしまう。
+    if (!proposalsHydratedRef.current) return;
+    const ts = Date.now();
+    const okLocal = saveStorage(STORAGE_KEYS.PROPOSALS, savedProposals);
+    if (okLocal) { try { localStorage.setItem(PROPOSALS_TS_KEY, String(ts)); } catch {} }
+    const warn = () => { try { notify('見積データの保存に失敗しました。容量超過の可能性があります。不要な添付ファイルを削除してください。', 'error'); } catch {} };
+    idbSet(PROPOSALS_IDB_KEY, { ts, list: savedProposals }).catch((e) => { console.warn('proposals idb save error', e); if (!okLocal) warn(); });
+  }, [savedProposals]);
   useEffect(() => { saveStorage(STORAGE_KEYS.FOLDERS, folders); }, [folders]);
 
   // === Firebase クロスデバイス同期 ===
@@ -2428,7 +2469,11 @@ function App() {
         if (saved) {
           setCurrentProposalId(saved.id);
           setEditingSharedQuote(false);
+          // 下書きには添付ファイルを含めないので、保存済みの見積から戻す
+          // （戻さないと、再読込後に「上書き保存」した時点で添付が消えていた）
+          setAttachments(Array.isArray(saved.attachments) ? saved.attachments : []);
           savedSnapshotRef.current = quoteSnapshot(saved);
+          draftRestoredIdRef.current = saved.id;
         }
       }
       // prevAppModeRefを同期して、初回mountでmode切替useEffectが暴発しないようにする
@@ -3249,6 +3294,8 @@ function App() {
   const buildEstimateDocHtml = () => {
     const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const yen = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
+    // 単価は小数（12.5円など）を丸めずに表示する。丸めると「差額×年間数」の検算が表の増減額と合わなくなる
+    const unitYen = (n) => '¥' + Number(n).toLocaleString('ja-JP', { maximumFractionDigits: 2 });
     const AC = '#1b4d3e', INK = '#262626', SUB = '#6b7280', LINE = '#e8e8e8', GRY = '#9ca3af', UP = '#b45309', DOWN = '#1b4d3e';
     const rows = usageRows.map(rw => {
       const oldP = Number(rw.oldPrice) || 0, newP = Number(rw.newPrice) || 0, m = Number(rw.monthly) || 0;
@@ -3297,7 +3344,7 @@ function App() {
       });
       return '<div class="pie"><svg viewBox="0 0 180 180" width="180" height="180">' + seg + '</svg><div class="pieleg">' + leg + '</div></div>';
     })();
-    const trows = rows.map(r => '<tr><td>' + esc(r.name) + '</td><td class="r">' + r.yq.toLocaleString('ja-JP') + '</td><td class="r">' + (r.oldP ? yen(r.oldP) : '−') + '</td><td class="r">' + (r.newP ? yen(r.newP) : '−') + '</td><td class="r imp">' + (r.impact >= 0 ? '+' : '−') + yen(Math.abs(r.impact)) + '</td></tr>').join('');
+    const trows = rows.map(r => '<tr><td>' + esc(r.name) + '</td><td class="r">' + r.yq.toLocaleString('ja-JP') + '</td><td class="r">' + (r.oldP ? unitYen(r.oldP) : '−') + '</td><td class="r">' + (r.newP ? unitYen(r.newP) : '−') + '</td><td class="r imp">' + (r.impact >= 0 ? '+' : '−') + yen(Math.abs(r.impact)) + '</td></tr>').join('');
     const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || 'ご担当者';
     const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : new Date().toLocaleDateString('ja-JP'));
     const oi = officeInfo || {};
@@ -6313,9 +6360,9 @@ function App() {
                     return (
                       <tr key={rw.key} className="border-b border-slate-100 hover:bg-slate-50">
                         <td className="py-1 px-2 text-slate-800">{rw.name}</td>
-                        <td className="py-1 px-2"><input type="text" inputMode="numeric" value={rw.oldPrice} onChange={e => upd('oldPrice', e.target.value.replace(/[^0-9.]/g, ''))} placeholder="旧" className="w-full text-right border border-slate-300 rounded px-1.5 py-1 outline-none focus:border-amber-500 no-spin" /></td>
-                        <td className="py-1 px-2"><input type="text" inputMode="numeric" value={rw.newPrice} onChange={e => upd('newPrice', e.target.value.replace(/[^0-9.]/g, ''))} placeholder="新" className="w-full text-right border border-slate-300 rounded px-1.5 py-1 outline-none focus:border-amber-500 no-spin" /></td>
-                        <td className="py-1 px-2"><input type="text" inputMode="numeric" value={rw.monthly} onChange={e => upd('monthly', e.target.value.replace(/[^0-9.]/g, ''))} placeholder="月間" className="w-full text-right border-2 border-amber-300 rounded px-1.5 py-1 outline-none focus:border-amber-500 font-bold no-spin" /></td>
+                        <td className="py-1 px-2"><input type="text" inputMode="numeric" value={rw.oldPrice} onChange={e => upd('oldPrice', e.target.value.normalize('NFKC').replace(/[^0-9.]/g, ''))} placeholder="旧" className="w-full text-right border border-slate-300 rounded px-1.5 py-1 outline-none focus:border-amber-500 no-spin" /></td>
+                        <td className="py-1 px-2"><input type="text" inputMode="numeric" value={rw.newPrice} onChange={e => upd('newPrice', e.target.value.normalize('NFKC').replace(/[^0-9.]/g, ''))} placeholder="新" className="w-full text-right border border-slate-300 rounded px-1.5 py-1 outline-none focus:border-amber-500 no-spin" /></td>
+                        <td className="py-1 px-2"><input type="text" inputMode="numeric" value={rw.monthly} onChange={e => upd('monthly', e.target.value.normalize('NFKC').replace(/[^0-9.]/g, ''))} placeholder="月間" className="w-full text-right border-2 border-amber-300 rounded px-1.5 py-1 outline-none focus:border-amber-500 font-bold no-spin" /></td>
                       </tr>
                     );
                   })}
