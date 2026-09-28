@@ -2519,7 +2519,8 @@ function App() {
     const ps = Math.max(Number(packSize) || 1, 1);
     const recalcMargin = () => {
       const p = Number(price) || 0; const c = Number(cost) || 0;
-      if (p > 0 && c > 0 && c < p) targetMargin = Math.round(((p - c) / p) * 1000) / 10;
+      // 単価が原価以下（利益0%・赤字）のときも計算し直す。以前は前の利益率（例：30%）が残り、赤字でも黒字に見えていた
+      if (p > 0 && c > 0) targetMargin = Math.round(((p - c) / p) * 1000) / 10;
       else if (p > 0 && c === 0) targetMargin = '';
     };
     if (changedField === 'packSize') { casePrice = (Number(price)||0)*ps; caseCost = (Number(cost)||0)*ps; }
