@@ -365,6 +365,41 @@ const cleanForFirebase = (obj) => {
   return obj;
 };
 
+// === PDF化：1枚に描いたcanvasをA4ページに分けて貼る ===
+// 以前は用紙の高さごとに機械的にずらして貼っていたため、ページの境目で商品の行が上下に割れていた。
+// 行・段落・枠など（1ページの4割未満のまとまり）をまたがない位置で改ページする。見つからなければ従来どおり用紙の高さで切る。
+// 2ページ目以降も1ページ目と同じ上余白（top）を付ける。
+function addCanvasPagesToPdf(pdf, canvas, sourceEl, { x = 0, top = 0, bottom = 0, width = 210, pageH = 297 } = {}) {
+  const rect = sourceEl.getBoundingClientRect();
+  const pxPerCss = canvas.width / (rect.width || canvas.width);
+  const mmPerPx = width / canvas.width;
+  const pageHpx = Math.max(1, Math.floor((pageH - top - bottom) / mmPerPx));
+  const blocks = [...sourceEl.querySelectorAll('tr, p, li, h1, h2, h3, h4, div, section, table')]
+    .map(el => { const r = el.getBoundingClientRect(); return { t: (r.top - rect.top) * pxPerCss, b: (r.bottom - rect.top) * pxPerCss }; })
+    .filter(r => r.b > r.t);
+  const atomic = blocks.filter(r => r.b - r.t <= pageHpx * 0.4);
+  const cands = [...new Set(blocks.map(r => Math.round(r.b)))].sort((a, b) => a - b);
+  const straddles = (yy) => atomic.some(r => r.t < yy - 1 && r.b > yy + 1);
+  let first = true;
+  for (let y = 0; y < canvas.height - 2;) {
+    let h = Math.min(pageHpx, canvas.height - y);
+    if (y + h < canvas.height - 2) {
+      let cut = 0;
+      for (const c of cands) { if (c > y + pageHpx * 0.5 && c <= y + pageHpx && !straddles(c)) cut = c; }
+      if (cut) h = cut - y;
+    }
+    const slice = document.createElement('canvas');
+    slice.width = canvas.width; slice.height = h;
+    const ctx = slice.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, slice.width, h);
+    ctx.drawImage(canvas, 0, y, canvas.width, h, 0, 0, canvas.width, h);
+    if (!first) pdf.addPage();
+    first = false;
+    pdf.addImage(slice.toDataURL('image/jpeg', 0.92), 'JPEG', x, top, width, h * mmPerPx, undefined, 'FAST');
+    y += h;
+  }
+}
+
 // === IndexedDB: 大容量ファイル（仕切りPDF/Excel等）の保存先 ===
 // localStorage(約5MB)はPDF/Excelで容量超過し黙って保存失敗→再読込で消える。
 // IndexedDBは数百MB～使えるため、ファイルを含むデータはこちらに保存する。
@@ -3976,6 +4011,7 @@ function App() {
       + '#print-content-holder .doc-header .left{flex:1;min-width:0;}'
       + '#print-content-holder .doc-header .right{width:70mm;flex-shrink:0;}'
       + '#print-content-holder .title{font-family:"BIZ UDPMincho","BIZ UDMincho","Yu Mincho","YuMincho","Hiragino Mincho ProN",serif;font-size:22pt;font-weight:600;letter-spacing:0.5em;color:#1e3a8a;padding:0 0 6px 0;margin:0 0 10px 0;text-indent:0.5em;border-bottom:1.5px solid #3b82f6;}'
+      + '#print-content-holder .title.long{font-size:20pt;letter-spacing:0.15em;text-indent:0;}'
       + '#print-content-holder .client{font-size:15pt;font-weight:normal;padding:4px 4px 6px;color:#111827;border-bottom:1px solid #93c5fd;letter-spacing:0.05em;}'
       + '#print-content-holder .client .suffix{font-size:10.5pt;font-weight:400;margin-left:8px;color:#3b82f6;}'
       + '#print-content-holder .greeting{font-size:8.5pt;margin-top:8px;padding-left:2px;line-height:1.7;color:#4b5563;}'
@@ -4024,7 +4060,9 @@ function App() {
       + '<div class="kaitei-doc"><div class="page">'
       + '<div class="doc-header">'
       + '<div class="left">'
-      + '<h1 class="title">' + esc((proposalTitle && proposalTitle.trim() && proposalTitle.trim() !== '御見積書') ? proposalTitle.trim() : '御見積り') + '</h1>'
+      + (() => { const t = (proposalTitle && proposalTitle.trim() && proposalTitle.trim() !== '御見積書') ? proposalTitle.trim() : '御見積り';
+          // 「価格改定のご案内」など6文字以上は字間を詰める（広い字間のままだと最後の1文字だけが2行目に落ちていた）
+          return '<h1 class="title' + (t.length > 5 ? ' long' : '') + '">' + esc(t) + '</h1>'; })()
       + '<div class="client">' + (client || '　') + '<span class="suffix">御中</span></div>'
       + '<div class="greeting">いつもお世話になっております。下記の通り、価格改定のご案内をお送りいたします。ご確認のほどよろしくお願いいたします。</div>'
       + '</div>'
@@ -4090,9 +4128,7 @@ function App() {
         requestAnimationFrame(() => setTimeout(() => {
           html2canvas(holder, { scale: 2, useCORS: true, backgroundColor: '#ffffff', windowWidth: holder.scrollWidth, logging: false }).then(canvas => {
             const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
-            const pw = 210, ph = 297, iw = pw, ih = canvas.height * iw / canvas.width, data = canvas.toDataURL('image/jpeg', 0.92);
-            let hl = ih, pos = 0; pdf.addImage(data, 'JPEG', 0, pos, iw, ih, undefined, 'FAST'); hl -= ph;
-            while (hl > 0) { pos -= ph; pdf.addPage(); pdf.addImage(data, 'JPEG', 0, pos, iw, ih, undefined, 'FAST'); hl -= ph; }
+            addCanvasPagesToPdf(pdf, canvas, holder, { x: 0, top: 0, width: 210 });
             pdf.save(fname); try { holder.remove(); } catch {} notify('PDFを保存しました', 'success');
           }).catch(err => { try { holder.remove(); } catch {} notify('PDF生成エラー: ' + (err?.message || err), 'error'); });
         }, 80));
@@ -4506,17 +4542,7 @@ function App() {
             const marginX = 15;               // (210 - 180) / 2
             const marginTop = 12;             // @page の上マージンと揃える
             const imgW = pageW - marginX * 2; // = 180mm（.page の実寸と一致）
-            const imgH = canvas.height * imgW / canvas.width;
-            const imgData = canvas.toDataURL('image/jpeg', 0.92);
-            let heightLeft = imgH; let position = marginTop;
-            pdf.addImage(imgData, 'JPEG', marginX, position, imgW, imgH, undefined, 'FAST');
-            heightLeft -= (pageH - marginTop);
-            while (heightLeft > 0) {
-              position -= pageH;
-              pdf.addPage();
-              pdf.addImage(imgData, 'JPEG', marginX, position, imgW, imgH, undefined, 'FAST');
-              heightLeft -= pageH;
-            }
+            addCanvasPagesToPdf(pdf, canvas, pageEl, { x: marginX, top: marginTop, width: imgW, pageH });
             pdf.save(fname);
             cleanupPdf();
             notify('PDFを保存しました', 'success');
