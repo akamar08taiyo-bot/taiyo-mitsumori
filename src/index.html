@@ -220,6 +220,10 @@ const STORAGE_KEYS = {
 };
 
 // パスワードを保存する用の簡易ハッシュ (FNV-1a 32bit + salt)
+// 明細1行の金額（円）。単価に小数（例: 12.5円）があっても、金額は1円単位に四捨五入して
+// 小計・合計・消費税に端数（0.5円など）が残らないようにする。
+const lineAmount = (factor, price) => Math.round((Number(factor) || 0) * (Number(price) || 0));
+
 const simpleHash = (str) => {
   const salted = 'taiyo_salt_' + String(str);
   let h = 0x811c9dc5;
@@ -491,6 +495,7 @@ const getAutoBottomText = (mode) => {
   switch (mode) {
     case 'inclusive': return '本見積書の記載金額は、税込金額となっております。';
     case 'nontax':    return '本見積書の記載商品は、非課税商品となっております。';
+    case 'mixed':     return '本見積書の記載金額は、明細ごとの税区分（税抜・税込・非課税）に従って記載しております。';
     default:          return '本見積書の記載金額には、消費税は含まれておりません。';
   }
 };
@@ -498,7 +503,18 @@ const KNOWN_BOTTOM_TEXTS = [
   '本見積書の記載金額には、消費税は含まれておりません。',
   '本見積書の記載金額は、税込金額となっております。',
   '本見積書の記載商品は、非課税商品となっております。',
+  '本見積書の記載金額は、明細ごとの税区分（税抜・税込・非課税）に従って記載しております。',
 ];
+// 上部「備考」欄の自動文（初期値のままのときだけ税区分に合わせて切り替える）
+const getAutoTopRemark = (mode) => {
+  switch (mode) {
+    case 'inclusive': return '税込金額となっております。';
+    case 'nontax':    return '非課税商品となっております。';
+    case 'mixed':     return '明細ごとの税区分（税抜・税込・非課税）に従って記載しております。';
+    default:          return '消費税は含まれておりません。';
+  }
+};
+const KNOWN_TOP_REMARKS = ['消費税は含まれておりません。', '税込金額となっております。', '非課税商品となっております。', '明細ごとの税区分（税抜・税込・非課税）に従って記載しております。'];
 const CLEAN_TITLE_REGEX = /\s*[（(].*?[)）]/g;
 const ITEMS_PER_PAGE = 10;
 
@@ -839,9 +855,6 @@ function App() {
   // 行の税区分（行で未指定なら全体の税区分デフォルト）。画面・印刷・合計で同じ判定を使う。
   const rowTaxMode = (it) => (it && it.taxMode) ? it.taxMode : taxMode;
 
-  useEffect(() => {
-    setBottomRemarks(prev => (prev && !KNOWN_BOTTOM_TEXTS.includes(prev)) ? prev : getAutoBottomText(taxMode));
-  }, [taxMode]);
 
   // taxMode が変わったら全商品の taxMode を自動で上書き（ユーザーが税区分デフォルトを変更した時のみ）。
   // 下書き復元・保存データ読込では prevTaxModeRef を読込値に合わせておき、行ごとの税区分を守る。
@@ -895,6 +908,22 @@ function App() {
   const [isPreviewMode, setIsPreviewMode] = useState(false);
 
   const [groups, setGroups] = useState([{ id: 'g-1', title: '', catalogMemo: '', baseVolume: 100, baseQuantity: 1, unit: 'ml', baseScale: 100, items: [] }]);
+  // 実際に印刷される明細の税区分。全体の税区分と違う行（例: 税抜の見積に税込の行）が混ざると
+  // 「消費税は含まれておりません」の備考と明細が矛盾するため、備考の自動文は明細の税区分から決める。
+  const effectiveTaxMode = useMemo(() => {
+    const set = new Set();
+    groups.forEach(g => (g.items || []).forEach(it => {
+      if (it.isHiddenFromPrint) return;
+      if (!String(it.name || '').trim() && !Number(it.price)) return;
+      set.add(rowTaxMode(it) || 'exclusive');
+    }));
+    if (set.size === 0) return taxMode || 'exclusive';
+    return set.size === 1 ? [...set][0] : 'mixed';
+  }, [groups, taxMode]);
+  useEffect(() => {
+    setBottomRemarks(prev => (prev && !KNOWN_BOTTOM_TEXTS.includes(prev)) ? prev : getAutoBottomText(effectiveTaxMode));
+    setRemarks(prev => KNOWN_TOP_REMARKS.includes(prev) ? getAutoTopRemark(effectiveTaxMode) : prev);
+  }, [effectiveTaxMode]);
   const [newItems, setNewItems] = useState({ 'g-1': getEmptyItem() });
 
   useEffect(() => {
@@ -2073,7 +2102,7 @@ function App() {
       const text = await file.text();
       const data = JSON.parse(text);
       if (!confirm(`このバックアップを取込みますか？\n・フォルダ: ${(data.folders||[]).length}件\n・見積: ${(data.savedProposals||[]).length}件\n・メーカー: ${(data.makerDataList||[]).length}件\n・添付ファイル: ${(data.folderAttachments||[]).length}件\n\n既存データに「追加」されます（既存データは保護されます）`)) { e.target.value = ''; return; }
-      // マージ（既存ID重複は別IDで追加）
+      // マージ（既存と同じIDのデータは取り込まずスキップ。同じバックアップを2回取り込んでも重複しない）
       if (Array.isArray(data.folders)) {
         setFolders(prev => {
           const existing = new Set(prev.map(f => f.id));
@@ -2595,9 +2624,10 @@ function App() {
       });
       // カテゴリ別小計（モード別の金額算出ロジックと一致させる）
       const groupSubtotal = calculatedItems.reduce((s, i) => {
-        const pri = Number(i.price) || 0;
+        // 「隠す」行は印刷の明細・合計に出ないため、画面の小計・合計からも除く（印刷と一致させる）
+        if (i.isHiddenFromPrint) return s;
         const factor = appMode === 'proposal' ? (Number(i.packSize)||0) : (Number(i.volume)||0);
-        return s + factor * pri;
+        return s + lineAmount(factor, i.price);
       }, 0);
       if (calculatedItems.length === 0) return { ...group, cleanTitle, items: [], stats: null, subtotal: 0 };
       const sortedForStats = [...calculatedItems].sort((a,b) => b.unitPriceRaw - a.unitPriceRaw);
@@ -2612,9 +2642,9 @@ function App() {
 
   const grandTotal = useMemo(() => {
     return computedGroups.reduce((sum,g) => sum + g.items.reduce((s,i) => {
-      const pri = Number(i.price)||0;
+      if (i.isHiddenFromPrint) return s; // 「隠す」行は印刷と同じく合計に含めない
       const factor = appMode === 'proposal' ? (Number(i.packSize)||0) : (Number(i.volume)||0);
-      return s + factor*pri;
+      return s + lineAmount(factor, i.price);
     }, 0), 0);
   }, [computedGroups, appMode]);
 
@@ -2628,7 +2658,7 @@ function App() {
     if (appMode === 'kaitei') return { hasInclusive, taxTotalIncl };
     computedGroups.forEach(g => g.items.forEach(i => {
       const factor = appMode === 'proposal' ? (Number(i.packSize)||0) : (Number(i.volume)||0);
-      const amt = factor * (Number(i.price)||0);
+      const amt = i.isHiddenFromPrint ? 0 : lineAmount(factor, i.price); // 「隠す」行は印刷と同じく合計に含めない
       if (!amt) return;
       const m = (i.taxMode && i.taxMode !== '') ? i.taxMode : taxMode;
       if (m === 'inclusive') { taxTotalIncl += amt; hasInclusive = true; }
@@ -3532,7 +3562,7 @@ function App() {
             + '</tr>';
         });
       } else {
-        const totalAmt = items.reduce((s, it) => s + factor(it) * (Number(it.price)||0), 0);
+        const totalAmt = items.reduce((s, it) => s + lineAmount(factor(it), it.price), 0);
         items.forEach(it => {
           const p = Number(it.price)||0, amt = factor(it) * p;
           const share = totalAmt > 0 ? amt/totalAmt*100 : 0;
@@ -3550,7 +3580,7 @@ function App() {
         sections += '<div class="chart-box"><div class="chart-title">改定前 / 改定後 単価比較</div>' + pairBar(items) + '</div>';
       } else {
         sections += '<div class="chart-box"><div class="chart-title">単価の比較</div>' + barChart(items, it => Number(it.price)||0, it => it.name) + '</div>';
-        sections += '<div class="chart-box"><div class="chart-title">金額構成比</div>' + pieChart(items, it => factor(it) * (Number(it.price)||0), it => it.name) + '</div>';
+        sections += '<div class="chart-box"><div class="chart-title">金額構成比</div>' + pieChart(items, it => lineAmount(factor(it), it.price), it => it.name) + '</div>';
       }
       sections += '</div></section>';
     });
@@ -3669,7 +3699,7 @@ function App() {
       g.items.forEach((it, iIdx) => {
         if (it.isHiddenFromPrint) return; // 非表示にした行は社内用印刷でも出さない
         const factor = appMode === 'proposal' ? (Number(it.packSize)||0) : (Number(it.volume)||0);
-        const amt = factor * (Number(it.price)||0);
+        const amt = lineAmount(factor, it.price);
         const tm = rowTaxMode(it);
         let taxAmt = 0;
         if (amt > 0) {
@@ -3703,9 +3733,9 @@ function App() {
       // 「隠す」行は明細に出ないため、合計・粗利にも含めない（明細と合計を一致させる）
       if (it.isHiddenFromPrint) return;
       const f = appMode === 'proposal' ? (Number(it.packSize)||0) : (Number(it.volume)||0);
-      const amt = f * (Number(it.price)||0);
+      const amt = lineAmount(f, it.price);
       total += amt;
-      totalCost += f * (Number(it.cost)||0);
+      totalCost += lineAmount(f, it.cost);
       const tm = rowTaxMode(it);
       if (amt > 0) {
         if (tm === 'inclusive') totalTax += amt - Math.round(amt / 1.1);
@@ -3999,7 +4029,9 @@ function App() {
       oi.staffName ? '<div class="staff"><span class="staff-label">担当</span><strong>' + nm(oi.staffName) + '</strong></div>' : ''
     ].filter(Boolean).join('');
     const stampsHtml = '<div class="stamps"><div class="stamp-box"><div class="stamp-label">所長印</div><div class="stamp-square"></div></div><div class="stamp-box"><div class="stamp-label">担当印</div><div class="stamp-square"></div></div></div>';
-    const biko = (bottomRemarks && bottomRemarks.trim()) ? '<div class="biko"><span class="bt">備考</span>' + esc(bottomRemarks).replace(/\n/g, '<br>') + '</div>' : '';
+    // 価格改定のご案内では「本見積書」ではなく「御見積書」と表記する（入力した備考そのものは変えない）
+    const kaiteiBikoText = String(bottomRemarks || '').replace(/本見積書/g, '御見積書');
+    const biko = kaiteiBikoText.trim() ? '<div class="biko"><span class="bt">備考</span>' + esc(kaiteiBikoText).replace(/\n/g, '<br>') + '</div>' : '';
     // 提案書モードと統一感のあるスタイル（明朝・ネイビー・ブルー基調）
     return '<style>'
       + '@page{size:A4 portrait;margin:12mm 10mm;}'
@@ -4097,7 +4129,7 @@ function App() {
           return '<table class="items-table">' + colgroup + thead + '<tbody>' + (rowsHtml || emptyRow);
         })()
       + '</tbody></table>'
-      + (bottomRemarks && bottomRemarks.trim() ? '<div class="bottom-remarks"><div class="label">備考</div><div class="text">' + esc(bottomRemarks).replace(/\n/g, '<br>') + '</div></div>' : '')
+      + (kaiteiBikoText.trim() ? '<div class="bottom-remarks"><div class="label">備考</div><div class="text">' + esc(kaiteiBikoText).replace(/\n/g, '<br>') + '</div></div>' : '')
       + '</div></div>';
   };
 
@@ -4264,7 +4296,7 @@ function App() {
       const visible = g.items.filter(it => !it.isHiddenFromPrint);
       const subtotal = visible.reduce((s, it) => {
         const factor = appMode === 'proposal' ? (Number(it.packSize)||0) : (Number(it.volume)||0);
-        return s + factor * (Number(it.price)||0);
+        return s + lineAmount(factor, it.price);
       }, 0);
       // 全行が「印刷で隠す」になりカテゴリが空になった場合は、空ヘッダーを出さないよう印可
       return { ...g, items: visible, subtotal, _emptiedByHide: g.items.length > 0 && visible.length === 0 };
@@ -4303,7 +4335,7 @@ function App() {
         }
         cols += `<td class="price strong">¥${(Number(item.price)||0).toLocaleString('ja-JP')}</td>`;
         const factor = appMode === 'proposal' ? (Number(item.packSize)||0) : (Number(item.volume)||0);
-        const _amt = factor*(Number(item.price)||0);
+        const _amt = lineAmount(factor, item.price);
         cols += `<td class="price">¥${_amt.toLocaleString()}</td>`;
         if (appMode === 'quote' || (appMode === 'proposal' && showGrandTotal)) {
           const _tm = rowTaxMode(item);
@@ -4344,7 +4376,7 @@ function App() {
       const _isProposal = appMode === 'proposal';
       groupsForPrintVisible.forEach(g => g.items.forEach(i => {
         const factor = _isProposal ? (Number(i.packSize) || 0) : (Number(i.volume) || 0);
-        const amt = factor * (Number(i.price) || 0);
+        const amt = lineAmount(factor, i.price);
         if (!amt) return;
         const m = (i.taxMode && i.taxMode !== '') ? i.taxMode : taxMode;
         if (m === 'inclusive') {
@@ -5202,7 +5234,7 @@ function App() {
                             {showCaseMode && appMode === 'proposal' ? (
                               <input type="text" inputMode="decimal" value={item.casePrice === 0 || item.casePrice === '' ? '' : formatNumber(item.casePrice)} onChange={e => updateItem(group.id, item.id, 'casePrice', parseNumberInput(e.target.value))} title="ケース金額（直接編集可。単価が自動で再計算されます）" className="item-table-input w-[104px] bg-white border-2 border-blue-200 rounded px-1.5 py-1 text-right outline-none font-normal text-slate-800 no-spin" placeholder="ケース金額" />
                             ) : (
-                              <input type="text" inputMode="decimal" value={(factor*(Number(item.price)||0)) === 0 ? '' : formatNumber(factor*(Number(item.price)||0))} onChange={e => {
+                              <input type="text" inputMode="decimal" value={(lineAmount(factor, item.price)) === 0 ? '' : formatNumber(lineAmount(factor, item.price))} onChange={e => {
                                 const newAmt = Number(parseNumberInput(e.target.value)) || 0;
                                 const f = appMode === 'proposal' ? (Number(item.packSize)||0) : (Number(item.volume)||0);
                                 if (f > 0) updateItem(group.id, item.id, 'price', newAmt / f);
@@ -5210,7 +5242,7 @@ function App() {
                             )}
                           </td>
                           {(appMode === 'quote' || (appMode === 'proposal' && showGrandTotal)) && (() => {
-                            const amount = factor * (Number(item.price)||0);
+                            const amount = lineAmount(factor, item.price);
                             const tm = rowTaxMode(item);
                             let taxAmt = 0;
                             if (amount > 0) {
@@ -5281,10 +5313,10 @@ function App() {
                           if (v > 0 && bs > 0) handleInputChange(group.id, 'price', newUp * v / bs);
                         }} placeholder="単価" className="item-table-input w-[90px] bg-blue-50 border border-blue-300 rounded px-2 py-1 text-right outline-none font-normal no-spin" /></td>;
                       })()}
-                      <td className="px-2 py-2 text-right font-bold text-emerald-800 bg-emerald-50/40">¥{((appMode === 'proposal' ? Number(inp.packSize)||0 : Number(inp.volume)||0) * (Number(inp.price)||0)).toLocaleString()}</td>
+                      <td className="px-2 py-2 text-right font-bold text-emerald-800 bg-emerald-50/40">¥{lineAmount(appMode === 'proposal' ? inp.packSize : inp.volume, inp.price).toLocaleString()}</td>
                       {(appMode === 'quote' || (appMode === 'proposal' && showGrandTotal)) && (() => {
                         const f = appMode === 'proposal' ? (Number(inp.packSize)||0) : (Number(inp.volume)||0);
-                        const amt = f * (Number(inp.price)||0);
+                        const amt = lineAmount(f, inp.price);
                         const tm = rowTaxMode(inp);
                         let taxAmt = 0;
                         if (amt > 0) {
@@ -6689,7 +6721,7 @@ function App() {
               </div>
               <div className="bg-emerald-50 border border-emerald-200 rounded p-3">
                 <div className="font-bold text-emerald-800 text-sm mb-2">📤 バックアップを取込み</div>
-                <div className="text-xs text-slate-600 mb-3">既存データに「追加」されます。既存データは保護されます（重複は別IDで複製）</div>
+                <div className="text-xs text-slate-600 mb-3">既存データに「追加」されます。既存データは保護されます（既にある同じデータは取り込まずスキップします）</div>
                 <label className="inline-block bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded text-sm font-bold cursor-pointer">
                   📤 ファイルから取込み
                   <input type="file" accept=".json" className="hidden" onChange={importFullBackup} />
