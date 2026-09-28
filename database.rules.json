@@ -5,20 +5,37 @@
     "users": {
       "$syncKey": {
         ".read": "auth != null",
-        ".write": "auth != null"
+        ".write": "auth != null",
+        "data": {
+          ".validate": "newData.isString() || newData.hasChildren()"
+        },
+        "$other": {
+          ".validate": false
+        }
       }
     },
     "inbox": {
       "$inboxKey": {
         ".read": "auth != null",
-        ".write": "auth != null"
+        "$shareId": {
+          ".write": "auth != null",
+          ".validate": "newData.hasChildren(['from', 'sentAt', 'data']) && newData.child('sentAt').isNumber() && newData.child('data').isString()"
+        }
+      }
+    },
+    "qrshare": {
+      "$token": {
+        ".read": "auth != null",
+        ".write": "auth != null && $token.length >= 8",
+        ".validate": "newData.hasChildren(['from', 'sentAt', 'ttl', 'data']) && newData.child('ttl').isNumber() && newData.child('ttl').val() <= now + 900000 && newData.child('data').isString()"
       }
     },
     "presence": {
       "$officeCode": {
         ".read": "auth != null",
         "$userKey": {
-          ".write": "auth != null"
+          ".write": "auth != null",
+          ".validate": "newData.hasChildren(['online', 'lastSeen']) && newData.child('online').isBoolean() && newData.child('lastSeen').isNumber()"
         }
       }
     },
