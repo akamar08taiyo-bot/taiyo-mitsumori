@@ -351,6 +351,118 @@ const cleanForFirebase = (obj) => {
   return obj;
 };
 
+// === 営業所共有ファイル（仕切り・チラシ/事例集・発注書・見積の添付）の一覧 ===
+// ファイル本体(base64)ごと一覧を購読すると、起動のたびに全ファイルをダウンロードすることになり、
+// 合計が Realtime Database の1回の読込上限(256MB)を超えた時点で一覧そのものが読めなくなる
+// （ヘッダーに「一部共有エラー」(TOO_BIG)が出て、共有の仕切りが1件も表示されない）。
+// そこで一覧は軽い「目録」（メーカー名・ファイル名・サイズ等）だけを購読し、
+// 本体は開く・保存・印刷・コピーするときに1件ずつ取得する。
+// 目録の置き場所 {path}/__index__/{営業所}/{key} は既存ルールの {path}/$officeCode に
+// 当てはまるため、データベースルールの変更・再デプロイは不要。
+const OFFICE_FILE_PATHS = { makers: 'office-shared-makers', flyers: 'office-shared-flyers', orders: 'office-shared-orders', quoteFiles: 'office-shared-quote-files' };
+const OFFICE_FILE_INDEX = '__index__';
+// 目録に載せる項目。目録の無い既存データから目録を作るときは、これらを1項目ずつ読む（本体は読まない）
+const OFFICE_FILE_META_FIELDS = ['id', 'makerName', 'facilityName', 'fileName', 'displayName', 'fileType', 'fileSize', 'effectiveDate', 'uploadedAt', 'uploadedBy', '_sharedBy', '_sharedAt'];
+// 画面用に付けた内部項目（_key/_path）を除いた、保存用のレコード
+const officeFileRecord = (m) => { const { _key, _path, _vkey, ...rec } = m || {}; return rec; };
+// 目録に書く内容（本体 data を除く）
+const officeFileMeta = (m) => { const { data, ...meta } = officeFileRecord(m); return meta; };
+
+// 指定パス直下のキー一覧だけを取得する（REST の shallow 読込。ファイル本体はダウンロードしない）。
+// SDK には shallow 読込が無いため、ここだけ REST を使う。
+const fetchRtdbShallowKeys = async (path) => {
+  let token = null;
+  try {
+    if (firebaseAuth) {
+      if (firebaseAuth.authStateReady) await firebaseAuth.authStateReady();
+      if (!firebaseAuth.currentUser) {
+        // 匿名ログインの完了を少し待つ（初回起動の直後など）
+        await new Promise(resolve => {
+          let finished = false, off = null;
+          const done = () => { if (finished) return; finished = true; clearTimeout(t); if (off) off(); resolve(); };
+          const t = setTimeout(done, 8000);
+          off = onAuthStateChanged(firebaseAuth, u => { if (u) done(); });
+          if (finished) off();
+        });
+      }
+      if (firebaseAuth.currentUser) token = await firebaseAuth.currentUser.getIdToken();
+    }
+  } catch (e) { console.warn('[共有目録] 認証トークンの取得に失敗', e); }
+  const url = `${firebaseConfig.databaseURL}/${path.split('/').map(encodeURIComponent).join('/')}.json?shallow=true${token ? '&auth=' + encodeURIComponent(token) : ''}`;
+  const res = await fetch(url, { cache: 'no-store' });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(`キー一覧の取得に失敗 (${res.status}${body && body.error ? ': ' + body.error : ''})`);
+  return body && typeof body === 'object' ? Object.keys(body) : [];
+};
+
+// 目録の無い既存レコードの目録用項目を、本体 data を除いて1項目ずつ読む
+const readOfficeFileMeta = async (recPath) => {
+  const vals = await Promise.all(OFFICE_FILE_META_FIELDS.map(f => dbGet(dbRef(firebaseDB, `${recPath}/${f}`)).then(s => s.val()).catch(() => null)));
+  const meta = {};
+  OFFICE_FILE_META_FIELDS.forEach((f, i) => { if (vals[i] !== null && vals[i] !== undefined) meta[f] = vals[i]; });
+  return Object.keys(meta).length > 0 ? meta : null;
+};
+
+// 目録と本体を突き合わせ、目録の抜け（旧バージョンのアプリで登録された分など）を補い、
+// 本体が消えた目録の行を取り除く。getIndex は照合開始時点の目録を返す
+// （キー一覧を取る前の目録と比べることで、照合中に登録された分を誤って消さない）。
+const reconcileOfficeFileIndex = async (base, officeCode, getIndex) => {
+  const before = getIndex() || {};
+  const keys = await fetchRtdbShallowKeys(`${base}/${officeCode}`);
+  const keySet = new Set(keys);
+  const idxBase = `${OFFICE_FILE_INDEX}/${officeCode}`;
+  const stale = Object.keys(before).filter(k => !keySet.has(k));
+  if (stale.length > 0) await dbUpdate(dbRef(firebaseDB, base), Object.fromEntries(stale.map(k => [`${idxBase}/${k}`, null])));
+  const missing = keys.filter(k => !before[k]);
+  for (let i = 0; i < missing.length; i += 10) {
+    const chunk = missing.slice(i, i + 10);
+    const metas = await Promise.all(chunk.map(k => readOfficeFileMeta(`${base}/${officeCode}/${k}`)));
+    const upd = {};
+    chunk.forEach((k, j) => { if (metas[j]) upd[`${idxBase}/${k}`] = metas[j]; });
+    if (Object.keys(upd).length > 0) await dbUpdate(dbRef(firebaseDB, base), upd);
+  }
+};
+
+// 営業所共有ファイルの一覧（目録）を購読する。各要素には本体の場所 _path と キー _key が付く（data は無い）。
+// status: 'idle' | 'loading'（目録の照合中）| 'ready' | 'error'
+// readyTick: Firebase の初期化が後から成功したときに購読し直すための値
+function useOfficeFileIndex(cat, officeCode, enabled, onError, readyTick) {
+  const [items, setItems] = useState([]);
+  const [status, setStatus] = useState('idle');
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+  useEffect(() => {
+    setItems([]);
+    if (!enabled || !officeCode || !firebaseDB) { setStatus('idle'); return; }
+    setStatus('loading');
+    const base = OFFICE_FILE_PATHS[cat];
+    const toItems = (v) => Object.entries(v || {})
+      .filter(([, m]) => m && typeof m === 'object')
+      .map(([k, m]) => ({ ...m, id: m.id || k, _key: k, _path: `${base}/${officeCode}/${k}` }));
+    let cancelled = false, latest = null, reconcileStarted = false, legacyOff = null;
+    const offIndex = onValue(dbRef(firebaseDB, `${base}/${OFFICE_FILE_INDEX}/${officeCode}`), snap => {
+      latest = snap.val() || {};
+      if (cancelled || legacyOff) return;
+      setItems(toItems(latest));
+      if (reconcileStarted) return;
+      reconcileStarted = true;
+      reconcileOfficeFileIndex(base, officeCode, () => latest)
+        .then(() => { if (!cancelled) setStatus('ready'); })
+        .catch(err => {
+          console.warn('[共有目録] 照合に失敗', base, err);
+          if (cancelled) return;
+          if (Object.keys(latest || {}).length > 0) { setStatus('ready'); return; }
+          // 目録が空でキー一覧も取れない環境では、従来どおり本体ごと購読する（件数が少なければ動く）
+          legacyOff = onValue(dbRef(firebaseDB, `${base}/${officeCode}`), s2 => {
+            if (!cancelled) { setItems(toItems(s2.val())); setStatus('ready'); }
+          }, e2 => { if (!cancelled) { setStatus('error'); onErrorRef.current && onErrorRef.current(e2); } });
+        });
+    }, err => { if (!cancelled) { setStatus('error'); onErrorRef.current && onErrorRef.current(err); } });
+    return () => { cancelled = true; try { offIndex(); } catch {} try { if (legacyOff) legacyOff(); } catch {} };
+  }, [cat, officeCode, enabled, readyTick]);
+  return { items, status };
+}
+
 // === IndexedDB: 大容量ファイル（仕切りPDF/Excel等）の保存先 ===
 // localStorage(約5MB)はPDF/Excelで容量超過し黙って保存失敗→再読込で消える。
 // IndexedDBは数百MB～使えるため、ファイルを含むデータはこちらに保存する。
@@ -896,8 +1008,7 @@ function App() {
   const [officeShareTab, setOfficeShareTab] = useState(null); // 営業所共有：null=選択画面 / 'quotes'=見積もり一覧 / 'makers'=仕切り一覧 / 'flyers'=チラシ・事例集共有 / 'orders'=発注書共有
   const [expandedSharedMakers, setExpandedSharedMakers] = useState(null); // 営業所共有：開いているメーカー名（1つだけ／アコーディオン）
   // チラシ・事例集共有／発注書共有：仕切り一覧と同じ仕組み（営業所共有のみ・個人分なし）
-  const [officeSharedFlyers, setOfficeSharedFlyers] = useState([]);
-  const [officeSharedOrders, setOfficeSharedOrders] = useState([]);
+  // 一覧データ(officeSharedFlyers/officeSharedOrders)は下の useOfficeFileIndex で購読する
   const [expandedSharedFlyers, setExpandedSharedFlyers] = useState(null);
   const [expandedSharedOrders, setExpandedSharedOrders] = useState(null);
   const [showOfficeFlyerReg, setShowOfficeFlyerReg] = useState(false);
@@ -1002,8 +1113,7 @@ function App() {
     setFolderAttachments(prev => prev.filter(a => a.id !== id));
     notify('削除しました', 'success');
   };
-  // 営業所共有のメーカーデータ
-  const [officeSharedMakerData, setOfficeSharedMakerData] = useState([]);
+  // 営業所共有のメーカーデータ(officeSharedMakerData)は下の useOfficeFileIndex で購読する
   const [savedProposals, setSavedProposals] = useState(() => loadStorage(STORAGE_KEYS.PROPOSALS, []));
   const [folders, setFolders] = useState(() => loadStorage(STORAGE_KEYS.FOLDERS, []));
   const [selectedFolderId, setSelectedFolderId] = useState(null);
@@ -1560,38 +1670,74 @@ function App() {
     for (let i = 0; i < len; i++) buf[i] = bin.charCodeAt(i);
     return URL.createObjectURL(new Blob([buf], { type: mime }));
   };
-  const handleMakerDownload = (m) => {
-    if (!m || !m.data) { notify('ファイルデータが見つかりません', 'error'); return; }
+  // 営業所共有ファイルの本体(base64)を、必要になったときに1件だけ取得する（一覧の目録には本体が無い）。
+  // 直近に開いた数件はメモリに残し、同じファイルを開き直すたびにダウンロードしない。
+  const officeFileDataCacheRef = useRef(new Map());
+  const loadOfficeFileData = async (m) => {
+    if (!m || m.data || !m._path) return m;
+    const cache = officeFileDataCacheRef.current;
+    let data = cache.get(m._path);
+    if (data) cache.delete(m._path);
+    else {
+      if (!firebaseDB) throw new Error('Firebase未接続のためファイルを取得できません');
+      data = (await dbGet(dbRef(firebaseDB, `${m._path}/data`))).val();
+      if (!data) throw new Error('ファイルが見つかりません（他の方が削除した可能性があります）');
+    }
+    cache.set(m._path, data);
+    while (cache.size > 4) cache.delete(cache.keys().next().value);
+    return { ...m, data };
+  };
+  // 本体の取得を待ってからタブを開くとポップアップとしてブロックされるため、
+  // クリックの時点で空のタブを開いておき、取得後にそのタブへ表示する
+  const openPendingTab = () => {
+    const w = window.open('', '_blank');
+    if (w) { try { w.document.title = '読み込み中…'; w.document.body.innerHTML = '<p style="font:16px sans-serif;padding:24px;color:#475569">ファイルを読み込んでいます…</p>'; } catch {} }
+    return w;
+  };
+  // ファイル(data URL)を新しいタブ（または先に開いておいたタブ）に表示する
+  const showFileInTab = (dataUrl, tab) => {
+    const url = dataUrlToBlobUrl(dataUrl);
+    let w = tab && !tab.closed ? tab : null;
+    if (w) w.location.replace(url);
+    else w = window.open(url, '_blank');
+    if (!w) { URL.revokeObjectURL(url); return false; }
+    // タブが読み込んだ後に解放（早すぎると表示できないため十分に待つ）
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch {} }, 60000);
+    return true;
+  };
+  const handleMakerDownload = async (m) => {
+    if (!m || (!m.data && !m._path)) { notify('ファイルデータが見つかりません', 'error'); return false; }
+    let full = m;
+    if (!m.data) {
+      notify(`「${m.fileName || 'ファイル'}」を読み込んでいます…`);
+      try { full = await loadOfficeFileData(m); }
+      catch (err) { notify('ダウンロードできませんでした: ' + (err?.message || err), 'error'); return false; }
+    }
     // 巨大な data URL を href に直接指定すると失敗することがあるため Blob 経由
     let url = null, isBlob = false;
-    try { url = dataUrlToBlobUrl(m.data); isBlob = true; } catch { url = m.data; }
+    try { url = dataUrlToBlobUrl(full.data); isBlob = true; } catch { url = full.data; }
     const a = document.createElement('a');
-    a.href = url; a.download = m.fileName || 'download';
+    a.href = url; a.download = full.fileName || 'download';
     document.body.appendChild(a); a.click();
     setTimeout(() => { try { a.remove(); } catch {} if (isBlob) { try { URL.revokeObjectURL(url); } catch {} } }, 5000);
+    return true;
   };
   // 仕切りファイルを開いて表示（PDF/画像は新規タブ、Excel等はダウンロード）
-  const openMakerFile = (m) => {
-    if (!m || !m.data) { notify('ファイルデータが見つかりません', 'error'); return; }
+  const openMakerFile = async (m) => {
+    if (!m || (!m.data && !m._path)) { notify('ファイルデータが見つかりません', 'error'); return; }
     const isPdf = (m.fileType || '').includes('pdf') || /\.pdf$/i.test(m.fileName || '');
     const isImg = (m.fileType || '').includes('image') || /\.(png|jpe?g|gif|webp)$/i.test(m.fileName || '');
     if (!isPdf && !isImg) {
       // Excel/CSV/Word 等はブラウザで表示できないためダウンロードする
-      handleMakerDownload(m);
-      notify(`「${m.fileName}」をダウンロードしました（Excel等はブラウザでは表示できません）`, 'success');
+      if (await handleMakerDownload(m)) notify(`「${m.fileName}」をダウンロードしました（Excel等はブラウザでは表示できません）`, 'success');
       return;
     }
+    const tab = m.data ? null : openPendingTab();
     try {
-      const url = dataUrlToBlobUrl(m.data);
-      const w = window.open(url, '_blank');
-      if (!w) {
-        URL.revokeObjectURL(url);
-        notify('ポップアップがブロックされました。「ダウンロード」からご覧ください。', 'error');
-        return;
-      }
-      // タブが読み込んだ後に解放（早すぎると表示できないため十分に待つ）
-      setTimeout(() => { try { URL.revokeObjectURL(url); } catch {} }, 60000);
+      const full = m.data ? m : await loadOfficeFileData(m);
+      if (!showFileInTab(full.data, tab)) notify('ポップアップがブロックされました。「ダウンロード」からご覧ください。', 'error');
     } catch (err) {
+      try { if (tab) tab.close(); } catch {}
       notify('ファイルを開けませんでした: ' + (err?.message || err), 'error');
     }
   };
@@ -1614,31 +1760,33 @@ function App() {
     notify('メーカー名を変更しました', 'success');
   };
   // メーカー仕切りを印刷（PDF/画像は新規タブで開いて印刷ダイアログ）
-  const handleMakerPrint = (m) => {
+  const handleMakerPrint = async (m) => {
+    if (!m || (!m.data && !m._path)) { notify('ファイルデータが見つかりません', 'error'); return; }
+    const isPdf = (m.fileType||'').includes('pdf') || /\.pdf$/i.test(m.fileName||'');
+    const isImg = (m.fileType||'').includes('image') || /\.(png|jpe?g|gif|webp)$/i.test(m.fileName||'');
+    if (!isPdf && !isImg) {
+      // Excel等はブラウザ印刷不可のためダウンロードに案内
+      notify('このファイル形式（Excel等）はブラウザで印刷できません。ダウンロードして開いてください。', 'info');
+      handleMakerDownload(m);
+      return;
+    }
+    // PDF はビューアの印刷ボタンから印刷してもらう（開く処理と同じ）
+    if (isPdf) { await openMakerFile(m); return; }
+    // 画像：印刷用のタブを先に開いておき（ポップアップのブロック対策）、本体が揃ってから印刷する
+    const w = window.open('', '_blank');
+    if (!w) { notify('ポップアップがブロックされました。ダウンロードして印刷してください。', 'error'); return; }
     try {
-      if (!m || !m.data) { notify('ファイルデータが見つかりません', 'error'); return; }
-      const isPdf = (m.fileType||'').includes('pdf') || /\.pdf$/i.test(m.fileName||'');
-      const isImg = (m.fileType||'').includes('image') || /\.(png|jpe?g|gif|webp)$/i.test(m.fileName||'');
-      if (!isPdf && !isImg) {
-        // Excel等はブラウザ印刷不可のためダウンロードに案内
-        notify('このファイル形式（Excel等）はブラウザで印刷できません。ダウンロードして開いてください。', 'info');
-        handleMakerDownload(m);
-        return;
-      }
+      const full = m.data ? m : await loadOfficeFileData(m);
       // 巨大な base64 を document.write で埋め込むと固まるため Blob URL で開く
-      const url = dataUrlToBlobUrl(m.data);
-      if (isPdf) {
-        // PDF はビューアの印刷ボタンから印刷してもらう
-        const w = window.open(url, '_blank');
-        if (!w) { URL.revokeObjectURL(url); notify('ポップアップがブロックされました。ダウンロードして印刷してください。', 'error'); return; }
-      } else {
-        const w = window.open('', '_blank');
-        if (!w) { URL.revokeObjectURL(url); notify('ポップアップがブロックされました。ダウンロードして印刷してください。', 'error'); return; }
-        w.document.write(`<html><head><meta charset="utf-8"><title>${escapeHTML(m.fileName||'')}</title></head><body style="margin:0;text-align:center" onload="setTimeout(function(){window.print()},400)"><img src="${url}" style="max-width:100%"></body></html>`);
-        w.document.close();
-      }
+      const url = dataUrlToBlobUrl(full.data);
+      w.document.open();
+      w.document.write(`<html><head><meta charset="utf-8"><title>${escapeHTML(m.fileName||'')}</title></head><body style="margin:0;text-align:center" onload="setTimeout(function(){window.print()},400)"><img src="${url}" style="max-width:100%"></body></html>`);
+      w.document.close();
       setTimeout(() => { try { URL.revokeObjectURL(url); } catch {} }, 60000);
-    } catch (err) { notify('印刷エラー: '+(err?.message||err), 'error'); }
+    } catch (err) {
+      try { w.close(); } catch {}
+      notify('印刷エラー: '+(err?.message||err), 'error');
+    }
   };
   // ドラッグ&ドロップでメーカー仕切りを登録
   const handleMakerDrop = async (e) => {
@@ -1658,6 +1806,33 @@ function App() {
       } catch (err) { notify('登録エラー: ' + (err?.message||err), 'error'); }
     }
   };
+  // === 営業所共有ファイルの書込：本体({path}/{営業所}/{key})と一覧の目録を1回の更新でまとめて書く ===
+  // 本体だけだと一覧に出ず、目録だけだと開けないため、必ず両方を同時に書き込む。
+  const writeOfficeFile = (cat, key, rec) => {
+    const full = cleanForFirebase(officeFileRecord(rec));
+    return dbUpdate(dbRef(firebaseDB, OFFICE_FILE_PATHS[cat]), {
+      [`${loginInfo.officeCode}/${key}`]: full,
+      [`${OFFICE_FILE_INDEX}/${loginInfo.officeCode}/${key}`]: officeFileMeta(full),
+    });
+  };
+  const removeOfficeFile = (cat, m) => {
+    const key = m._key || m.id;
+    return dbUpdate(dbRef(firebaseDB, OFFICE_FILE_PATHS[cat]), {
+      [`${loginInfo.officeCode}/${key}`]: null,
+      [`${OFFICE_FILE_INDEX}/${loginInfo.officeCode}/${key}`]: null,
+    });
+  };
+  // 名前などの項目だけを変更する。一覧の要素にはファイル本体が無いため、要素ごと書き戻すと
+  // 本体が消えてしまう。必ず項目単位で更新する（目録も同時に更新）。
+  const updateOfficeFileFields = async (cat, m, fields) => {
+    const base = OFFICE_FILE_PATHS[cat], key = m._key || m.id;
+    // 他の方が削除済みの場合に、名前だけの空のレコードを作ってしまわないよう確認
+    const exists = (await dbGet(dbRef(firebaseDB, `${base}/${loginInfo.officeCode}/${key}/fileName`))).exists();
+    if (!exists) throw new Error('このファイルは既に削除されています');
+    const upd = { [`${OFFICE_FILE_INDEX}/${loginInfo.officeCode}/${key}`]: cleanForFirebase(officeFileMeta({ ...m, ...fields })) };
+    Object.entries(fields).forEach(([f, v]) => { if (v !== undefined) upd[`${loginInfo.officeCode}/${key}/${f}`] = v; });
+    await dbUpdate(dbRef(firebaseDB, base), upd);
+  };
   // メーカーデータを営業所共有へ送信
   // 【修正】従来は配列全体を毎回書き込んでいたため、ファイルが増えると
   // 書込サイズが肥大化し共有エラーになっていた。1ファイルずつ個別の子ノード
@@ -1674,19 +1849,19 @@ function App() {
       notify(`このファイルは約${Math.round(approxBytes/1024/1024)}MBで大きすぎます（上限9MB）。共有できません。`, 'error');
       return;
     }
-    // 内容が全く同じ仕切りが既に共有されていれば重複させない
-    const dupMk = (officeSharedMakerData||[]).find(x => x && x.makerName===m.makerName && x.fileName===m.fileName && x.fileSize===m.fileSize && x.data===m.data);
+    // 同じ仕切り（メーカー名・ファイル名・サイズが一致）が既に共有されていれば重複させない
+    // （一覧の目録にはファイル本体が無いため、本体ではなく名前とサイズで照合する）
+    const dupMk = (officeSharedMakerData||[]).find(x => x && x.makerName===m.makerName && x.fileName===m.fileName && x.fileSize===m.fileSize);
     if (dupMk) { notify('同じ内容の仕切りが既に営業所共有にあります（重複登録しません）'); return; }
     if (!confirm(`「${m.makerName} / ${m.fileName}」を営業所「${loginInfo.officeCode}」全員で共有しますか？`)) return;
     try {
       const id = m.id || genId('mk');
-      const r = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${id}`);
-      await dbSet(r, cleanForFirebase({ ...m, id, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+      await writeOfficeFile('makers', id, { ...m, id, _sharedBy: loginInfo.userName, _sharedAt: Date.now() });
       notify('営業所共有に追加しました', 'success');
     } catch (err) { notify('共有エラー: '+(err?.message||err)+'\nファイル容量が大きい場合は共有できません。', 'error'); }
   };
   // 複数のメーカー仕切りを一括で営業所共有へ送信（一括／選択どちらも共通）。
-  // shareMakerData と同じ「内容が完全一致なら追加しない」「9MB超は不可」のルールを適用し、
+  // shareMakerData と同じ「同じ仕切りなら追加しない」「9MB超は不可」のルールを適用し、
   // 1ファイルずつ個別の子ノードへ書き込む（既存の巨大配列書込エラー対策を踏襲）。
   const shareMultipleMakerData = async (list) => {
     if (!firebaseDB || !loginInfo || !cloudSyncEnabled) {
@@ -1695,7 +1870,7 @@ function App() {
     }
     if (!list || list.length === 0) return;
     const MAX_BYTES = 9 * 1024 * 1024;
-    const sig = (m) => `${m.makerName}|${m.fileName}|${m.fileSize}|${m.data}`;
+    const sig = (m) => `${m.makerName}|${m.fileName}|${m.fileSize}`;
     const seen = new Set((officeSharedMakerData || []).filter(Boolean).map(sig));
     let addedCount = 0, dupCount = 0, errorCount = 0;
     for (const m of list) {
@@ -1706,8 +1881,7 @@ function App() {
       if (approxBytes > MAX_BYTES) { errorCount++; continue; }
       try {
         const id = m.id || genId('mk');
-        const r = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${id}`);
-        await dbSet(r, cleanForFirebase({ ...m, id, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+        await writeOfficeFile('makers', id, { ...m, id, _sharedBy: loginInfo.userName, _sharedAt: Date.now() });
         addedCount++;
       } catch (err) { errorCount++; }
     }
@@ -1736,8 +1910,7 @@ function App() {
         // 自分の手元にも保存
         setMakerDataList(prev => [rec, ...prev]);
         // 営業所共有へ書込（個別の子ノードに小さく安全に書込）
-        const r = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${id}`);
-        await dbSet(r, cleanForFirebase({ ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+        await writeOfficeFile('makers', id, { ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() });
         notify(`「${makerName}」の「${f.name}」を営業所共有に登録しました`, 'success');
       } catch (err) { notify('登録/共有エラー: ' + (err?.message||err), 'error'); }
     }
@@ -1754,47 +1927,36 @@ function App() {
     const makerName = document.getElementById('office-shared-maker-name')?.value || '';
     await registerMakerFilesToOffice(e.dataTransfer?.files, makerName);
   };
-  // 営業所共有メーカーデータの購読（新形式=オブジェクトマップ / 旧形式=配列 の両対応）
+  // 営業所共有ファイル（仕切り・チラシ/事例集・発注書・見積の添付）の一覧の購読。
+  // 一覧は軽い目録だけを読み、ファイル本体は開く時に loadOfficeFileData で1件ずつ取得する。
+  const officeShareOn = !!loginInfo && cloudSyncEnabled;
+  const { items: officeSharedMakerData, status: officeSharedMakerStatus } = useOfficeFileIndex('makers', loginInfo?.officeCode, officeShareOn, e => reportSharedSyncError('メーカー仕切り共有', e), firebaseReadyTick);
+  const { items: officeSharedFlyers, status: officeSharedFlyerStatus } = useOfficeFileIndex('flyers', loginInfo?.officeCode, officeShareOn, e => reportSharedSyncError('チラシ・事例集共有', e), firebaseReadyTick);
+  const { items: officeSharedOrders, status: officeSharedOrderStatus } = useOfficeFileIndex('orders', loginInfo?.officeCode, officeShareOn, e => reportSharedSyncError('発注書共有', e), firebaseReadyTick);
+  const { items: officeSharedQuoteFiles } = useOfficeFileIndex('quoteFiles', loginInfo?.officeCode, officeShareOn, e => reportSharedSyncError('見積ファイル共有', e), firebaseReadyTick);
+  // 「仕切りを見ながら」で選べる仕切り（自分の分＋営業所共有の分）。
+  // 共有の分は一覧に本体が無いため、選んだときに本体を取得して表示する。
+  const shikiriViewerItems = useMemo(() => [
+    ...makerDataList.filter(Boolean).map(m => ({ ...m, _vkey: 'own:' + m.id })),
+    ...officeSharedMakerData.map(m => ({ ...m, _vkey: 'shr:' + m._key })),
+  ], [makerDataList, officeSharedMakerData]);
+  const shikiriViewerItem = shikiriViewerItems.find(m => m._vkey === viewerMakerId) || shikiriViewerItems[0] || null;
+  const [shikiriViewerFile, setShikiriViewerFile] = useState({ vkey: null, url: null, error: '' });
   useEffect(() => {
-    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
-    const r = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}`);
-    const unsub = onValue(r, snap => {
-      const v = snap.val();
-      let list = [];
-      if (Array.isArray(v)) list = v.filter(Boolean);
-      else if (v && typeof v === 'object') list = Object.values(v).filter(Boolean);
-      setOfficeSharedMakerData(list);
-    }, e => reportSharedSyncError('メーカー仕切り共有', e));
-    return () => { try { dbOff(r); } catch {} };
-  }, [loginInfo?.officeCode, cloudSyncEnabled]);
-  // チラシ・事例集共有の購読（営業所共有のみ・個人分なし）
-  useEffect(() => {
-    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
-    const r = dbRef(firebaseDB, `office-shared-flyers/${loginInfo.officeCode}`);
-    const unsub = onValue(r, snap => {
-      const v = snap.val();
-      let list = [];
-      if (Array.isArray(v)) list = v.filter(Boolean);
-      else if (v && typeof v === 'object') list = Object.values(v).filter(Boolean);
-      setOfficeSharedFlyers(list);
-    }, e => reportSharedSyncError('チラシ・事例集共有', e));
-    return () => { try { dbOff(r); } catch {} };
-  }, [loginInfo?.officeCode, cloudSyncEnabled]);
-  // 発注書共有の購読（営業所共有のみ・個人分なし）
-  useEffect(() => {
-    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
-    const r = dbRef(firebaseDB, `office-shared-orders/${loginInfo.officeCode}`);
-    const unsub = onValue(r, snap => {
-      const v = snap.val();
-      let list = [];
-      if (Array.isArray(v)) list = v.filter(Boolean);
-      else if (v && typeof v === 'object') list = Object.values(v).filter(Boolean);
-      setOfficeSharedOrders(list);
-    }, e => reportSharedSyncError('発注書共有', e));
-    return () => { try { dbOff(r); } catch {} };
-  }, [loginInfo?.officeCode, cloudSyncEnabled]);
+    const vm = shikiriViewerItem;
+    if (!showShikiriViewer || !vm || vm.data) return;
+    const viewable = /pdf|image/.test(vm.fileType || '') || /\.(pdf|png|jpe?g|gif|webp|bmp)$/i.test(vm.fileName || '');
+    if (!viewable) return;
+    let cancelled = false, url = null;
+    setShikiriViewerFile({ vkey: vm._vkey, url: null, error: '' });
+    loadOfficeFileData(vm).then(full => {
+      if (cancelled) return;
+      url = dataUrlToBlobUrl(full.data);
+      setShikiriViewerFile({ vkey: vm._vkey, url, error: '' });
+    }).catch(err => { if (!cancelled) setShikiriViewerFile({ vkey: vm._vkey, url: null, error: err?.message || String(err) }); });
+    return () => { cancelled = true; if (url) { try { URL.revokeObjectURL(url); } catch {} } };
+  }, [showShikiriViewer, shikiriViewerItem?._vkey, !!shikiriViewerItem?.data]);
   // チラシ・事例集共有／発注書共有 共通の書込処理（仕切り共有と同じ方式。個人分は持たず営業所共有のみ）
-  const OFFICE_SHARE_CATEGORY_PATH = { flyers: 'office-shared-flyers', orders: 'office-shared-orders' };
   const registerFilesToOfficeCategory = async (category, files, groupName) => {
     files = Array.from(files || []);
     if (files.length === 0) return;
@@ -1807,25 +1969,16 @@ function App() {
         const data = await fileToBase64(f);
         const id = genId('sh');
         const rec = { id, makerName: groupName.trim(), fileName: f.name, fileType: f.type, fileSize: f.size, data, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName || '' };
-        const r = dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}/${id}`);
-        await dbSet(r, cleanForFirebase({ ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+        await writeOfficeFile(category, id, { ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() });
         notify(`「${groupName}」の「${f.name}」を営業所共有に登録しました`, 'success');
       } catch (err) { notify('登録エラー: ' + (err?.message || err), 'error'); }
     }
   };
-  const deleteFromOfficeCategory = async (category, id) => {
+  const deleteFromOfficeCategory = async (category, m) => {
     if (!firebaseDB || !loginInfo) return;
     if (!confirm('営業所共有から削除しますか？\n（全員から見えなくなります）')) return;
     try {
-      const baseR = dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}`);
-      const snap = await dbGet(baseR);
-      const v = snap.val();
-      if (Array.isArray(v)) {
-        await dbSet(baseR, v.filter(m => m && m.id !== id));
-      } else if (v && typeof v === 'object') {
-        const key = Object.prototype.hasOwnProperty.call(v, id) ? id : Object.keys(v).find(k => v[k] && v[k].id === id);
-        if (key) await dbSet(dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}/${key}`), null);
-      }
+      await removeOfficeFile(category, m);
       notify('削除しました', 'success');
     } catch (err) { notify('削除エラー: ' + (err?.message || err), 'error'); }
   };
@@ -1835,32 +1988,14 @@ function App() {
     if (newMaker === null) return;
     const newFile = prompt('ファイル表示名を編集', m.fileName || '');
     if (newFile === null) return;
-    const updated = { ...m, makerName: (newMaker.trim() || m.makerName), fileName: (newFile.trim() || m.fileName) };
     try {
-      const baseR = dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}`);
-      const snap = await dbGet(baseR);
-      const v = snap.val();
-      if (Array.isArray(v)) {
-        await dbSet(baseR, v.map(x => (x && x.id === m.id ? updated : x)));
-      } else if (v && typeof v === 'object') {
-        const key = Object.prototype.hasOwnProperty.call(v, m.id) ? m.id : Object.keys(v).find(k => v[k] && v[k].id === m.id);
-        if (key) await dbSet(dbRef(firebaseDB, `${OFFICE_SHARE_CATEGORY_PATH[category]}/${loginInfo.officeCode}/${key}`), cleanForFirebase(updated));
-      }
+      await updateOfficeFileFields(category, m, { makerName: (newMaker.trim() || m.makerName), fileName: (newFile.trim() || m.fileName) });
       notify('名前を変更しました（全員に反映されます）', 'success');
     } catch (err) { notify('名前変更エラー: ' + (err?.message || err), 'error'); }
   };
   // 営業所共有の見積もり一覧（施設名フォルダ）への添付ファイル登録。
   // 他で作成された見積・価格改定案内等を、施設名を入力し直さずそのまま共有できる（施設名は開いている施設から自動判定）。
-  const [officeSharedQuoteFiles, setOfficeSharedQuoteFiles] = useState([]);
-  useEffect(() => {
-    if (!loginInfo || !firebaseDB || !cloudSyncEnabled) return;
-    const r = dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}`);
-    const unsub = onValue(r, snap => {
-      const v = snap.val();
-      setOfficeSharedQuoteFiles(v && typeof v === 'object' ? Object.values(v).filter(Boolean) : []);
-    }, e => reportSharedSyncError('見積ファイル共有', e));
-    return () => { try { dbOff(r); } catch {} };
-  }, [loginInfo?.officeCode, cloudSyncEnabled]);
+  // 一覧データ(officeSharedQuoteFiles)は上の useOfficeFileIndex で購読する
   const registerQuoteFileToOffice = async (facilityName, files) => {
     files = Array.from(files || []);
     if (files.length === 0) return;
@@ -1874,17 +2009,16 @@ function App() {
         const dateLabel = new Date(f.lastModified || Date.now()).toLocaleDateString('ja-JP');
         const baseName = f.name.replace(/\.[^.]+$/, '');
         const rec = { id, facilityName, fileName: f.name, displayName: `${dateLabel} ${baseName}`, fileType: f.type, fileSize: f.size, data, uploadedAt: Date.now(), uploadedBy: loginInfo?.userName || '' };
-        const r = dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}/${id}`);
-        await dbSet(r, cleanForFirebase({ ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() }));
+        await writeOfficeFile('quoteFiles', id, { ...rec, _sharedBy: loginInfo.userName, _sharedAt: Date.now() });
         notify(`「${f.name}」を「${facilityName}」に共有登録しました`, 'success');
       } catch (err) { notify('登録エラー: ' + (err?.message || err), 'error'); }
     }
   };
-  const deleteOfficeQuoteFile = async (id) => {
+  const deleteOfficeQuoteFile = async (m) => {
     if (!firebaseDB || !loginInfo) return;
     if (!confirm('営業所共有から削除しますか？\n（全員から見えなくなります）')) return;
     try {
-      await dbSet(dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}/${id}`), null);
+      await removeOfficeFile('quoteFiles', m);
       notify('削除しました', 'success');
     } catch (err) { notify('削除エラー: ' + (err?.message || err), 'error'); }
   };
@@ -1893,37 +2027,26 @@ function App() {
     const nn = prompt('表示名を編集', m.displayName || m.fileName || '');
     if (nn === null) return;
     try {
-      await dbSet(dbRef(firebaseDB, `office-shared-quote-files/${loginInfo.officeCode}/${m.id}`), cleanForFirebase({ ...m, displayName: nn.trim() || m.displayName }));
+      await updateOfficeFileFields('quoteFiles', m, { displayName: nn.trim() || m.displayName });
       notify('名前を変更しました（全員に反映されます）', 'success');
     } catch (err) { notify('名前変更エラー: ' + (err?.message || err), 'error'); }
   };
-  // 営業所共有メーカーデータを削除（新形式は子ノードをnull、旧形式は配列を書き戻し）
-  const deleteSharedMakerData = async (id) => {
+  // 営業所共有メーカーデータを削除（本体と一覧の目録を同時に削除）
+  const deleteSharedMakerData = async (m) => {
     if (!firebaseDB || !loginInfo) return;
     if (!confirm('営業所共有から削除しますか？\n（全員から見えなくなります）')) return;
     try {
-      const baseR = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}`);
-      const snap = await dbGet(baseR);
-      const v = snap.val();
-      if (Array.isArray(v)) {
-        // 旧形式: 配列を書き戻し
-        await dbSet(baseR, v.filter(m => m && m.id !== id));
-      } else {
-        // 新形式: 該当する子ノードを削除（idがキーでない場合はvalue.idで探す）
-        if (v && typeof v === 'object' && Object.prototype.hasOwnProperty.call(v, id)) {
-          await dbSet(dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${id}`), null);
-        } else if (v && typeof v === 'object') {
-          const key = Object.keys(v).find(k => v[k] && v[k].id === id);
-          if (key) await dbSet(dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${key}`), null);
-        }
-      }
+      await removeOfficeFile('makers', m);
       notify('削除しました', 'success');
     } catch (err) { notify('削除エラー: '+(err?.message||err), 'error'); }
   };
-  // 営業所共有メーカーデータを自分のデータとしてコピー
-  const copySharedMakerData = (m) => {
-    setMakerDataList(prev => [{ ...m, id: genId('mk'), uploadedAt: Date.now(), uploadedBy: loginInfo?.userName||'', _copiedFromShared: true }, ...prev]);
-    notify('自分のデータへコピーしました', 'success');
+  // 営業所共有メーカーデータを自分のデータとしてコピー（一覧には本体が無いため取得してからコピー）
+  const copySharedMakerData = async (m) => {
+    try {
+      const full = officeFileRecord(await loadOfficeFileData(m));
+      setMakerDataList(prev => [{ ...full, id: genId('mk'), uploadedAt: Date.now(), uploadedBy: loginInfo?.userName||'', _copiedFromShared: true }, ...prev]);
+      notify('自分のデータへコピーしました', 'success');
+    } catch (err) { notify('コピーできませんでした: ' + (err?.message || err), 'error'); }
   };
   // 営業所共有メーカーデータの名前を編集（メーカー名・ファイル表示名、全員に反映）
   const renameSharedMakerData = async (m) => {
@@ -1932,18 +2055,8 @@ function App() {
     if (newMaker === null) return;
     const newFile = prompt('ファイル表示名を編集', m.fileName || '');
     if (newFile === null) return;
-    const updated = { ...m, makerName: (newMaker.trim() || m.makerName), fileName: (newFile.trim() || m.fileName) };
     try {
-      const baseR = dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}`);
-      const snap = await dbGet(baseR);
-      const v = snap.val();
-      if (Array.isArray(v)) {
-        // 旧形式: 配列を書き戻し
-        await dbSet(baseR, v.map(x => (x && x.id === m.id ? updated : x)));
-      } else if (v && typeof v === 'object') {
-        const key = Object.prototype.hasOwnProperty.call(v, m.id) ? m.id : Object.keys(v).find(k => v[k] && v[k].id === m.id);
-        if (key) await dbSet(dbRef(firebaseDB, `office-shared-makers/${loginInfo.officeCode}/${key}`), cleanForFirebase(updated));
-      }
+      await updateOfficeFileFields('makers', m, { makerName: (newMaker.trim() || m.makerName), fileName: (newFile.trim() || m.fileName) });
       notify('名前を変更しました（全員に反映されます）', 'success');
     } catch (err) { notify('名前変更エラー: ' + (err?.message || err), 'error'); }
   };
@@ -5292,7 +5405,7 @@ function App() {
               <div className="text-sm space-y-1.5">
                 <p className="text-green-700 font-bold">✓ 個人の見積・フォルダ同期は正常に動作しています。</p>
                 <p className="text-slate-600 text-xs">同じ <strong>営業所コード＋名前＋パスワード</strong> でログインした<strong>あなたの他のPC・スマホ</strong>に、見積・フォルダの変更が数秒で自動反映されます。</p>
-                {sharedSyncError && <div className="text-amber-800 text-[11px] bg-amber-50 p-2 rounded border border-amber-300"><strong>⚠ 営業所共有の一部を利用できません：</strong>{sharedSyncError}<br/>Firebaseのデータベースルールを管理者が確認してください。ローカル保存と個人同期は継続します。</div>}
+                {sharedSyncError && <div className="text-amber-800 text-[11px] bg-amber-50 p-2 rounded border border-amber-300"><strong>⚠ 営業所共有の一部を利用できません：</strong>{sharedSyncError}<br/>{/TOO_BIG/.test(sharedSyncError) ? '共有データの量が多すぎて一度に読み込めません。ページを再読込してください。' : 'Firebaseのデータベースルールを管理者が確認してください。'}ローカル保存と個人同期は継続します。</div>}
                 {lastSyncedAt && <p className="text-slate-500 text-[11px] mt-2">最終同期: {new Date(lastSyncedAt).toLocaleString('ja-JP')}</p>}
               </div>
             )}
@@ -5637,7 +5750,9 @@ function App() {
                       )}
                     </div>
                     <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                      {officeSharedMakerData.length === 0 ? (
+                      {officeSharedMakerData.length === 0 ? officeSharedMakerStatus === 'loading' ? (
+                        <div className="text-center py-12 text-slate-500"><Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />共有されている仕切りを読み込んでいます…</div>
+                      ) : (
                         <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />共有されている仕切りはありません<div className="text-xs mt-1">上の「＋ 新規登録」から追加できます</div></div>
                       ) : (() => {
                         const groups = {};
@@ -5654,7 +5769,7 @@ function App() {
                                 <span className="text-xs bg-purple-300 text-purple-800 rounded-full px-2 py-0.5 font-bold shrink-0">{groups[nm].length}件</span>
                               </button>
                               {open && <div className="p-2.5 space-y-2 bg-purple-50/30">{groups[nm].map(m => (
-                                <div key={m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-3">
+                                <div key={m._key || m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-3">
                                   <span className="text-2xl shrink-0">📄</span>
                                   <div className="min-w-0 flex-1">
                                     <div className="text-sm font-bold text-slate-800 truncate">{m.fileName || '(ファイル名なし)'}</div>
@@ -5664,7 +5779,7 @@ function App() {
                                   <button onClick={() => handleMakerDownload(m)} title="ファイルとして保存（ダウンロード）" className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold rounded-md text-xs shrink-0">保存</button>
                                   <button onClick={() => copySharedMakerData(m)} title="自分のメーカーデータへコピー" className="px-3 py-2 bg-slate-700 hover:bg-slate-800 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">自分へコピー</button>
                                   <button onClick={() => renameSharedMakerData(m)} title="メーカー名・ファイル名を編集（全員に反映）" className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">名前変更</button>
-                                  <button onClick={() => deleteSharedMakerData(m.id)} title="営業所共有から削除" className="p-2 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-5 h-5" /></button>
+                                  <button onClick={() => deleteSharedMakerData(m)} title="営業所共有から削除" className="p-2 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-5 h-5" /></button>
                                 </div>
                               ))}</div>}
                             </div>
@@ -5710,7 +5825,9 @@ function App() {
                       )}
                     </div>
                     <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                      {officeSharedFlyers.length === 0 ? (
+                      {officeSharedFlyers.length === 0 ? officeSharedFlyerStatus === 'loading' ? (
+                        <div className="text-center py-12 text-slate-500"><Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />共有されているチラシ・事例集を読み込んでいます…</div>
+                      ) : (
                         <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />共有されているチラシ・事例集はありません<div className="text-xs mt-1">上の「＋ 新規登録」から追加できます</div></div>
                       ) : (() => {
                         const groups = {};
@@ -5727,7 +5844,7 @@ function App() {
                                 <span className="text-xs bg-sky-300 text-sky-800 rounded-full px-2 py-0.5 font-bold shrink-0">{groups[nm].length}件</span>
                               </button>
                               {open && <div className="p-2.5 space-y-2 bg-sky-50/30">{groups[nm].map(m => (
-                                <div key={m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-3">
+                                <div key={m._key || m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-3">
                                   <span className="text-2xl shrink-0">📄</span>
                                   <div className="min-w-0 flex-1">
                                     <div className="text-sm font-bold text-slate-800 truncate">{m.fileName || '(ファイル名なし)'}</div>
@@ -5736,7 +5853,7 @@ function App() {
                                   <button onClick={() => openMakerFile(m)} title="開いて表示する" className="px-3.5 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">開く</button>
                                   <button onClick={() => handleMakerDownload(m)} title="ファイルとして保存（ダウンロード）" className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold rounded-md text-xs shrink-0">保存</button>
                                   <button onClick={() => renameOfficeCategoryItem('flyers', m)} title="メーカー名・ファイル名を編集（全員に反映）" className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">名前変更</button>
-                                  <button onClick={() => deleteFromOfficeCategory('flyers', m.id)} title="営業所共有から削除" className="p-2 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-5 h-5" /></button>
+                                  <button onClick={() => deleteFromOfficeCategory('flyers', m)} title="営業所共有から削除" className="p-2 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-5 h-5" /></button>
                                 </div>
                               ))}</div>}
                             </div>
@@ -5782,7 +5899,9 @@ function App() {
                       )}
                     </div>
                     <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                      {officeSharedOrders.length === 0 ? (
+                      {officeSharedOrders.length === 0 ? officeSharedOrderStatus === 'loading' ? (
+                        <div className="text-center py-12 text-slate-500"><Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin" />共有されている発注書を読み込んでいます…</div>
+                      ) : (
                         <div className="text-center py-12 text-slate-400"><Archive className="w-10 h-10 mx-auto mb-2" />共有されている発注書はありません<div className="text-xs mt-1">上の「＋ 新規登録」から追加できます</div></div>
                       ) : (() => {
                         const groups = {};
@@ -5799,7 +5918,7 @@ function App() {
                                 <span className="text-xs bg-orange-300 text-orange-800 rounded-full px-2 py-0.5 font-bold shrink-0">{groups[nm].length}件</span>
                               </button>
                               {open && <div className="p-2.5 space-y-2 bg-orange-50/30">{groups[nm].map(m => (
-                                <div key={m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-3">
+                                <div key={m._key || m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-3">
                                   <span className="text-2xl shrink-0">📄</span>
                                   <div className="min-w-0 flex-1">
                                     <div className="text-sm font-bold text-slate-800 truncate">{m.fileName || '(ファイル名なし)'}</div>
@@ -5808,7 +5927,7 @@ function App() {
                                   <button onClick={() => openMakerFile(m)} title="開いて表示する" className="px-3.5 py-2 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">開く</button>
                                   <button onClick={() => handleMakerDownload(m)} title="ファイルとして保存（ダウンロード）" className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold rounded-md text-xs shrink-0">保存</button>
                                   <button onClick={() => renameOfficeCategoryItem('orders', m)} title="メーカー名・ファイル名を編集（全員に反映）" className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-md text-xs shrink-0 shadow-sm">名前変更</button>
-                                  <button onClick={() => deleteFromOfficeCategory('orders', m.id)} title="営業所共有から削除" className="p-2 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-5 h-5" /></button>
+                                  <button onClick={() => deleteFromOfficeCategory('orders', m)} title="営業所共有から削除" className="p-2 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-5 h-5" /></button>
                                 </div>
                               ))}</div>}
                             </div>
@@ -6096,7 +6215,7 @@ function App() {
                                 </div>
                               </div>
                               {quoteFiles.map(m => (
-                                <div key={m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-2.5">
+                                <div key={m._key || m.id} className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg p-2.5">
                                   <span className="text-xl shrink-0">📎</span>
                                   <div className="min-w-0 flex-1">
                                     <div className="text-sm font-bold text-slate-800 truncate">{m.displayName || m.fileName}</div>
@@ -6105,7 +6224,7 @@ function App() {
                                   <button onClick={() => openMakerFile(m)} title="開いて表示する" className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-md text-xs shrink-0">開く</button>
                                   <button onClick={() => handleMakerDownload(m)} title="ダウンロード" className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold rounded-md text-xs shrink-0">保存</button>
                                   <button onClick={() => renameOfficeQuoteFile(m)} title="表示名を編集（全員に反映）" className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-md text-xs shrink-0">名前変更</button>
-                                  <button onClick={() => deleteOfficeQuoteFile(m.id)} title="営業所共有から削除" className="p-1.5 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-4 h-4" /></button>
+                                  <button onClick={() => deleteOfficeQuoteFile(m)} title="営業所共有から削除" className="p-1.5 text-slate-400 hover:text-red-600 shrink-0"><Trash2 className="w-4 h-4" /></button>
                                 </div>
                               ))}
                               {groups[nm].map(renderCard)}
@@ -6292,8 +6411,11 @@ function App() {
       )}
       {/* === 仕切りサイド表示（見積を入力しながら仕切りPDF/画像を参照） === */}
       {showShikiriViewer && (() => {
-        const allMakers = [...makerDataList, ...officeSharedMakerData].filter(Boolean);
-        const vm = allMakers.find(m => m.id === viewerMakerId) || allMakers[0];
+        const allMakers = shikiriViewerItems;
+        const vm = shikiriViewerItem;
+        // 共有の仕切りは本体を取得してから表示する（取得中・失敗は下で表示）
+        const src = vm ? (vm.data || (shikiriViewerFile.vkey === vm._vkey ? shikiriViewerFile.url : null)) : null;
+        const loadError = vm && !vm.data && shikiriViewerFile.vkey === vm._vkey ? shikiriViewerFile.error : '';
         const isPdf = vm && (((vm.fileType||'').includes('pdf')) || /\.pdf$/i.test(vm.fileName||''));
         const isImg = vm && (((vm.fileType||'').includes('image')) || /\.(png|jpe?g|gif|webp|bmp)$/i.test(vm.fileName||''));
         return (
@@ -6311,14 +6433,14 @@ function App() {
             </div>
             <div className="px-2.5 py-2 bg-purple-50 border-b border-purple-200 shrink-0 flex items-center gap-2">
               <span className="text-xs font-bold text-purple-700 shrink-0">仕切りを選ぶ ▶</span>
-              <select value={vm?.id || ''} onChange={e => setViewerMakerId(e.target.value)} title="表示する仕切りを選択" className="flex-1 min-w-0 text-sm text-slate-800 border-2 border-purple-300 rounded px-2 py-1.5 outline-none focus:border-purple-500 bg-white font-medium cursor-pointer">
+              <select value={vm?._vkey || ''} onChange={e => setViewerMakerId(e.target.value)} title="表示する仕切りを選択" className="flex-1 min-w-0 text-sm text-slate-800 border-2 border-purple-300 rounded px-2 py-1.5 outline-none focus:border-purple-500 bg-white font-medium cursor-pointer">
                 {allMakers.length === 0 && <option value="">登録された仕切りがありません</option>}
                 {(() => {
                   const byMaker = {};
                   allMakers.forEach(m => { const k = m.makerName || '未分類'; (byMaker[k] = byMaker[k] || []).push(m); });
                   return Object.keys(byMaker).sort((a, b) => a.localeCompare(b, 'ja')).map(mk => (
                     <optgroup key={mk} label={'🏭 ' + mk}>
-                      {byMaker[mk].map(m => <option key={m.id} value={m.id}>{(m.effectiveDate ? m.effectiveDate.replace(/-/g, '/') + '〜 ' : '') + m.fileName}</option>)}
+                      {byMaker[mk].map(m => <option key={m._vkey} value={m._vkey}>{(m.effectiveDate ? m.effectiveDate.replace(/-/g, '/') + '〜 ' : '') + m.fileName}</option>)}
                     </optgroup>
                   ));
                 })()}
@@ -6327,10 +6449,14 @@ function App() {
             <div className="flex-1 min-h-0 bg-slate-100">
               {!vm ? (
                 <div className="p-5 text-sm text-slate-500 text-center leading-relaxed">「🏭 メーカー仕切り」からPDFや画像の仕切りを登録すると、<br/>ここに表示しながら見積を入力できます。</div>
+              ) : (isPdf || isImg) && loadError ? (
+                <div className="p-5 text-sm text-rose-700 text-center leading-relaxed">仕切りを読み込めませんでした。<br/><span className="text-xs">{loadError}</span></div>
+              ) : (isPdf || isImg) && !src ? (
+                <div className="p-5 text-sm text-slate-500 text-center leading-relaxed"><Loader2 className="w-7 h-7 mx-auto mb-2 animate-spin" />仕切りを読み込んでいます…</div>
               ) : isPdf ? (
-                <embed src={vm.data} type="application/pdf" className="w-full h-full" />
+                <embed key={vm._vkey} src={src} type="application/pdf" className="w-full h-full" />
               ) : isImg ? (
-                <div className="w-full h-full overflow-auto bg-slate-200 flex items-start justify-center"><img src={vm.data} alt={vm.fileName} className="max-w-full h-auto" /></div>
+                <div className="w-full h-full overflow-auto bg-slate-200 flex items-start justify-center"><img src={src} alt={vm.fileName} className="max-w-full h-auto" /></div>
               ) : (
                 <div className="p-5 text-sm text-slate-600 text-center leading-relaxed">この形式（Excel等）は画面に表示できません。<br/><button onClick={() => handleMakerDownload(vm)} className="mt-2 underline text-blue-600 font-bold">ダウンロードして開く</button></div>
               )}
@@ -6491,6 +6617,9 @@ function App() {
                 })}
               </div>
               {/* 営業所共有データ（メーカー毎フォルダ） */}
+              {officeSharedMakerData.length === 0 && officeSharedMakerStatus === 'loading' && (
+                <div className="border-t pt-3 text-xs text-slate-500 flex items-center gap-1.5"><Loader2 className="w-4 h-4 animate-spin" />営業所共有のメーカー仕切りを読み込んでいます…</div>
+              )}
               {officeSharedMakerData.length > 0 && (
                 <div className="border-t pt-3">
                   <div className="text-sm font-bold text-emerald-700 mb-2">営業所共有のメーカー仕切り（{officeSharedMakerData.length}件）</div>
@@ -6508,7 +6637,7 @@ function App() {
                         {open && (
                           <div className="divide-y divide-emerald-100 bg-emerald-50/40">
                             {g.files.map(m => (
-                              <div key={m.id} className="px-3 py-2 hover:bg-emerald-50">
+                              <div key={m._key || m.id} className="px-3 py-2 hover:bg-emerald-50">
                                 <div className="min-w-0 mb-1.5">
                                   <div className="text-sm text-slate-800 truncate">{m.effectiveDate && <span className="font-bold text-purple-700">📅{m.effectiveDate.replace(/-/g,'/')}〜 </span>}{m.fileName} <span className="text-xs text-slate-400">({Math.round((m.fileSize||0)/1024)}KB)</span></div>
                                   <div className="text-[11px] text-slate-500 font-medium">共有: {m._sharedBy || ''}　{new Date(m._sharedAt||m.uploadedAt).toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' })}</div>
@@ -6518,7 +6647,7 @@ function App() {
                                   <button onClick={() => handleMakerPrint(m)} className={btnCls+' bg-slate-600 hover:bg-slate-700'}>印刷</button>
                                   <button onClick={() => handleMakerDownload(m)} className={btnCls+' bg-blue-600 hover:bg-blue-700'}>ダウンロード</button>
                                   <button onClick={() => copySharedMakerData(m)} className={btnCls+' bg-slate-500 hover:bg-slate-600'}>自分へコピー</button>
-                                  <button onClick={() => deleteSharedMakerData(m.id)} className={btnCls+' bg-red-600 hover:bg-red-700'}>共有から削除</button>
+                                  <button onClick={() => deleteSharedMakerData(m)} className={btnCls+' bg-red-600 hover:bg-red-700'}>共有から削除</button>
                                 </div>
                               </div>
                             ))}
