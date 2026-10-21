@@ -139,6 +139,7 @@ import {
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
+import { zipSync, strToU8 } from 'fflate';
 
 // 旧来のコードが <X /> で使っていたため、CloseIcon を X として再エクスポート
 const X = CloseIcon;
@@ -618,6 +619,512 @@ const formatDecimal1 = (v) => {
   return n.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 };
 
+// ===== Excel（.xlsx）出力：ブラウザ内で xlsx を組み立てる =====
+// 印刷帳票と同じ内容・見た目の Excel を、サーバーに送らずにその場で作る。
+// zip 圧縮だけ fflate（jsPDF が使っているもの）を使い、書式・結合セル・計算式・
+// 印刷設定（A4・余白・横1ページに収める）・グラフは Office Open XML を直接書き出す。
+const XL_MINCHO = 'BIZ UDP明朝 Medium'; // 印刷帳票の BIZ UDPMincho と同じ書体（Windows 10 以降に標準）。無い PC では Excel が近い明朝体で表示する
+const XL_GOTHIC = '游ゴシック';         // 試算書（Yu Gothic 系の帳票）用
+const XL_MDW = 10;                       // 標準フォント（BIZ UDP明朝 Medium 11pt）の数字1文字の幅(px)。列幅の mm → Excel の幅 の換算に使う
+const XL_PX_MM = 96 / 25.4;
+const XL_EMU_MM = 36000;
+const XL_EMU_PT = 12700;
+const XL_NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+const XL_NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const XL_NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+const XL_NS_C = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+const XL_NS_XDR = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing';
+const XL_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const XL_CT = 'application/vnd.openxmlformats-officedocument.';
+const XL_XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+
+// XML に書けない制御文字を除いてエスケープ
+const xlEsc = (s) => String(s == null ? '' : s)
+  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const xlSolid = (hex) => `<a:solidFill><a:srgbClr val="${String(hex).replace('#', '').toUpperCase()}"/></a:solidFill>`;
+const xlColName = (c) => { let s = ''; let n = c + 1; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+// 0 始まりの行・列 → "A1"（abs=true で "$A$1"）
+const xlRef = (r, c, abs) => abs ? `$${xlColName(c)}$${r + 1}` : `${xlColName(c)}${r + 1}`;
+const xlRange = (r1, c1, r2, c2, abs) => `${xlRef(r1, c1, abs)}:${xlRef(r2, c2, abs)}`;
+const xlQuoteSheet = (name) => `'${String(name).replace(/'/g, "''")}'`;
+const xlArgb = (hex) => 'FF' + String(hex || '000000').replace('#', '').toUpperCase();
+const xlNum = (n) => { const v = Number(n); return isFinite(v) ? String(Number(v.toPrecision(15))) : '0'; }; // Excel と同じ有効15桁
+// Excel のシート名に使えない文字を除き 31 文字以内にする
+const xlSheetName = (s) => (String(s || 'Sheet1').replace(/[\[\]:*?\/\\]/g, ' ').replace(/^'+|'+$/g, '').trim() || 'Sheet1').slice(0, 31);
+// mm → Excel の列幅（標準フォントの数字幅単位。パディング込みの値をそのまま書く）
+const xlColWidth = (mm) => Math.max(0.5, Math.round(mm * XL_PX_MM / XL_MDW * 256) / 256);
+// JS の Math.round（0.5 は +∞ 方向）と同じ丸めを Excel の式で書く。非負なら見慣れた ROUND で書く
+const xlRoundF = (expr, sample) => (Number(sample) >= 0 ? `ROUND(${expr},0)` : `INT(${expr}+0.5)`);
+
+// 文字幅（em）の見積り。列幅と行の高さ（折り返し行数）を決めるのに使う。
+// 半角英数は BIZ UDP明朝 の実際の字幅（0x20〜0x7E、1/100 em）、かなは少し広めに見積もる
+const XL_ASCII_EM = [33, 38, 49, 86, 68, 100, 87, 30, 47, 47, 50, 84, 33, 50, 33, 50, 68, 52, 68, 68, 68, 68, 68, 68, 68, 68, 33, 33, 84, 84, 84, 70, 98, 84, 74, 81, 80, 72, 66, 84, 80, 38, 50, 79, 63, 96, 84, 84, 70, 86, 75, 70, 70, 82, 76, 98, 80, 76, 72, 50, 50, 50, 50, 31, 50, 62, 64, 58, 63, 63, 46, 66, 67, 33, 40, 65, 33, 92, 66, 62, 65, 64, 46, 54, 42, 64, 61, 86, 66, 64, 55, 51, 44, 51, 50];
+const xlTextEm = (s) => {
+  let w = 0;
+  for (const ch of String(s == null ? '' : s)) {
+    const cp = ch.codePointAt(0);
+    if (cp >= 0x20 && cp < 0x7f) w += XL_ASCII_EM[cp - 0x20] / 100;
+    else if (cp === 0xa5) w += 0.68; // ¥
+    else if (cp >= 0xff61 && cp <= 0xff9f) w += 0.5; // 半角カナ
+    else if ('（）「」・：'.includes(ch)) w += 0.5;
+    else if ('、。'.includes(ch)) w += 0.6;
+    else if ((cp >= 0x3041 && cp <= 0x30ff)) w += 0.95; // かな（プロポーショナル）
+    else w += 1;
+  }
+  return w;
+};
+// 幅 widthMm のセルに sizePt の文字を折り返したときの行数。
+// 書体が置き換わって列が少し狭く見える PC でも文字が切れないよう、使える幅は1割弱少なめに見積もる
+const xlLineCount = (text, widthMm, sizePt) => {
+  const usable = Math.max(4, (widthMm - 4) * 0.93); // セル内の左右余白・字下げ
+  const emMm = sizePt * 25.4 / 72;
+  return String(text == null ? '' : text).split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(xlTextEm(line) * emMm / usable - 0.02)), 0);
+};
+
+function createXlsxBook() {
+  const baseFont = { name: XL_MINCHO, sz: 11 }; // 標準スタイルの書体（列幅の単位もこの書体の数字幅になる）
+  const familyOf = (name) => (/明朝|Mincho/i.test(name) ? 1 : 3);
+  // --- スタイル（フォント・塗り・罫線・表示形式・配置）を重複なく登録 ---
+  const fonts = [], fills = ['<fill><patternFill patternType="none"/></fill>', '<fill><patternFill patternType="gray125"/></fill>'];
+  const borders = ['<border><left/><right/><top/><bottom/><diagonal/></border>'];
+  const numFmts = [], xfs = [], dxfs = [];
+  const idx = { font: new Map(), fill: new Map(), border: new Map(), numFmt: new Map(), xf: new Map(), dxf: new Map() };
+  const intern = (map, list, key, make) => { if (map.has(key)) return map.get(key); list.push(make()); map.set(key, list.length - 1); return list.length - 1; };
+  const fontBody = (f, tagName) => {
+    const name = f.name || baseFont.name;
+    return (f.b ? '<b/>' : '') + (f.i ? '<i/>' : '') + (f.strike ? '<strike/>' : '') + (f.u ? '<u/>' : '')
+      + `<sz val="${xlNum(f.sz || baseFont.sz)}"/>` + `<color rgb="${xlArgb(f.color || '000000')}"/>`
+      + `<${tagName} val="${xlEsc(name)}"/><family val="${familyOf(name)}"/><charset val="128"/>`;
+  };
+  const fontId = (f = {}) => intern(idx.font, fonts, JSON.stringify([f.name || '', f.sz || 0, !!f.b, !!f.i, !!f.u, !!f.strike, f.color || '']), () => `<font>${fontBody(f, 'name')}</font>`);
+  fontId({});
+  const fillId = (hex) => (hex ? intern(idx.fill, fills, hex, () => `<fill><patternFill patternType="solid"><fgColor rgb="${xlArgb(hex)}"/><bgColor indexed="64"/></patternFill></fill>`) : 0);
+  // 罫線は { l, r, t, b } に 'thin:93C5FD' のような「線種:色」を指定
+  const edge = (tag, spec) => { if (!spec) return `<${tag}/>`; const [st, col] = String(spec).split(':'); return `<${tag} style="${st}"><color rgb="${xlArgb(col || '000000')}"/></${tag}>`; };
+  const borderId = (b) => {
+    if (!b || !(b.l || b.r || b.t || b.b)) return 0;
+    return intern(idx.border, borders, [b.l, b.r, b.t, b.b].join('|'), () => `<border>${edge('left', b.l)}${edge('right', b.r)}${edge('top', b.t)}${edge('bottom', b.b)}<diagonal/></border>`);
+  };
+  const BUILTIN_FMT = { General: 0, '0': 1, '0.00': 2, '#,##0': 3, '#,##0.00': 4, '0%': 9, '0.00%': 10, '@': 49 };
+  const numFmtId = (code) => {
+    if (!code) return 0;
+    if (BUILTIN_FMT[code] !== undefined) return BUILTIN_FMT[code];
+    return 164 + intern(idx.numFmt, numFmts, code, () => code);
+  };
+  // st = { font:{name,sz,b,i,u,color}, fill:'RRGGBB', border:{l,r,t,b}, align:{h,v,wrap,indent,shrink}, fmt:'表示形式' }
+  const style = (st = {}) => {
+    const key = JSON.stringify(st);
+    if (idx.xf.has(key)) return idx.xf.get(key);
+    const f = fontId(st.font || {}), fl = fillId(st.fill), bd = borderId(st.border), nf = numFmtId(st.fmt);
+    const al = st.align || {};
+    const alignXml = (al.h || al.v || al.wrap || al.indent || al.shrink)
+      ? `<alignment${al.h ? ` horizontal="${al.h}"` : ''}${al.v ? ` vertical="${al.v}"` : ''}${al.wrap ? ' wrapText="1"' : ''}${al.indent ? ` indent="${al.indent}"` : ''}${al.shrink ? ' shrinkToFit="1"' : ''}/>` : '';
+    xfs.push(`<xf numFmtId="${nf}" fontId="${f}" fillId="${fl}" borderId="${bd}" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">${alignXml}</xf>`);
+    idx.xf.set(key, xfs.length - 1);
+    return xfs.length - 1;
+  };
+  style({}); // 0 番 = 既定
+  // 条件付き書式用の差分スタイル（文字色・太字・塗り）
+  const dxfId = (d = {}) => intern(idx.dxf, dxfs, JSON.stringify(d), () => '<dxf>'
+    + (d.font ? `<font>${d.font.b ? '<b/>' : ''}${d.font.color ? `<color rgb="${xlArgb(d.font.color)}"/>` : ''}</font>` : '')
+    + (d.fill ? `<fill><patternFill patternType="solid"><fgColor rgb="${xlArgb(d.fill)}"/><bgColor rgb="${xlArgb(d.fill)}"/></patternFill></fill>` : '')
+    + '</dxf>');
+
+  // --- 共有文字列（リッチテキスト＝1セル内で大きさ・色を変える文字にも対応） ---
+  const sst = [], sstIdx = new Map();
+  let sstRefs = 0;
+  // 先頭・末尾の空白や改行を残すときだけ xml:space="preserve" を付ける（Excel と同じ）
+  const tXml = (t) => `<t${/^\s|\s$|[\n\t]/.test(String(t)) ? ' xml:space="preserve"' : ''}>${xlEsc(t)}</t>`;
+  const runXml = (run) => `<r><rPr>${fontBody(run.font || {}, 'rFont')}</rPr>${tXml(run.t)}</r>`;
+  const stringId = (v) => {
+    sstRefs++;
+    const key = typeof v === 'string' ? 's:' + v : 'r:' + JSON.stringify(v);
+    if (sstIdx.has(key)) return sstIdx.get(key);
+    const xml = typeof v === 'string' ? `<si>${tXml(v)}</si>` : `<si>${v.rich.filter(r => r.t !== '' && r.t != null).map(runXml).join('')}</si>`;
+    sst.push(xml); sstIdx.set(key, sst.length - 1);
+    return sst.length - 1;
+  };
+
+  const sheets = [];
+  const charts = []; // { xml }
+  let drawingCount = 0;
+
+  const addSheet = (name, pageOpts = {}) => {
+    const ws = {
+      name: xlSheetName(name), cols: [], rows: new Map(), merges: [], cfs: [], anchors: [],
+      page: Object.assign({ orientation: 'portrait', paper: 9, margins: { l: 15, r: 15, t: 12, b: 12, h: 6, f: 6 }, fitWidth: 1, fitHeight: 0, hCenter: true, printArea: null, printTitles: null, zoom: 100 }, pageOpts),
+    };
+    const rowOf = (r) => { if (!ws.rows.has(r)) ws.rows.set(r, { ht: null, cells: new Map() }); return ws.rows.get(r); };
+    ws.colWidthsMm = [];
+    // 列幅（mm 指定）
+    ws.setCols = (mmList) => { ws.colWidthsMm = mmList.slice(); ws.cols = mmList.map(xlColWidth); };
+    ws.height = (r, pt) => { rowOf(r).ht = Math.min(409, Math.max(rowOf(r).ht || 0, Math.round(pt * 4) / 4)); }; // Excel の行の高さは 409pt まで
+    // 値: 数値 / 文字列 / { rich:[{t,font}] } / { f:'式', v:キャッシュ値 } / null（書式だけ）
+    ws.cell = (r, c, v, s) => { rowOf(r).cells.set(c, { v, s: s || 0 }); };
+    ws.styleOnly = (r, c, s) => { const row = rowOf(r); const cur = row.cells.get(c); row.cells.set(c, { v: cur ? cur.v : null, s }); };
+    // 結合セル：外枠の罫線を周囲のセルに振り分け、塗りは全セルに入れる
+    ws.box = (r1, c1, r2, c2, v, st = {}) => {
+      const b = st.border || {};
+      for (let r = r1; r <= r2; r++) {
+        for (let c = c1; c <= c2; c++) {
+          const cs = Object.assign({}, st, { border: { l: c === c1 ? b.l : undefined, r: c === c2 ? b.r : undefined, t: r === r1 ? b.t : undefined, b: r === r2 ? b.b : undefined } });
+          if (r === r1 && c === c1) ws.cell(r, c, v, style(cs));
+          else ws.styleOnly(r, c, style(cs));
+        }
+      }
+      if (r1 !== r2 || c1 !== c2) ws.merges.push(xlRange(r1, c1, r2, c2));
+    };
+    // 条件付き書式：rules = [{ op:'greaterThan', f:'0', dxf }]（セル値）または [{ f:'AND(ISNUMBER(A1),A1>0)', dxf }]（式・範囲の左上セル基準）
+    ws.cf = (sqref, rules) => { if (sqref) ws.cfs.push({ sqref, rules }); };
+    // 図形（四角形・文字だけの枠も可）：oneCell アンカー。dx/dy はセル左上からのずれ(mm)、w/h は大きさ(mm)
+    ws.rect = (o) => ws.anchors.push({ kind: 'rect', ...o });
+    // グラフ：from/to のセル範囲いっぱいに置く
+    ws.chart = (o) => { charts.push({ xml: o.xml }); ws.anchors.push({ kind: 'chart', chartNo: charts.length, ...o }); };
+    sheets.push(ws);
+    return ws;
+  };
+
+  const sheetXml = (ws, sheetIndex, drawingRid) => {
+    const rowsSorted = [...ws.rows.keys()].sort((a, b) => a - b);
+    let maxR = 0, maxC = 0;
+    const sd = rowsSorted.map(r => {
+      const row = ws.rows.get(r);
+      const cols = [...row.cells.keys()].sort((a, b) => a - b);
+      maxR = Math.max(maxR, r);
+      const cells = cols.map(c => {
+        maxC = Math.max(maxC, c);
+        const { v, s } = row.cells.get(c);
+        const ref = xlRef(r, c);
+        const sa = s ? ` s="${s}"` : '';
+        if (v === null || v === undefined || v === '') return `<c r="${ref}"${sa}/>`;
+        if (typeof v === 'number') return isFinite(v) ? `<c r="${ref}"${sa}><v>${xlNum(v)}</v></c>` : `<c r="${ref}"${sa}/>`;
+        if (typeof v === 'object' && v.f) {
+          if (typeof v.v === 'string') return `<c r="${ref}"${sa} t="str"><f>${xlEsc(v.f)}</f><v>${xlEsc(v.v)}</v></c>`;
+          return `<c r="${ref}"${sa}><f>${xlEsc(v.f)}</f>${v.v === undefined || v.v === null || !isFinite(Number(v.v)) ? '' : `<v>${xlNum(v.v)}</v>`}</c>`;
+        }
+        return `<c r="${ref}"${sa} t="s"><v>${stringId(v)}</v></c>`;
+      }).join('');
+      const ht = row.ht ? ` ht="${xlNum(row.ht)}" customHeight="1"` : '';
+      return `<row r="${r + 1}"${ht}>${cells}</row>`;
+    }).join('');
+    const p = ws.page;
+    const dim = `<dimension ref="A1:${xlRef(Math.max(0, maxR), Math.max(0, maxC, ws.cols.length - 1))}"/>`;
+    const fit = p.fitWidth || p.fitHeight ? '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>' : '';
+    const views = `<sheetViews><sheetView showGridLines="0"${sheetIndex === 0 ? ' tabSelected="1"' : ''} zoomScale="${p.zoom}" zoomScaleNormal="${p.zoom}" workbookViewId="0"><selection activeCell="A1" sqref="A1"/></sheetView></sheetViews>`;
+    const colsXml = ws.cols.length ? `<cols>${ws.cols.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${xlNum(w)}" customWidth="1"/>`).join('')}</cols>` : '';
+    const merges = ws.merges.length ? `<mergeCells count="${ws.merges.length}">${ws.merges.map(m => `<mergeCell ref="${m}"/>`).join('')}</mergeCells>` : '';
+    let prio = 1;
+    const cfXml = ws.cfs.map(cf => `<conditionalFormatting sqref="${cf.sqref}">${cf.rules.map(rule => (rule.op
+      ? `<cfRule type="cellIs" dxfId="${dxfId(rule.dxf)}" priority="${prio++}" operator="${rule.op}"><formula>${xlEsc(rule.f)}</formula></cfRule>`
+      : `<cfRule type="expression" dxfId="${dxfId(rule.dxf)}" priority="${prio++}"><formula>${xlEsc(rule.f)}</formula></cfRule>`)).join('')}</conditionalFormatting>`).join('');
+    const mm2in = (mm) => xlNum(Math.round(mm / 25.4 * 1000) / 1000);
+    const m = p.margins;
+    const printOpts = p.hCenter ? '<printOptions horizontalCentered="1"/>' : '';
+    const pageMargins = `<pageMargins left="${mm2in(m.l)}" right="${mm2in(m.r)}" top="${mm2in(m.t)}" bottom="${mm2in(m.b)}" header="${mm2in(m.h)}" footer="${mm2in(m.f)}"/>`;
+    const pageSetup = `<pageSetup paperSize="${p.paper}" orientation="${p.orientation}"${p.fitWidth || p.fitHeight ? ` fitToWidth="${p.fitWidth || 0}" fitToHeight="${p.fitHeight || 0}"` : ''}/>`;
+    const drawing = drawingRid ? `<drawing r:id="${drawingRid}"/>` : '';
+    return XL_XML_HEAD + `<worksheet xmlns="${XL_NS_MAIN}" xmlns:r="${XL_NS_R}">${fit}${dim}${views}<sheetFormatPr defaultRowHeight="15"/>${colsXml}<sheetData>${sd}</sheetData>${merges}${cfXml}${printOpts}${pageMargins}${pageSetup}${drawing}</worksheet>`;
+  };
+
+  // 図形・グラフの配置（drawing パート）
+  const drawingXml = (ws) => {
+    let id = 1;
+    const emu = (mm) => Math.max(0, Math.round((mm || 0) * XL_EMU_MM));
+    const anchors = ws.anchors.map((a, i) => {
+      id++;
+      if (a.kind === 'chart') {
+        return `<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>${a.from.c}</xdr:col><xdr:colOff>${emu(a.from.dx)}</xdr:colOff><xdr:row>${a.from.r}</xdr:row><xdr:rowOff>${emu(a.from.dy)}</xdr:rowOff></xdr:from>`
+          + `<xdr:to><xdr:col>${a.to.c}</xdr:col><xdr:colOff>${emu(a.to.dx)}</xdr:colOff><xdr:row>${a.to.r}</xdr:row><xdr:rowOff>${emu(a.to.dy)}</xdr:rowOff></xdr:to>`
+          + `<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="${id}" name="${xlEsc(a.name || ('グラフ ' + id))}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>`
+          + '<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>'
+          + `<a:graphic><a:graphicData uri="${XL_NS_C}"><c:chart xmlns:c="${XL_NS_C}" r:id="rId${i + 1}"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>`;
+      }
+      const w = emu(a.w), h = emu(a.h);
+      return `<xdr:oneCellAnchor><xdr:from><xdr:col>${a.c}</xdr:col><xdr:colOff>${emu(a.dx)}</xdr:colOff><xdr:row>${a.r}</xdr:row><xdr:rowOff>${emu(a.dy)}</xdr:rowOff></xdr:from><xdr:ext cx="${w}" cy="${h}"/>`
+        + `<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="${id}" name="${xlEsc(a.name || ('四角形 ' + id))}"/><xdr:cNvSpPr/></xdr:nvSpPr>`
+        + `<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${w}" cy="${h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>`
+        + (a.fill ? xlSolid(a.fill) : '<a:noFill/>')
+        + (a.line ? `<a:ln w="${Math.round((a.lineWidthPt || 0.75) * XL_EMU_PT)}">${xlSolid(a.line)}</a:ln>` : '<a:ln><a:noFill/></a:ln>') + '</xdr:spPr>'
+        + (a.text ? `<xdr:txBody><a:bodyPr wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr lang="ja-JP" sz="${Math.round((a.textSize || 7) * 100)}" b="${a.textBold ? 1 : 0}">${xlSolid(a.textColor || '000000')}<a:latin typeface="${xlEsc(a.textFont || XL_MINCHO)}"/><a:ea typeface="${xlEsc(a.textFont || XL_MINCHO)}"/></a:rPr><a:t>${xlEsc(a.text)}</a:t></a:r></a:p></xdr:txBody>` : '')
+        + '</xdr:sp><xdr:clientData/></xdr:oneCellAnchor>';
+    }).join('');
+    return XL_XML_HEAD + `<xdr:wsDr xmlns:xdr="${XL_NS_XDR}" xmlns:a="${XL_NS_A}" xmlns:r="${XL_NS_R}">${anchors}</xdr:wsDr>`;
+  };
+
+  const toBytes = (meta = {}) => {
+    const files = {};
+    const enc = (s) => strToU8(s);
+    const ct = [];
+    const wbRels = [];
+    let chartNo = 0;
+    sheets.forEach((ws, i) => {
+      const n = i + 1;
+      let drawingRid = null;
+      if (ws.anchors.length) {
+        drawingCount++;
+        const dn = drawingCount;
+        drawingRid = 'rId1';
+        files[`xl/worksheets/_rels/sheet${n}.xml.rels`] = enc(XL_XML_HEAD + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${XL_REL}/drawing" Target="../drawings/drawing${dn}.xml"/></Relationships>`);
+        const dRels = ws.anchors.map((a, k) => (a.kind === 'chart' ? `<Relationship Id="rId${k + 1}" Type="${XL_REL}/chart" Target="../charts/chart${a.chartNo}.xml"/>` : '')).join('');
+        files[`xl/drawings/drawing${dn}.xml`] = enc(drawingXml(ws));
+        if (dRels) files[`xl/drawings/_rels/drawing${dn}.xml.rels`] = enc(XL_XML_HEAD + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${dRels}</Relationships>`);
+        ct.push(`<Override PartName="/xl/drawings/drawing${dn}.xml" ContentType="${XL_CT}drawing+xml"/>`);
+      }
+      files[`xl/worksheets/sheet${n}.xml`] = enc(sheetXml(ws, i, drawingRid));
+      ct.push(`<Override PartName="/xl/worksheets/sheet${n}.xml" ContentType="${XL_CT}spreadsheetml.worksheet+xml"/>`);
+      wbRels.push(`<Relationship Id="rId${n}" Type="${XL_REL}/worksheet" Target="worksheets/sheet${n}.xml"/>`);
+    });
+    charts.forEach((ch) => {
+      chartNo++;
+      files[`xl/charts/chart${chartNo}.xml`] = enc(ch.xml);
+      ct.push(`<Override PartName="/xl/charts/chart${chartNo}.xml" ContentType="${XL_CT}drawingml.chart+xml"/>`);
+    });
+    const nS = sheets.length;
+    wbRels.push(`<Relationship Id="rId${nS + 1}" Type="${XL_REL}/styles" Target="styles.xml"/>`);
+    wbRels.push(`<Relationship Id="rId${nS + 2}" Type="${XL_REL}/sharedStrings" Target="sharedStrings.xml"/>`);
+    // 印刷範囲・印刷タイトル（各ページに繰り返す見出し行）
+    const names = [];
+    sheets.forEach((ws, i) => {
+      const p = ws.page;
+      if (p.printArea) names.push(`<definedName name="_xlnm.Print_Area" localSheetId="${i}">${xlEsc(xlQuoteSheet(ws.name) + '!' + xlRange(p.printArea[0], p.printArea[1], p.printArea[2], p.printArea[3], true))}</definedName>`);
+      if (p.printTitles) names.push(`<definedName name="_xlnm.Print_Titles" localSheetId="${i}">${xlEsc(xlQuoteSheet(ws.name) + `!$${p.printTitles[0] + 1}:$${p.printTitles[1] + 1}`)}</definedName>`);
+    });
+    // スタイル・共有文字列はシートの XML を作る途中で登録されるので、シートのあとに書き出す
+    const stylesXml = XL_XML_HEAD + `<styleSheet xmlns="${XL_NS_MAIN}">`
+      + (numFmts.length ? `<numFmts count="${numFmts.length}">${numFmts.map((code, k) => `<numFmt numFmtId="${164 + k}" formatCode="${xlEsc(code)}"/>`).join('')}</numFmts>` : '')
+      + `<fonts count="${fonts.length}">${fonts.join('')}</fonts>`
+      + `<fills count="${fills.length}">${fills.join('')}</fills>`
+      + `<borders count="${borders.length}">${borders.join('')}</borders>`
+      + '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+      + `<cellXfs count="${xfs.length}">${xfs.join('')}</cellXfs>`
+      + '<cellStyles count="1"><cellStyle name="標準" xfId="0" builtinId="0"/></cellStyles>'
+      + `<dxfs count="${dxfs.length}">${dxfs.join('')}</dxfs>`
+      + '</styleSheet>';
+    files['xl/styles.xml'] = enc(stylesXml);
+    files['xl/sharedStrings.xml'] = enc(XL_XML_HEAD + `<sst xmlns="${XL_NS_MAIN}" count="${sstRefs}" uniqueCount="${sst.length}">${sst.join('')}</sst>`);
+    files['xl/workbook.xml'] = enc(XL_XML_HEAD + `<workbook xmlns="${XL_NS_MAIN}" xmlns:r="${XL_NS_R}"><workbookPr/><bookViews><workbookView activeTab="0"/></bookViews>`
+      + `<sheets>${sheets.map((ws, i) => `<sheet name="${xlEsc(ws.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets>`
+      + (names.length ? `<definedNames>${names.join('')}</definedNames>` : '')
+      + '<calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>');
+    files['xl/_rels/workbook.xml.rels'] = enc(XL_XML_HEAD + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${wbRels.join('')}</Relationships>`);
+    const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+    files['docProps/core.xml'] = enc(XL_XML_HEAD + '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+      + `<dc:title>${xlEsc(meta.title || '')}</dc:title><dc:creator>${xlEsc(meta.creator || '')}</dc:creator>`
+      + `<dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`);
+    files['docProps/app.xml'] = enc(XL_XML_HEAD + '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Microsoft Excel</Application></Properties>');
+    files['_rels/.rels'] = enc(XL_XML_HEAD + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rId1" Type="${XL_REL}/officeDocument" Target="xl/workbook.xml"/>`
+      + '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+      + `<Relationship Id="rId3" Type="${XL_REL}/extended-properties" Target="docProps/app.xml"/></Relationships>`);
+    files['[Content_Types].xml'] = enc(XL_XML_HEAD + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+      + `<Override PartName="/xl/workbook.xml" ContentType="${XL_CT}spreadsheetml.sheet.main+xml"/>`
+      + `<Override PartName="/xl/styles.xml" ContentType="${XL_CT}spreadsheetml.styles+xml"/>`
+      + `<Override PartName="/xl/sharedStrings.xml" ContentType="${XL_CT}spreadsheetml.sharedStrings+xml"/>`
+      + ct.join('')
+      + '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+      + `<Override PartName="/docProps/app.xml" ContentType="${XL_CT}extended-properties+xml"/></Types>`);
+    // [Content_Types].xml を先頭に置く（一部の読み込み側が先頭を期待するため）
+    const ordered = { '[Content_Types].xml': files['[Content_Types].xml'] };
+    Object.keys(files).forEach(k => { if (k !== '[Content_Types].xml') ordered[k] = files[k]; });
+    return zipSync(ordered, { level: 6 });
+  };
+
+  return { style, addSheet, toBytes };
+}
+
+// --- グラフ（Excel のネイティブグラフ。セル範囲を参照するので数値を直すとグラフも変わる） ---
+const xlTxPr = (sz, color, b, font) => `<c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="${Math.round(sz * 100)}" b="${b ? 1 : 0}"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill><a:latin typeface="${xlEsc(font)}"/><a:ea typeface="${xlEsc(font)}"/></a:defRPr></a:pPr><a:endParaRPr lang="ja-JP"/></a:p></c:txPr>`;
+const xlStrRef = (f, list) => `<c:strRef><c:f>${xlEsc(f)}</c:f><c:strCache><c:ptCount val="${list.length}"/>${list.map((s, i) => `<c:pt idx="${i}"><c:v>${xlEsc(s)}</c:v></c:pt>`).join('')}</c:strCache></c:strRef>`;
+const xlNumRef = (f, list, fmt) => `<c:numRef><c:f>${xlEsc(f)}</c:f><c:numCache><c:formatCode>${xlEsc(fmt || 'General')}</c:formatCode><c:ptCount val="${list.length}"/>${list.map((v, i) => `<c:pt idx="${i}"><c:v>${xlNum(v)}</c:v></c:pt>`).join('')}</c:numCache></c:numRef>`;
+const xlChartSpace = (plotArea, legend, font) => XL_XML_HEAD
+  + `<c:chartSpace xmlns:c="${XL_NS_C}" xmlns:a="${XL_NS_A}" xmlns:r="${XL_NS_R}"><c:lang val="ja-JP"/><c:roundedCorners val="0"/>`
+  + `<c:chart><c:autoTitleDeleted val="1"/>${plotArea}${legend || ''}<c:plotVisOnly val="0"/><c:dispBlanksAs val="gap"/></c:chart>`
+  + `<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${xlTxPr(9, '262626', false, font)}`
+  + '<c:printSettings><c:headerFooter/><c:pageMargins b="0.75" l="0.7" r="0.7" t="0.75" header="0.3" footer="0.3"/><c:pageSetup/></c:printSettings></c:chartSpace>';
+
+// 横棒グラフ（上から大きい順）。colors / labelFmts は棒ごとの色・ラベル表示形式
+function xlBarChartXml({ catF, valF, cats, vals, colors, labelFmts, font, labelColors }) {
+  const dpts = colors.map((col, i) => `<c:dPt><c:idx val="${i}"/><c:invertIfNegative val="0"/><c:bubble3D val="0"/><c:spPr>${xlSolid(col)}</c:spPr></c:dPt>`).join('');
+  const dlbl = labelFmts.map((fmt, i) => `<c:dLbl><c:idx val="${i}"/><c:numFmt formatCode="${xlEsc(fmt)}" sourceLinked="0"/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${xlTxPr(8, (labelColors && labelColors[i]) || '6B7280', false, font)}<c:dLblPos val="outEnd"/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbl>`).join('');
+  const ser = `<c:ser><c:idx val="0"/><c:order val="0"/><c:spPr>${xlSolid(colors[0] || '1B4D3E')}</c:spPr><c:invertIfNegative val="0"/>${dpts}`
+    + `<c:dLbls>${dlbl}<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${xlTxPr(8, '6B7280', false, font)}<c:dLblPos val="outEnd"/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>`
+    + `<c:cat>${xlStrRef(catF, cats)}</c:cat><c:val>${xlNumRef(valF, vals, '#,##0')}</c:val></c:ser>`;
+  const plot = '<c:plotArea><c:layout/>'
+    + `<c:barChart><c:barDir val="bar"/><c:grouping val="clustered"/><c:varyColors val="0"/>${ser}<c:gapWidth val="60"/><c:axId val="50010001"/><c:axId val="50010002"/></c:barChart>`
+    + '<c:catAx><c:axId val="50010001"/><c:scaling><c:orientation val="maxMin"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:numFmt formatCode="General" sourceLinked="0"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="low"/>'
+    + `<c:spPr><a:ln w="6350">${xlSolid('BBBBBB')}</a:ln></c:spPr>${xlTxPr(8, '262626', false, font)}<c:crossAx val="50010002"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/></c:catAx>`
+    + '<c:valAx><c:axId val="50010002"/><c:scaling><c:orientation val="minMax"/><c:min val="0"/></c:scaling><c:delete val="1"/><c:axPos val="t"/><c:numFmt formatCode="#,##0" sourceLinked="0"/><c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="50010001"/><c:crosses val="max"/><c:crossBetween val="between"/></c:valAx>'
+    + '<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:plotArea>';
+  return xlChartSpace(plot, '', font);
+}
+
+// 円グラフ（凡例は右、割合をラベル表示）
+function xlPieChartXml({ catF, valF, cats, vals, colors, font }) {
+  const dpts = colors.map((col, i) => `<c:dPt><c:idx val="${i}"/><c:bubble3D val="0"/><c:spPr>${xlSolid(col)}<a:ln w="19050">${xlSolid('FFFFFF')}</a:ln></c:spPr></c:dPt>`).join('');
+  const ser = `<c:ser><c:idx val="0"/><c:order val="0"/>${dpts}`
+    + `<c:dLbls><c:numFmt formatCode="0%" sourceLinked="0"/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>${xlTxPr(8, 'FFFFFF', true, font)}<c:dLblPos val="inEnd"/><c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="1"/><c:showBubbleSize val="0"/><c:showLeaderLines val="0"/></c:dLbls>`
+    + `<c:cat>${xlStrRef(catF, cats)}</c:cat><c:val>${xlNumRef(valF, vals, '#,##0')}</c:val></c:ser>`;
+  const plot = `<c:plotArea><c:layout/><c:pieChart><c:varyColors val="1"/>${ser}<c:firstSliceAng val="0"/></c:pieChart><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:plotArea>`;
+  const legend = `<c:legend><c:legendPos val="r"/><c:overlay val="0"/>${xlTxPr(8, '262626', false, font)}</c:legend>`;
+  return xlChartSpace(plot, legend, font);
+}
+
+// ダウンロード（既存の JSON 保存と同じ方式）
+const xlDownload = (bytes, filename) => {
+  const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+};
+
+// ===== Excel 帳票の共通部品（印刷帳票の配色・字間・列構成・頭の部分） =====
+const XL_C = {
+  navy: '1E3A8A', navy2: '1E40AF', blue: '2563EB', blue3: '3B82F6', blue4: '93C5FD', line: 'BFDBFE', line3: 'DBEAFE',
+  tint: 'F0F7FF', tint2: 'EFF6FF', zebra: 'F8FBFF', head: 'DBEAFE', ink: '1F2937', ink2: '111827', sub: '4B5563', sub2: '374151',
+  slate: '475569', mute: '94A3B8', gray: '6B7280', hl: 'FEF08A', hlInk: '713F12', red: 'DC2626', red2: 'B91C1C', up: 'C0392B', down: '15803D',
+};
+// 字間をあける（印刷の letter-spacing の代わりに半角スペースを挟む。空白・括弧の前後は詰める）
+const xlSpaced = (s) => {
+  const chars = [...String(s || '')];
+  return chars.map((ch, i) => (i < chars.length - 1 && !/[\s（）()「」]/.test(ch) && !/[\s（）()「」]/.test(chars[i + 1]) ? ch + ' ' : ch)).join('');
+};
+// 帳票の題名：短い題名だけ字間をあける（「御 見 積 書」）
+const xlTitle = (s) => (([...String(s || '')].length <= 10) ? xlSpaced(s) : String(s || ''));
+// 文字列が1行で収まる列幅(mm)（字下げ・余白込み）
+const xlFitMm = (texts, pt, bold, pad = 5.5) => texts.reduce((m, t) => Math.max(m, xlTextEm(t) * pt * 25.4 / 72 * (bold ? 1.06 : 1) + pad), 0);
+// 小数の桁数（max 桁まで）。表示形式の小数部を値に合わせるのに使う
+const xlDecimals = (v, max = 3) => {
+  const s = String(Math.round(Math.abs(Number(v) || 0) * 10 ** max) / 10 ** max);
+  const i = s.indexOf('.');
+  return i < 0 || /e/i.test(s) ? 0 : Math.min(max, s.length - i - 1);
+};
+// 「¥1,234」の表示形式。印刷と同じく負数は「¥-1,500」、zero を渡すと 0 のときの表示（例 "−"）
+const xlYenFmt = (v, opt = {}) => {
+  const d = opt.decimals !== undefined ? opt.decimals : xlDecimals(v);
+  const n = '#,##0' + (d ? '.' + '0'.repeat(d) : '');
+  const pre = opt.prefix || '';
+  return `"${pre}¥"${n};"${pre}¥"-${n}` + (opt.zero !== undefined ? `;"${opt.zero}"` : '');
+};
+// 差額の表示形式（+¥100 / −¥150 / 0 は「−」）
+const xlDiffFmt = (decimals = 0, zero = '−') => { const n = '#,##0' + (decimals ? '.' + '0'.repeat(decimals) : ''); return `"+¥"${n};"−¥"${n};"${zero}"`; };
+
+// 見積書・価格改定の列構成。numMm＝数値列の幅(mm)、totalMm＝印刷の本文幅。
+// A＝条件欄の見出し(22mm)・B＝品名の残り。品名は数値列の手前まで結合して1セルにする。
+// 右上の発行元ボックス（幅 70mm 前後）は右端の数値列に重ね、左の宛名ブロックとの間を1列あける。
+const xlDocColumns = (numMm, totalMm = 166) => {
+  const n = numMm.length, sumNum = numMm.reduce((s, w) => s + w, 0), A = 22;
+  let k = 0, rn = 0;
+  while (k < n && rn + numMm[n - 1 - k] <= 72) { rn += numMm[n - 1 - k]; k++; }
+  if (k < n && rn < 47) { rn += numMm[n - 1 - k]; k++; }
+  if (k < n) {
+    const cols = [A, Math.max(30, totalMm - A - sumNum), ...numMm];
+    const boxStart = 2 + n - k;
+    return { cols, firstNum: 2, boxStart, leftEnd: boxStart - 2, last: cols.length - 1 };
+  }
+  // 数値列が少ないとき：品名側に間隔(5mm)と、ボックスを 70mm にする拡張列を足す
+  const E = rn >= 56 ? 0 : 70 - rn;
+  const cols = [A, Math.max(30, totalMm - A - 5 - E - sumNum), 5, ...(E ? [E] : []), ...numMm];
+  const firstNum = cols.length - n;
+  return { cols, firstNum, boxStart: E ? firstNum - 1 : firstNum, leftEnd: 1, last: cols.length - 1 };
+};
+
+// 帳票の頭（左：題名・宛名・挨拶・条件、右：発行元ボックス＋所長印/担当印の枠）を書き、次に使う行番号を返す。
+// 左右で必要な高さが違うため、左の項目は必要な高さぶん行をまたいで結合する。
+const xlDocHeader = (book, ws, L, h) => {
+  const mm = ws.colWidthsMm;
+  const spanMm = (c1, c2) => mm.slice(c1, c2 + 1).reduce((s, w) => s + w, 0);
+  const F = (o) => Object.assign({ name: XL_MINCHO }, o);
+  const BOX = 'thin:' + XL_C.line;
+  const heights = [];
+  const b0 = L.boxStart, b1 = L.last, boxW = spanMm(b0, b1);
+  // --- 右：発行元ボックス（1行1項目） ---
+  const right = [];
+  (h.meta || []).forEach(([lb, val]) => right.push({ kind: 'meta', lb, val, ht: 14 }));
+  const iss = h.issuer;
+  right.push({ kind: 'line', t: iss.company, font: F({ sz: 10, b: true, color: XL_C.navy }), ht: 15, top: 'thin:' + XL_C.blue4 });
+  if (iss.office) right.push({ kind: 'line', t: iss.office, font: F({ sz: 9, b: true, color: XL_C.navy2 }), ht: 13 });
+  [iss.postal ? '〒' + iss.postal : '', iss.address, iss.phone ? 'TEL ' + iss.phone : '', iss.fax ? 'FAX ' + iss.fax : ''].forEach(t => {
+    if (t) right.push({ kind: 'line', t, font: F({ sz: 8, color: XL_C.sub }), ht: 11.5 * xlLineCount(t, boxW - 3, 8) + 0.5, wrap: true });
+  });
+  right.push({ kind: 'line', t: '登録番号　' + iss.invoice, font: F({ sz: 7.5, b: true, color: XL_C.blue }), ht: 12 });
+  let firstStaff = true;
+  [['所 長', iss.manager], ['担 当', iss.staff]].forEach(([lb, nm]) => {
+    if (!nm) return;
+    right.push({ kind: 'line', t: lb + '　' + nm, font: F({ sz: 8.5, color: XL_C.sub }), ht: 13, top: firstStaff ? 'dashed:' + XL_C.line : undefined });
+    firstStaff = false;
+  });
+  right.push({ kind: 'stampLabel', ht: 12, top: 'thin:' + XL_C.line3 });
+  right.forEach((it, i) => { it.r = i; heights[i] = it.ht; });
+  const stampLabelRow = right.length - 1, stampTop = right.length;
+  // --- 左：題名・宛名・挨拶・条件 ---
+  let lr = 0;
+  const alloc = (H) => {
+    const s = lr; let sum = 0;
+    for (;;) {
+      if (heights[lr] === undefined) { heights[lr] = Math.max(4, H - sum); lr++; break; }
+      sum += heights[lr]; lr++;
+      if (sum >= H - 0.5) break;
+    }
+    return [s, lr - 1];
+  };
+  const L1 = L.leftEnd, leftW = spanMm(0, L1);
+  const tR = alloc(40);
+  // 題名は字間をあけて入るならあけ、入らなければ詰める（それでも長ければ縮小）
+  const spaced = xlTitle(h.title);
+  const title = xlTextEm(spaced) * 22 * 25.4 / 72 * 1.06 + 3 <= leftW ? spaced : h.title;
+  ws.box(tR[0], 0, tR[1], L1, title, { font: F({ sz: 22, b: true, color: XL_C.navy }), border: { b: 'medium:' + XL_C.blue3 }, align: { v: 'bottom', shrink: true } });
+  const cR = alloc(h.clientLines * 20 + 9);
+  ws.box(cR[0], 0, cR[1], L1, { rich: h.client }, { font: h.client[0].font, border: { b: 'thin:' + XL_C.blue4 }, align: { v: 'bottom', wrap: true } });
+  const gR = alloc(xlLineCount(h.greeting, leftW, 8.5) * 12.5 + 8);
+  ws.box(gR[0], 0, gR[1], L1, h.greeting, { font: F({ sz: 8.5, color: XL_C.sub }), align: { v: 'center', wrap: true } });
+  if (h.terms && h.terms.length) {
+    alloc(13); // 挨拶との間
+    const valW = spanMm(1, L1);
+    h.terms.forEach(([lb, val], i) => {
+      const r = lr++;
+      heights[r] = Math.max(heights[r] || 0, Math.max(13, xlLineCount(val, valW, 7.5) * 10.5 + 4));
+      const t = i === 0 ? BOX : undefined, b = i === h.terms.length - 1 ? BOX : 'thin:' + XL_C.line3;
+      ws.box(r, 0, r, 0, lb, { font: F({ sz: 7, b: true, color: XL_C.blue }), fill: XL_C.tint, border: { l: BOX, t, b }, align: { v: 'center' } });
+      ws.box(r, 1, r, L1, val, { font: F({ sz: 7.5, color: XL_C.sub2 }), border: { r: BOX, t, b }, align: { v: 'center', wrap: true } });
+    });
+  }
+  // --- 印影欄：15mm 角の枠が入る高さを確保 ---
+  let end = Math.max(lr, stampTop), sSum = 0;
+  for (let i = stampTop; i < end; i++) sSum += heights[i];
+  if (sSum < 48) { heights[end] = Math.max(6, 48 - sSum); end++; } // 足りない分は行を足す（条件欄の行は伸ばさない）
+  const boxBottom = end - 1;
+  // --- 右ボックスを描く ---
+  const edge = (r, c1, c2, top, bottom) => ({ l: c1 === b0 ? BOX : undefined, r: c2 === b1 ? BOX : undefined, t: r === 0 ? BOX : top, b: bottom });
+  let bl = b0; while (bl < b1 - 1 && spanMm(b0, bl) < 16) bl++;
+  right.forEach(it => {
+    const r = it.r;
+    if (it.kind === 'meta') {
+      const bot = 'thin:' + XL_C.line3;
+      ws.box(r, b0, r, bl, it.lb, { font: F({ sz: 8, b: true, color: XL_C.blue }), fill: XL_C.tint, border: edge(r, b0, bl, undefined, bot), align: { v: 'center', indent: 1 } });
+      ws.box(r, bl + 1, r, b1, it.val, { font: F({ sz: 8.5, b: true, color: XL_C.sub }), fill: XL_C.tint, border: edge(r, bl + 1, b1, undefined, bot), align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+    } else if (it.kind === 'line') {
+      ws.box(r, b0, r, b1, it.t, { font: it.font, fill: XL_C.tint, border: edge(r, b0, b1, it.top), align: { v: 'center', wrap: !!it.wrap, shrink: !it.wrap, indent: 1 } });
+    } else {
+      ws.box(r, b0, r, b1, null, { fill: XL_C.tint, border: edge(r, b0, b1, it.top) });
+    }
+  });
+  ws.box(stampTop, b0, boxBottom, b1, null, { fill: XL_C.tint, border: { l: BOX, r: BOX, b: BOX } });
+  // 所長印・担当印（15mm 角）。印刷と同じくボックスの右下に並べる
+  const colAt = (x) => { let acc = 0; for (let c = 0; c < mm.length; c++) { if (x < acc + mm[c] || c === mm.length - 1) return { c, dx: Math.max(0, x - acc) }; acc += mm[c]; } return { c: 0, dx: 0 }; };
+  const boxRight = spanMm(0, b1), sq = 15;
+  [['所長印', boxRight - 2.2 - sq - 4 - sq], ['担当印', boxRight - 2.2 - sq]].forEach(([label, x]) => {
+    const p = colAt(x);
+    ws.rect({ c: p.c, r: stampLabelRow, dx: p.dx, dy: 0.5, w: sq, h: Math.max(2.5, heights[stampLabelRow] * 25.4 / 72 - 1), text: label, textSize: 7, textBold: true, textColor: XL_C.blue3, name: label });
+    ws.rect({ c: p.c, r: stampTop, dx: p.dx, dy: 0.8, w: sq, h: sq, line: XL_C.blue4, fill: 'FFFFFF', name: label + 'の枠' });
+  });
+  heights.forEach((ht, r) => ws.height(r, ht));
+  return Math.max(lr, end);
+};
+
 function LoginScreen({ onLogin }) {
   // ログイン: 営業所を一覧から選択 → 登録済みの名前を一覧から選択 → パスワードのみ。
   // 新規登録: 営業所を一覧から選択（誤入力防止） → 名前は新規なので手入力 → パスワード。
@@ -1018,6 +1525,7 @@ function App() {
   const [officeQuoteFileDropTarget, setOfficeQuoteFileDropTarget] = useState(null); // 営業所共有：見積の施設行へドラッグ中のドロップ先施設名
   const [showCloseConfirm, setShowCloseConfirm] = useState(false); // 「閉じる」時の保存確認ダイアログ（施設フォルダ内・変更あり時）
   const [pendingPrintProp, setPendingPrintProp] = useState(null); // 管理画面からPDF保存：読込完了後に印刷するための予約ID
+  const [pendingExcelProp, setPendingExcelProp] = useState(null); // 管理画面からExcel保存：読込完了後にExcelを作るための予約ID
   // メーカーデータを IndexedDB から読み込み（旧 localStorage からは自動移行）。
   // 大容量PDF/ExcelがlocalStorage(約5MB)を超えて消える不具合の対策。
   useEffect(() => {
@@ -3299,10 +3807,8 @@ function App() {
     setShowUsageInput(true);
   };
   // === 年間コスト試算書HTML（月間使用個数→年間使用数・棒グラフ＋円グラフ） ===
-  const buildEstimateDocHtml = () => {
-    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const yen = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
-    const AC = '#1b4d3e', INK = '#262626', SUB = '#6b7280', LINE = '#e8e8e8', GRY = '#9ca3af', UP = '#b45309', DOWN = '#1b4d3e';
+  // === 印刷・Excel 共通：年間コスト試算書の行（年間使用数＝月間×12、単価差×年間使用数）と合計・発行元 ===
+  const prepareEstimateDocData = () => {
     const rows = usageRows.map(rw => {
       const oldP = Number(rw.oldPrice) || 0, newP = Number(rw.newPrice) || 0, m = Number(rw.monthly) || 0;
       const yq = m * 12, impact = yq * (newP - oldP);
@@ -3310,9 +3816,23 @@ function App() {
     }).filter(r => r.yq > 0 && (r.oldP > 0 || r.newP > 0));
     const total = rows.reduce((s, r) => s + r.impact, 0);
     const up = total >= 0; // 増加 or 削減
-    const POS = up ? UP : DOWN;
     const sumWord = up ? '増加' : '削減';
     const top = [...rows].sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact));
+    const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || 'ご担当者';
+    const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : new Date().toLocaleDateString('ja-JP'));
+    const oi = officeInfo || {};
+    const company = oi.companyName || '太陽シルバーサービス㈱';
+    const officeNm = oi.officeName || (loginInfo && loginInfo.office) || '';
+    const addr = oi.address || ''; const tel = oi.phone || ''; const fax = oi.fax || ''; const manager = oi.manager || '';
+    const staff = (loginInfo && loginInfo.userName) || oi.staffName || '';
+    return { rows, total, up, sumWord, top, client, dateStr, company, officeNm, addr, tel, fax, manager, staff };
+  };
+  const buildEstimateDocHtml = () => {
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const yen = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
+    const AC = '#1b4d3e', INK = '#262626', SUB = '#6b7280', LINE = '#e8e8e8', GRY = '#9ca3af', UP = '#b45309', DOWN = '#1b4d3e';
+    const { rows, total, up, sumWord, top, client, dateStr, company, officeNm, addr, tel, fax, manager, staff } = prepareEstimateDocData();
+    const POS = up ? UP : DOWN;
     // 横棒グラフ（影響額の大きい順 上位8）
     const barChart = (() => {
       const items = top.filter(r => Math.abs(r.impact) > 0).slice(0, 8);
@@ -3351,13 +3871,6 @@ function App() {
       return '<div class="pie"><svg viewBox="0 0 180 180" width="180" height="180">' + seg + '</svg><div class="pieleg">' + leg + '</div></div>';
     })();
     const trows = rows.map(r => '<tr><td>' + esc(r.name) + '</td><td class="r">' + r.yq.toLocaleString('ja-JP') + '</td><td class="r">' + (r.oldP ? yen(r.oldP) : '−') + '</td><td class="r">' + (r.newP ? yen(r.newP) : '−') + '</td><td class="r imp">' + (r.impact >= 0 ? '+' : '−') + yen(Math.abs(r.impact)) + '</td></tr>').join('');
-    const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || 'ご担当者';
-    const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : new Date().toLocaleDateString('ja-JP'));
-    const oi = officeInfo || {};
-    const company = oi.companyName || '太陽シルバーサービス㈱';
-    const officeNm = oi.officeName || (loginInfo && loginInfo.office) || '';
-    const addr = oi.address || ''; const tel = oi.phone || ''; const fax = oi.fax || ''; const manager = oi.manager || '';
-    const staff = (loginInfo && loginInfo.userName) || oi.staffName || '';
     const compBlock = '<div class="comp">' + esc(company) + (officeNm ? '　' + esc(officeNm) : '') + (addr ? '<br>' + esc(addr) : '') + ((tel || fax) ? '<br>' + (tel ? 'TEL ' + esc(tel) : '') + (fax ? '　FAX ' + esc(fax) : '') : '') + (manager ? '<br>' + esc(officeNm) + '所長　：　' + esc(manager) : '') + (staff ? '<br>担当　：　' + esc(staff) : '') + '</div>';
     return '<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>年間コスト' + sumWord + '額 試算書</title><style>' +
       '@page{size:A4;margin:16mm;} *{box-sizing:border-box;} body{font-family:"Noto Sans JP","Yu Gothic","Hiragino Kaku Gothic ProN","Meiryo",sans-serif;color:' + INK + ';margin:0;padding:26px;background:#fff;font-size:11px;line-height:1.7;letter-spacing:.01em;font-feature-settings:"tnum","lnum";}' +
@@ -3761,14 +4274,16 @@ function App() {
         #print-toolbar { position: fixed; top: 10px; right: 10px; z-index: 100000; display: flex; gap: 8px; }
         #print-toolbar button { padding: 8px 16px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
         #print-toolbar .print-btn { background: #4338ca; color: #fff; }
+        #print-toolbar .excel-btn { background: #15803d; color: #fff; }
         #print-toolbar .close-btn { background: #475569; color: #fff; }
       `;
       document.head.appendChild(styleEl);
       document.body.appendChild(holder);
       const toolbar = document.createElement('div');
       toolbar.id = 'print-toolbar';
-      toolbar.innerHTML = '<button class="print-btn" onclick="window.print()">🖨️ 印刷</button><button class="close-btn" onclick="document.getElementById(\'print-content-holder\').remove();document.getElementById(\'print-injected-style\').remove();this.parentElement.remove();">✕ 閉じる</button>';
+      toolbar.innerHTML = '<button class="print-btn" onclick="window.print()">🖨️ 印刷</button><button class="excel-btn" id="print-toolbar-excel">📗 Excelで保存</button><button class="close-btn" onclick="document.getElementById(\'print-content-holder\').remove();document.getElementById(\'print-injected-style\').remove();this.parentElement.remove();">✕ 閉じる</button>';
       document.body.appendChild(toolbar);
+      document.getElementById('print-toolbar-excel').onclick = () => handleExcel('internal');
     } catch(e) { console.error('internal print error', e); notify('社内用印刷エラー: '+(e?.message||e), 'error'); }
   };
 
@@ -3905,15 +4420,12 @@ function App() {
     } catch(e) { console.error('cover print error', e); }
   };
 
-  // === 価格改定モード専用の印刷HTML（改定前/後の横並び比較 / A4縦） ===
-  const buildKaiteiPrintHtml = () => {
-    const esc = escapeHTML;
-    const yen = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
-    const yen2 = (n) => '¥' + (Math.round(n * 100) / 100).toLocaleString('ja-JP', { maximumFractionDigits: 2 });
-    let rowsHtml = '';
+  // === 印刷・PDF・Excel 共通：価格改定の比較行（改定前/後・○○単価・差額・率）を算出 ===
+  const prepareKaiteiPrintData = () => {
     const showRate = kaiteiShowRate;
     // 詳細設定ON かつ いずれかの行に容量が入っている場合のみ ○○単価列を出す
     const showUnitCols = kaiteiAdvanced && (groups || []).some(g => (g.items || []).some(it => !it.isHiddenFromPrint && Number(it.volume) > 0));
+    const rows = [];
     (groups || []).forEach(g => (g.items || []).forEach(it => {
       if (it.isHiddenFromPrint) return;
       const po = Number(it.priceOld) || 0, pn = Number(it.priceNew) || 0;
@@ -3927,6 +4439,26 @@ function App() {
       const baseOld = useUnitForDiff ? upo : po;
       const baseNew = useUnitForDiff ? upn : pn;
       const d = baseNew - baseOld, rate = baseOld > 0 ? (d / baseOld * 100) : 0;
+      rows.push({ it, po, pn, vol, bScale, upo, upn, useUnitForDiff, baseOld, d, rate });
+    }));
+    // ○○単価ラベル（最初のグループから取得：ml単価/1枚単価 など）
+    const firstGroupWithUnit = (groups || []).find(g => Number(g.baseScale) > 0 && (g.unit || g.unitPriceLabel));
+    const unitLabel = (() => {
+      if (!firstGroupWithUnit) return '○○単価';
+      const u = firstGroupWithUnit.unit || '';
+      const lbl = firstGroupWithUnit.unitPriceLabel ? `${firstGroupWithUnit.unitPriceLabel}${u}単価` : (firstGroupWithUnit.baseScale === 1 ? `1${u}単価` : `${firstGroupWithUnit.baseScale}${u}単価`);
+      return lbl;
+    })();
+    return { showRate, showUnitCols, rows, unitLabel };
+  };
+  // === 価格改定モード専用の印刷HTML（改定前/後の横並び比較 / A4縦） ===
+  const buildKaiteiPrintHtml = () => {
+    const esc = escapeHTML;
+    const yen = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
+    const yen2 = (n) => '¥' + (Math.round(n * 100) / 100).toLocaleString('ja-JP', { maximumFractionDigits: 2 });
+    let rowsHtml = '';
+    const { showRate, showUnitCols, rows, unitLabel } = prepareKaiteiPrintData();
+    rows.forEach(({ it, po, pn, upo, upn, useUnitForDiff, baseOld, d, rate }) => {
       const dc = d > 0 ? 'up' : d < 0 ? 'down' : '';
       // 差額の表示：○○単価ベースなら "+0.5円" のように小数2桁まで、それ以外は整数 ¥xxx
       const diffStr = !d ? '−'
@@ -3941,15 +4473,7 @@ function App() {
         + '<td class="r ' + dc + '">' + diffStr + '</td>'
         + (showRate ? ('<td class="r ' + dc + '">' + (baseOld > 0 ? ((rate >= 0 ? '+' : '') + rate.toFixed(1) + '%') : '−') + '</td>') : '')
         + '</tr>';
-    }));
-    // ○○単価ラベル（最初のグループから取得：ml単価/1枚単価 など）
-    const firstGroupWithUnit = (groups || []).find(g => Number(g.baseScale) > 0 && (g.unit || g.unitPriceLabel));
-    const unitLabel = (() => {
-      if (!firstGroupWithUnit) return '○○単価';
-      const u = firstGroupWithUnit.unit || '';
-      const lbl = firstGroupWithUnit.unitPriceLabel ? `${firstGroupWithUnit.unitPriceLabel}${u}単価` : (firstGroupWithUnit.baseScale === 1 ? `1${u}単価` : `${firstGroupWithUnit.baseScale}${u}単価`);
-      return lbl;
-    })();
+    });
     const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || '';
     const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : '');
     const oi = officeInfo || {};
@@ -4066,6 +4590,95 @@ function App() {
       + '</div></div>';
   };
 
+  // === 印刷・PDF・Excel 共通：客先向けの見積書/提案書に載せる行と合計を算出 ===
+  const prepareQuotePrintData = () => {
+    const formatDate = (d) => {
+      if (!d) return ''; const p = d.split('-');
+      return p.length === 3 ? `${p[0]}年${parseInt(p[1],10)}月${parseInt(p[2],10)}日` : d;
+    };
+    const displayDate = (proposalDateText && proposalDateText.trim()) ? proposalDateText.trim() : formatDate(proposalDate);
+
+    // 印刷前に「入力行に何か書き込んだが追加ボタン未押下」のデータを自動的に取り込む
+    const groupsForPrint = computedGroups.map(g => {
+      const inp = newItems[g.id];
+      const hasPending = inp && (
+        (inp.name && String(inp.name).trim()) ||
+        (inp.volume !== '' && inp.volume !== undefined && inp.volume !== null) ||
+        (inp.price !== '' && inp.price !== undefined && inp.price !== null)
+      );
+      if (!hasPending) return g;
+      const vol = Number(inp.volume) || 0;
+      const pri = Number(inp.price) || 0;
+      const unitPrice = vol > 0 ? (pri / vol) * (g.baseScale || 1) : 0;
+      const tempItem = {
+        id: 'pending-' + g.id,
+        name: inp.name || '',
+        memo: inp.memo || '',
+        volume: inp.volume,
+        packSize: Number(inp.packSize) || 1,
+        price: pri,
+        casePrice: Number(inp.casePrice) || 0,
+        cost: Number(inp.cost) || 0,
+        caseCost: Number(inp.caseCost) || 0,
+        targetMargin: inp.targetMargin || '',
+        unitPrice: Math.round(unitPrice*10)/10,
+        unitPriceRaw: unitPrice,
+        profit: 0, margin: 0, monthlyCost: 0, yearlyCost: 0,
+        isHighlighted: !!inp.isHighlighted,
+        unitOverride: inp.unitOverride,
+      };
+      return { ...g, items: [...g.items, tempItem] };
+    });
+    // 「印刷で隠す」指定の行は客先印刷に出さない（小計・合計・消費税からも除外して整合）
+    const groupsForPrintVisible = groupsForPrint.map(g => {
+      const visible = g.items.filter(it => !it.isHiddenFromPrint);
+      if (visible.length === g.items.length) return g;
+      const subtotal = visible.reduce((s, it) => {
+        const factor = appMode === 'proposal' ? (Number(it.packSize)||0) : (Number(it.volume)||0);
+        return s + factor * (Number(it.price)||0);
+      }, 0);
+      // 全行が「印刷で隠す」になりカテゴリが空になった場合は、空ヘッダーを出さないよう印可
+      return { ...g, items: visible, subtotal, _emptiedByHide: g.items.length > 0 && visible.length === 0 };
+    });
+    const printHiddenSum = computedGroups.reduce((s, g) => s + g.items.filter(i => i.isHiddenFromPrint).reduce((ss, i) => {
+      const factor = appMode === 'proposal' ? (Number(i.packSize)||0) : (Number(i.volume)||0);
+      return ss + factor * (Number(i.price)||0);
+    }, 0), 0);
+    const printGrandTotal = Math.max(0, grandTotal - printHiddenSum);
+
+    // === 税額集計（見積モードのみ・商品ごと taxMode 反映） ===
+    let taxSubtotalExcl = 0, taxAmount = 0, taxTotalIncl = 0;
+    let hasInclusive = false;
+    if (appMode === 'quote' || (appMode === 'proposal' && showGrandTotal)) {
+      const _isProposal = appMode === 'proposal';
+      groupsForPrintVisible.forEach(g => g.items.forEach(i => {
+        const factor = _isProposal ? (Number(i.packSize) || 0) : (Number(i.volume) || 0);
+        const amt = factor * (Number(i.price) || 0);
+        if (!amt) return;
+        const m = (i.taxMode && i.taxMode !== '') ? i.taxMode : taxMode;
+        if (m === 'inclusive') {
+          const excl = Math.round(amt / 1.1);
+          taxSubtotalExcl += excl;
+          taxAmount += amt - excl;
+          taxTotalIncl += amt;
+          hasInclusive = true;
+        } else if (m === 'nontax') {
+          taxSubtotalExcl += amt;
+          taxTotalIncl += amt;
+        } else {
+          taxSubtotalExcl += amt;
+          taxAmount += Math.round(amt * 0.1);
+          taxTotalIncl += amt + Math.round(amt * 0.1);
+        }
+      }));
+    }
+    // 印刷時に小計/消費税/合計（税込）ブロックを表示する条件：
+    // 税込が絡む場合のみ（全体が税込 or 税込商品が混在）。
+    // 全体が税抜設定のときは「御見積金額 合計（税抜）」だけで足りるため、このブロックは出さない。
+    const showTaxBreakdown = (appMode === 'quote' || appMode === 'proposal') && showGrandTotal && (taxMode === 'inclusive' || hasInclusive);
+    return { displayDate, groupsForPrintVisible, printGrandTotal, taxSubtotalExcl, taxAmount, taxTotalIncl, hasInclusive, showTaxBreakdown };
+  };
+
   const handlePrint = (mode = 'print') => {
     // 二重クリック防止は「直近800ms以内の再クリック」だけをはじく。
     // 以前は print-toolbar が残っていると恒久的に return していたため、
@@ -4119,13 +4732,15 @@ function App() {
           #print-toolbar { position: fixed; top: 10px; right: 10px; z-index: 100000; display: flex; gap: 8px; }
           #print-toolbar button { padding: 8px 16px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
           #print-toolbar .print-btn { background: #d97706; color: #fff; }
+          #print-toolbar .excel-btn { background: #15803d; color: #fff; }
           #print-toolbar .close-btn { background: #475569; color: #fff; }
         `;
         document.head.appendChild(styleEl);
         document.body.appendChild(holder);
         const toolbar = document.createElement('div'); toolbar.id = 'print-toolbar';
-        toolbar.innerHTML = '<button class="print-btn" onclick="window.print()">🖨️ 印刷</button><button class="close-btn" onclick="document.getElementById(\'print-content-holder\').remove();document.getElementById(\'print-injected-style\').remove();this.parentElement.remove();">✕ 閉じる</button>';
+        toolbar.innerHTML = '<button class="print-btn" onclick="window.print()">🖨️ 印刷</button><button class="excel-btn" id="print-toolbar-excel">📗 Excelで保存</button><button class="close-btn" onclick="document.getElementById(\'print-content-holder\').remove();document.getElementById(\'print-injected-style\').remove();this.parentElement.remove();">✕ 閉じる</button>';
         document.body.appendChild(toolbar);
+        document.getElementById('print-toolbar-excel').onclick = () => handleExcel('doc');
       } catch (e) { console.error('kaitei print error', e); notify('価格改定の印刷エラー: ' + (e?.message || e), 'error'); }
       return;
     }
@@ -4183,59 +4798,7 @@ function App() {
         // キャンセル：そのまま既存ロジック（pendingをgroupsForPrintに含めて印刷）
       }
     }
-    const formatDate = (d) => {
-      if (!d) return ''; const p = d.split('-');
-      return p.length === 3 ? `${p[0]}年${parseInt(p[1],10)}月${parseInt(p[2],10)}日` : d;
-    };
-    const displayDate = (proposalDateText && proposalDateText.trim()) ? proposalDateText.trim() : formatDate(proposalDate);
-
-    // 印刷前に「入力行に何か書き込んだが追加ボタン未押下」のデータを自動的に取り込む
-    const groupsForPrint = computedGroups.map(g => {
-      const inp = newItems[g.id];
-      const hasPending = inp && (
-        (inp.name && String(inp.name).trim()) ||
-        (inp.volume !== '' && inp.volume !== undefined && inp.volume !== null) ||
-        (inp.price !== '' && inp.price !== undefined && inp.price !== null)
-      );
-      if (!hasPending) return g;
-      const vol = Number(inp.volume) || 0;
-      const pri = Number(inp.price) || 0;
-      const unitPrice = vol > 0 ? (pri / vol) * (g.baseScale || 1) : 0;
-      const tempItem = {
-        id: 'pending-' + g.id,
-        name: inp.name || '',
-        memo: inp.memo || '',
-        volume: inp.volume,
-        packSize: Number(inp.packSize) || 1,
-        price: pri,
-        casePrice: Number(inp.casePrice) || 0,
-        cost: Number(inp.cost) || 0,
-        caseCost: Number(inp.caseCost) || 0,
-        targetMargin: inp.targetMargin || '',
-        unitPrice: Math.round(unitPrice*10)/10,
-        unitPriceRaw: unitPrice,
-        profit: 0, margin: 0, monthlyCost: 0, yearlyCost: 0,
-        isHighlighted: !!inp.isHighlighted,
-        unitOverride: inp.unitOverride,
-      };
-      return { ...g, items: [...g.items, tempItem] };
-    });
-    // 「印刷で隠す」指定の行は客先印刷に出さない（小計・合計・消費税からも除外して整合）
-    const groupsForPrintVisible = groupsForPrint.map(g => {
-      const visible = g.items.filter(it => !it.isHiddenFromPrint);
-      if (visible.length === g.items.length) return g;
-      const subtotal = visible.reduce((s, it) => {
-        const factor = appMode === 'proposal' ? (Number(it.packSize)||0) : (Number(it.volume)||0);
-        return s + factor * (Number(it.price)||0);
-      }, 0);
-      // 全行が「印刷で隠す」になりカテゴリが空になった場合は、空ヘッダーを出さないよう印可
-      return { ...g, items: visible, subtotal, _emptiedByHide: g.items.length > 0 && visible.length === 0 };
-    });
-    const printHiddenSum = computedGroups.reduce((s, g) => s + g.items.filter(i => i.isHiddenFromPrint).reduce((ss, i) => {
-      const factor = appMode === 'proposal' ? (Number(i.packSize)||0) : (Number(i.volume)||0);
-      return ss + factor * (Number(i.price)||0);
-    }, 0), 0);
-    const printGrandTotal = Math.max(0, grandTotal - printHiddenSum);
+    const { displayDate, groupsForPrintVisible, printGrandTotal, taxSubtotalExcl, taxAmount, taxTotalIncl, hasInclusive, showTaxBreakdown } = prepareQuotePrintData();
     const groupsHTML = groupsForPrintVisible.filter(g => !g._emptiedByHide && (g.items.length > 0 || (g.title && g.title.trim()))).map((group) => {
       // 単価ラベル：自動生成（例：100ml）。group.unitPriceLabel が設定されていれば優先。
       const autoBaseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
@@ -4303,36 +4866,6 @@ function App() {
       return `<div class="${groupClass}">${(group.title && group.title.trim()) ? `<div class="group-title">${escapeHTML(group.title)}</div>` : ''}<table class="items-table"><thead><tr>${headers}</tr></thead><tbody>${rows || '<tr><td colspan="10" class="empty">商品データがありません</td></tr>'}</tbody></table>${subtotalRow}</div>`;
     }).join('');
 
-    // === 税額集計（見積モードのみ・商品ごと taxMode 反映） ===
-    let taxSubtotalExcl = 0, taxAmount = 0, taxTotalIncl = 0;
-    let hasInclusive = false;
-    if (appMode === 'quote' || (appMode === 'proposal' && showGrandTotal)) {
-      const _isProposal = appMode === 'proposal';
-      groupsForPrintVisible.forEach(g => g.items.forEach(i => {
-        const factor = _isProposal ? (Number(i.packSize) || 0) : (Number(i.volume) || 0);
-        const amt = factor * (Number(i.price) || 0);
-        if (!amt) return;
-        const m = (i.taxMode && i.taxMode !== '') ? i.taxMode : taxMode;
-        if (m === 'inclusive') {
-          const excl = Math.round(amt / 1.1);
-          taxSubtotalExcl += excl;
-          taxAmount += amt - excl;
-          taxTotalIncl += amt;
-          hasInclusive = true;
-        } else if (m === 'nontax') {
-          taxSubtotalExcl += amt;
-          taxTotalIncl += amt;
-        } else {
-          taxSubtotalExcl += amt;
-          taxAmount += Math.round(amt * 0.1);
-          taxTotalIncl += amt + Math.round(amt * 0.1);
-        }
-      }));
-    }
-    // 印刷時に小計/消費税/合計（税込）ブロックを表示する条件：
-    // 税込が絡む場合のみ（全体が税込 or 税込商品が混在）。
-    // 全体が税抜設定のときは「御見積金額 合計（税抜）」だけで足りるため、このブロックは出さない。
-    const showTaxBreakdown = (appMode === 'quote' || appMode === 'proposal') && showGrandTotal && (taxMode === 'inclusive' || hasInclusive);
     const taxBreakdownHTML = showTaxBreakdown ? `
       <div class="tax-breakdown">
         <div class="tax-row"><span class="tax-label">小計（税抜）</span><span class="tax-value">¥${taxSubtotalExcl.toLocaleString()}</span></div>
@@ -4537,6 +5070,7 @@ function App() {
         #print-toolbar button { padding: 8px 16px; font-size: 14px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; font-family: inherit; white-space: nowrap; }
         #print-toolbar button.primary { background: #ef4444; color: #fff; } #print-toolbar button.primary:hover { background: #dc2626; }
         #print-toolbar button.secondary { background: #475569; color: #fff; } #print-toolbar button.secondary:hover { background: #334155; }
+        #print-toolbar button.excel { background: #15803d; color: #fff; } #print-toolbar button.excel:hover { background: #166534; }
         @media (max-width: 640px) {
           #print-toolbar { padding: 8px 12px; }
           #print-toolbar .info { font-size: 11px; }
@@ -4553,7 +5087,7 @@ function App() {
         }
       `;
       const toolbar = document.createElement('div'); toolbar.id = 'print-toolbar';
-      toolbar.innerHTML = `<div class="info">📄 印刷プレビュー　<strong>「印刷する」</strong>を押すか、<strong>Ctrl+P</strong>で印刷できます</div><div class="actions"><button class="primary" id="print-toolbar-print">🖨 印刷する</button><button class="secondary" id="print-toolbar-close">✕ 閉じる</button></div>`;
+      toolbar.innerHTML = `<div class="info">📄 印刷プレビュー　<strong>「印刷する」</strong>を押すか、<strong>Ctrl+P</strong>で印刷できます</div><div class="actions"><button class="primary" id="print-toolbar-print">🖨 印刷する</button><button class="excel" id="print-toolbar-excel">📗 Excelで保存</button><button class="secondary" id="print-toolbar-close">✕ 閉じる</button></div>`;
       document.head.appendChild(styleEl); document.body.appendChild(holder); document.body.appendChild(toolbar);
       const cleanup = () => {
         // ID 経由で再取得して確実に削除（参照が外れていてもクリーンアップ可能）
@@ -4573,6 +5107,7 @@ function App() {
       document.addEventListener('keydown', escH);
       document.getElementById('print-toolbar-print').onclick = () => { try { window.print(); } catch { alert('Ctrl+Pで印刷してください'); } };
       document.getElementById('print-toolbar-close').onclick = cleanup;
+      document.getElementById('print-toolbar-excel').onclick = () => handleExcel('doc');
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => { try { window.print(); } catch {} }, 500)));
     } catch (err) { notify('印刷エラー: ' + err.message); }
   };
@@ -4584,6 +5119,550 @@ function App() {
       setTimeout(() => handlePrint('pdf'), 80);
     }
   }, [pendingPrintProp, currentProposalId]);
+
+  // === Excel（.xlsx）保存：印刷・PDF と同じ帳票を Excel で作る ===
+  // 金額・小計・合計・消費税・差額は Excel の計算式（開いた時点の値は PDF と同じ。Excel で数量や単価を直すと再計算される）。
+  // 書体は印刷と同じ BIZ UDP明朝 Medium（試算書は游ゴシック）。A4・余白・横1ページに収める印刷設定つき。
+  const xlFileName = (prefix) => `${prefix}${(clientName || proposalTitle || '見積').replace(/[\\/:*?"<>|]/g, '_')}_${proposalDate || new Date().toISOString().slice(0, 10)}.xlsx`;
+  const xlMincho = (o) => Object.assign({ name: XL_MINCHO }, o);
+  // 見積書／提案書（handlePrint の客先向け帳票と同じ内容）
+  const buildQuoteXlsx = () => {
+    const { displayDate, groupsForPrintVisible, printGrandTotal, taxSubtotalExcl, taxAmount, taxTotalIncl, hasInclusive, showTaxBreakdown } = prepareQuotePrintData();
+    const isProposal = appMode === 'proposal';
+    const showTaxCol = appMode === 'quote' || (isProposal && showGrandTotal);
+    const showUpCol = isProposal && showUnitPriceColumn;
+    const groupsX = groupsForPrintVisible.filter(g => !g._emptiedByHide && (g.items.length > 0 || (g.title && g.title.trim())));
+    const factorOf = (it) => isProposal ? (Number(it.packSize) || 0) : (Number(it.volume) || 0);
+    const numOrText = (v) => (v === '' || v === null || v === undefined) ? null : (isFinite(Number(v)) ? Number(v) : String(v));
+    const unitOf = (g, it) => String(it.unitOverride ?? g.unit ?? '').replace(/"/g, '');
+    const baseLabelOf = (group) => {
+      const autoBaseLabel = group.baseScale === 1 ? `1${group.unit}` : `${group.baseScale}${group.unit}`;
+      const rawLabel = (group.unitPriceLabel && String(group.unitPriceLabel).trim()) ? String(group.unitPriceLabel).trim() : '';
+      return rawLabel ? (/^[0-9]+(?:\.[0-9]+)?$/.test(rawLabel) ? `${rawLabel}${group.unit || ''}` : rawLabel) : autoBaseLabel;
+    };
+    // 数値列の幅：既定の幅と、実際に入る値の桁数から決める（入りきらない数値は Excel で ### になるため）
+    const tx = { vol: [], cs: [], price: [], amt: [], tax: [], up: [] };
+    groupsX.forEach(g => g.items.forEach(it => {
+      const v = numOrText(it.volume);
+      tx.vol.push((typeof v === 'number' ? v.toLocaleString('ja-JP', { maximumFractionDigits: 1 }) : (v || '')) + (isProposal && showUnit ? ' ' + unitOf(g, it) : ''));
+      tx.cs.push(formatNumber(it.packSize));
+      tx.price.push('¥' + (Number(it.price) || 0).toLocaleString('ja-JP'));
+      const amt = factorOf(it) * (Number(it.price) || 0);
+      tx.amt.push('¥' + amt.toLocaleString('ja-JP'));
+      const tm = it.taxMode || 'exclusive';
+      tx.tax.push(tm === 'nontax' ? '非課税' : tm === 'inclusive' ? '内¥' + (amt > 0 ? amt - Math.round(amt / 1.1) : 0).toLocaleString('ja-JP') : '¥' + (amt > 0 ? Math.round(amt * 0.1) : 0).toLocaleString('ja-JP'));
+      tx.up.push('¥' + Number(it.unitPrice || 0).toLocaleString('ja-JP'));
+    }));
+    const head = (labels) => xlFitMm(labels, 8.5, true);
+    const numDefs = [];
+    if (isProposal) {
+      numDefs.push({ key: 'vol', mm: Math.max(14, xlFitMm(tx.vol, 10, true), head(groupsX.map(g => getUnitHeaderLabel(g.unit)))) });
+      if (showCaseMode) numDefs.push({ key: 'cs', mm: Math.max(14, head(['ケース入数']), xlFitMm(tx.cs, 10, true)) });
+    } else numDefs.push({ key: 'vol', mm: Math.max(12, head(['数量']), xlFitMm(tx.vol, 10, true)) });
+    numDefs.push({ key: 'price', mm: Math.max(16, head(['単価']), xlFitMm(tx.price, 10)) });
+    numDefs.push({ key: 'amt', mm: Math.max(18, head(['金額']), xlFitMm(tx.amt, 10, true)) });
+    if (showTaxCol) numDefs.push({ key: 'tax', mm: Math.max(15, head(['消費税']), xlFitMm(tx.tax, 9, true)) });
+    if (showUpCol) numDefs.push({ key: 'up', mm: Math.max(15, xlFitMm(tx.up, 9, true), head(groupsX.map(g => baseLabelOf(g) + '単価'))) });
+    const L = xlDocColumns(numDefs.map(d => d.mm));
+    const col = {}; numDefs.forEach((d, i) => { col[d.key] = L.firstNum + i; });
+    const nameEnd = L.firstNum - 1;
+    const book = createXlsxBook();
+    const ws = book.addSheet(proposalTitle || '御見積書', { margins: { l: 22, r: 22, t: 17, b: 15, h: 8, f: 8 } });
+    ws.setCols(L.cols);
+    const spanMm = (c1, c2) => L.cols.slice(c1, c2 + 1).reduce((s, w) => s + w, 0);
+    const F = xlMincho;
+    const BL = 'thin:' + XL_C.line, BL3 = 'thin:' + XL_C.line3;
+    // --- 頭（題名・宛名・挨拶・条件／発行元・印影欄） ---
+    const leftW = spanMm(0, L.leftEnd);
+    const suffix = clientHonorific || '御中';
+    let r = xlDocHeader(book, ws, L, {
+      title: proposalTitle || '御見積書',
+      client: [{ t: (clientName || '　') + (clientName2 ? '\n' + clientName2 : '') + ' ', font: F({ sz: 15, color: XL_C.ink2 }) }, { t: suffix, font: F({ sz: 10.5, color: XL_C.blue3 }) }],
+      clientLines: xlLineCount(clientName || '　', leftW, 15) + (clientName2 ? xlLineCount(clientName2 + ' ' + suffix, leftW, 15) : 0),
+      greeting: '下記の通り、お見積り申し上げます。\nご検討のほど、よろしくお願い申し上げます。',
+      meta: [['見積番号', proposalNumber || '—'], ['発行日', displayDate || '—']],
+      terms: [['見積有効期限', validityPeriod || '—'], ['お支払条件', paymentTerms || '—'], ['納期', deliveryInfo || '—'], ...(remarks ? [['備考', remarks]] : [])],
+      issuer: { company: officeInfo.companyName || '', office: officeInfo.officeName || '', postal: officeInfo.postal || '', address: officeInfo.address || '', phone: officeInfo.phone || '', fax: officeInfo.fax || '', invoice: officeInfo.invoiceNumber || 'T1290001044462', manager: normalizeName(officeInfo.manager), staff: normalizeName(officeInfo.staffName) },
+    });
+    ws.height(r, 14); r++;
+    // --- 御見積金額（合計）の行：式は明細を書いたあとで入れる ---
+    const printTotalAmount = hasInclusive ? taxTotalIncl : printGrandTotal;
+    const totalRow = (showGrandTotal && printTotalAmount > 0) ? r : -1;
+    if (totalRow >= 0) { ws.height(r, 36); r++; ws.height(r, 12); r++; }
+    // --- カテゴリごとの明細 ---
+    const amtRanges = [];
+    const taxItems = []; // 税額集計（消費税・合計）の式に使う { ref, amt, mode }
+    if (!groupsX.length) { ws.box(r, 0, r, L.last, '商品データがありません', { font: F({ sz: 10, color: 'B0B0B0' }), align: { h: 'center', v: 'center' } }); ws.height(r, 40); r++; }
+    groupsX.forEach(group => {
+      const hasTitle = !!(group.title && group.title.trim());
+      if (hasTitle) {
+        ws.box(r, 0, r, L.last, group.title, { font: F({ sz: 10.5, b: true, color: XL_C.navy }), fill: XL_C.tint2, border: { l: BL, r: BL, t: BL }, align: { v: 'center', indent: 1 } });
+        ws.height(r, 22); r++;
+      }
+      const headBorder = (c1, c2) => ({ l: c1 === 0 ? BL : undefined, r: c2 === L.last ? BL : undefined, t: hasTitle ? undefined : BL, b: 'thin:' + XL_C.blue4 });
+      const headStyle = (c1, c2, h) => ({ font: F({ sz: 8.5, b: true, color: XL_C.navy2 }), fill: XL_C.head, border: headBorder(c1, c2), align: { h, v: 'center', indent: 1 } });
+      ws.box(r, 0, r, nameEnd, '品目', headStyle(0, nameEnd));
+      const heads = { vol: isProposal ? getUnitHeaderLabel(group.unit) : '数量', cs: 'ケース入数', price: '単価', amt: '金額', tax: '消費税', up: `${baseLabelOf(group)}単価` };
+      numDefs.forEach(d => ws.box(r, col[d.key], r, col[d.key], heads[d.key], headStyle(col[d.key], col[d.key], 'right')));
+      ws.height(r, 19); r++;
+      const first = r;
+      if (!group.items.length) { ws.box(r, 0, r, L.last, '商品データがありません', { font: F({ sz: 10, color: 'B0B0B0' }), border: { l: BL, r: BL, b: BL }, align: { h: 'center', v: 'center' } }); ws.height(r, 25); r++; }
+      group.items.forEach((item, idx) => {
+        const lastRow = idx === group.items.length - 1;
+        const hl = !!item.isHighlighted, red = !!item.isRedText;
+        const fill = hl ? XL_C.hl : (idx % 2 === 1 ? XL_C.zebra : undefined);
+        const strong = hl ? (red ? XL_C.red2 : XL_C.hlInk) : null; // マーカー行の数値（太字）
+        const redInk = red ? (hl ? XL_C.red2 : XL_C.red) : null;
+        const bd = (c) => ({ l: c === 0 ? BL : undefined, r: c === L.last ? BL : undefined, b: lastRow ? BL : BL3 });
+        const ref = (key) => xlRef(r, col[key]);
+        const put = (key, v, pt, color, bold, fmt, extraFont) => ws.box(r, col[key], r, col[key], v, { font: F(Object.assign({ sz: pt, b: bold, color }, extraFont)), fill, fmt, border: bd(col[key]), align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+        // 品目（＋備考メモ）
+        const memo = item.memo && String(item.memo).trim().replace(/\s*\n\s*/g, ' '); // 印刷と同じく改行は空白に
+        const nameW = spanMm(0, nameEnd);
+        const nameFont = F({ sz: 10, color: red ? XL_C.red : XL_C.ink2 });
+        const nameVal = memo ? { rich: [{ t: String(item.name || ''), font: nameFont }, { t: '\n' + memo, font: F({ sz: 8.5, b: hl, color: red ? XL_C.red : XL_C.navy2 }) }] } : String(item.name || '');
+        ws.box(r, 0, r, nameEnd, nameVal, { font: nameFont, fill, border: { l: BL, b: lastRow ? BL : BL3 }, align: { v: 'center', wrap: true, indent: 1 } });
+        ws.height(r, Math.max(25, 11 + xlLineCount(item.name || '', nameW, 10) * 14 + (memo ? xlLineCount(memo, nameW, 8.5) * 12 : 0)));
+        // 数量（提案書は容量＋単位、ケース入数）
+        const vol = numOrText(item.volume);
+        const unit = isProposal && showUnit ? unitOf(group, item) : '';
+        put('vol', vol, 10, strong || redInk || XL_C.ink, hl, (typeof vol === 'number' && vol % 1 !== 0 ? '#,##0.0' : '#,##0') + (unit ? `" ${unit}"` : ''));
+        const cs = isProposal && showCaseMode ? numOrText(item.packSize) : null;
+        if (isProposal && showCaseMode) put('cs', cs, 10, strong || redInk || XL_C.ink, hl, xlDecimals(cs) ? '#,##0.' + '0'.repeat(xlDecimals(cs)) : '#,##0');
+        // 単価・金額（金額＝数量（提案書はケース入数）×単価の式）
+        const price = Number(item.price) || 0;
+        put('price', price, 10, redInk || XL_C.ink, false, xlYenFmt(price));
+        const amt = factorOf(item) * price;
+        const factorCell = isProposal ? (showCaseMode ? { ref: ref('cs'), v: cs } : null) : { ref: ref('vol'), v: vol };
+        const amtF = factorCell
+          ? `${typeof factorCell.v === 'string' ? `N(${factorCell.ref})` : factorCell.ref}*${ref('price')}`
+          : (factorOf(item) === 1 ? ref('price') : `${ref('price')}*${factorOf(item)}`);
+        put('amt', { f: amtF, v: amt }, 10, strong || redInk || XL_C.ink, hl, xlYenFmt(amt));
+        taxItems.push({ ref: ref('amt'), amt, mode: (item.taxMode && item.taxMode !== '') ? item.taxMode : taxMode });
+        // 消費税（税抜＝10%、税込＝「内¥」、非課税）
+        if (showTaxCol) {
+          const tm = item.taxMode || 'exclusive';
+          const a = ref('amt');
+          if (tm === 'nontax') put('tax', '非課税', 8.5, XL_C.mute, false, undefined, { i: true });
+          else if (tm === 'inclusive') {
+            const v = amt > 0 ? amt - Math.round(amt / 1.1) : 0;
+            put('tax', { f: `IF(${a}>0,${a}-ROUND(${a}/1.1,0),0)`, v }, 8.5, XL_C.mute, false, xlYenFmt(v, { prefix: '内' }));
+          } else {
+            const v = amt > 0 ? Math.round(amt * 0.1) : 0;
+            put('tax', { f: `IF(${a}>0,ROUND(${a}*0.1,0),0)`, v }, 9, strong || redInk || XL_C.slate, hl, xlYenFmt(v));
+          }
+        }
+        // ○○単価（単価÷容量×基準量。小数1桁）
+        if (showUpCol) {
+          const up = Number(item.unitPrice || 0);
+          const scale = Number(group.baseScale) || 1;
+          put('up', { f: `IF(N(${ref('vol')})>0,ROUND(${ref('price')}/${ref('vol')}*${scale},1),0)`, v: up }, 9, strong || redInk || XL_C.gray, hl, xlYenFmt(up, { decimals: up % 1 === 0 ? 0 : 1 }));
+        }
+        r++;
+      });
+      if (group.items.length) amtRanges.push(xlRange(first, col.amt, r - 1, col.amt));
+      // 小計（合計表示のときだけ・印刷と同じ条件）
+      if (showGrandTotal && group.subtotal > 0) {
+        const sub = group.items.reduce((s, it) => s + factorOf(it) * (Number(it.price) || 0), 0);
+        const aC = L.last - 1;
+        ws.box(r, 0, r, aC - 1, '小計：', { font: F({ sz: 9, color: XL_C.navy }), fill: XL_C.zebra, border: { l: BL, b: BL }, align: { h: 'right', v: 'center' } });
+        ws.box(r, aC, r, L.last, { f: group.items.length ? `SUM(${xlRange(first, col.amt, r - 1, col.amt)})` : '0', v: sub }, { font: F({ sz: 11, b: true, color: XL_C.navy }), fill: XL_C.zebra, fmt: xlYenFmt(sub), border: { r: BL, b: BL }, align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+        ws.height(r, 22); r++;
+      }
+      ws.height(r, 20); r++;
+    });
+    const sumAmtF = amtRanges.length ? `SUM(${amtRanges.join(',')})` : '0';
+    const cachedAmtSum = groupsX.reduce((s, g) => s + g.items.reduce((ss, it) => ss + factorOf(it) * (Number(it.price) || 0), 0), 0);
+    // --- 税込が絡むときの 小計（税抜）／消費税／合計（税込） ---
+    let taxTotalRef = null;
+    if (showTaxBreakdown) {
+      const exclTerms = taxItems.filter(t => t.mode !== 'inclusive' && t.mode !== 'nontax').map(t => xlRoundF(`${t.ref}*0.1`, t.amt * 0.1));
+      const inclTerms = taxItems.filter(t => t.mode === 'inclusive').map(t => `(${t.ref}-${xlRoundF(`${t.ref}/1.1`, t.amt / 1.1)})`);
+      const vC = L.last - 1;
+      let lC = vC - 1; while (lC > L.firstNum && spanMm(lC, vC - 1) < 34) lC--;
+      const B2 = 'thin:CBD5E1', B3 = 'thin:E2E8F0';
+      const taxRow = r + 1, totRow = r + 2;
+      const taxF = [...exclTerms, ...inclTerms].join('+') || '0';
+      const totF = sumAmtF + (exclTerms.length ? '+' + exclTerms.join('+') : '');
+      const rowsDef = [
+        ['小計（税抜）', { f: `${xlRef(totRow, vC)}-${xlRef(taxRow, vC)}`, v: taxSubtotalExcl }, false],
+        ['消費税（10%）', { f: taxF.length < 8000 ? taxF : null, v: taxAmount }, false],
+        ['合計（税込）', { f: totF.length < 8000 ? totF : null, v: taxTotalIncl }, true],
+      ];
+      rowsDef.forEach(([label, val, isTot], i) => {
+        const fill = isTot ? XL_C.tint2 : 'F8FAFC';
+        const font = F({ sz: isTot ? 11 : 10, b: isTot, color: isTot ? XL_C.navy : XL_C.ink });
+        const bot = i === 2 ? B2 : B3;
+        ws.box(r, lC, r, vC - 1, label, { font, fill, border: { l: B2, t: i === 0 ? B2 : undefined, b: bot }, align: { v: 'center', indent: 1 } });
+        ws.box(r, vC, r, L.last, val.f ? val : val.v, { font, fill, fmt: xlYenFmt(val.v), border: { r: B2, t: i === 0 ? B2 : undefined, b: bot }, align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+        ws.height(r, 20); r++;
+      });
+      taxTotalRef = xlRef(totRow, vC);
+      ws.height(r, 12); r++;
+    }
+    // --- 御見積金額 合計（税込の行があれば税込の実額） ---
+    if (totalRow >= 0) {
+      const totalSuffix = hasInclusive ? '（税込）' : getTotalSuffix();
+      let ac = L.last; while (ac > 1 && spanMm(ac, L.last) < 56) ac--;
+      const BT = 'medium:' + XL_C.blue3;
+      ws.box(totalRow, 0, totalRow, ac - 1, xlSpaced('御見積金額') + '　' + xlSpaced('合計' + totalSuffix), { font: F({ sz: 12, b: true, color: XL_C.navy }), fill: XL_C.tint2, border: { l: BT, t: BT, b: BT }, align: { v: 'center', indent: 1 } });
+      const v = hasInclusive ? taxTotalIncl : cachedAmtSum;
+      const n = '#,##0' + (xlDecimals(v) ? '.' + '0'.repeat(xlDecimals(v)) : '');
+      ws.box(totalRow, ac, totalRow, L.last, { f: hasInclusive && taxTotalRef ? taxTotalRef : sumAmtF, v }, { font: F({ sz: 19, b: true, color: XL_C.navy }), fill: XL_C.tint2, fmt: `"¥"${n}"―";"¥"-${n}"―"`, border: { r: BT, t: BT, b: BT }, align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+    }
+    // --- 備考 ---
+    if (bottomRemarks) {
+      ws.box(r, 0, r, L.last, '備考', { font: F({ sz: 8, b: true, color: XL_C.blue }), fill: XL_C.zebra, border: { l: BL, r: BL, t: BL }, align: { v: 'bottom', indent: 1 } });
+      ws.height(r, 17); r++;
+      ws.box(r, 0, r, L.last, bottomRemarks, { font: F({ sz: 9, color: XL_C.ink }), fill: XL_C.zebra, border: { l: BL, r: BL, b: BL }, align: { v: 'top', wrap: true, indent: 1 } });
+      ws.height(r, xlLineCount(bottomRemarks, spanMm(0, L.last) - 4, 9) * 14 + 8); r++;
+    }
+    ws.page.printArea = [0, 0, r - 1, L.last];
+    return { book, filename: xlFileName(''), title: proposalTitle || '御見積書' };
+  };
+
+  // 価格改定（buildKaiteiPrintHtml と同じ内容：改定前／改定後・○○単価・差額・値上がり率）
+  const buildKaiteiXlsx = () => {
+    const { showRate, showUnitCols, rows, unitLabel } = prepareKaiteiPrintData();
+    const yenS = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
+    const yen2S = (n) => '¥' + (Math.round(n * 100) / 100).toLocaleString('ja-JP', { maximumFractionDigits: 2 });
+    const defs = [
+      { key: 'po', head: ['改定前単価'], kind: 'old', texts: rows.map(x => yenS(x.po)) },
+      { key: 'pn', head: ['改定後単価'], kind: 'new', texts: rows.map(x => yenS(x.pn)) },
+      ...(showUnitCols ? [
+        { key: 'upo', head: ['改定前', unitLabel], kind: 'old', texts: rows.map(x => yen2S(x.upo)) },
+        { key: 'upn', head: ['改定後', unitLabel], kind: 'new', texts: rows.map(x => yen2S(x.upn)) },
+      ] : []),
+      { key: 'd', head: ['差額'], texts: rows.map(x => '+' + yen2S(Math.abs(x.d))) },
+      ...(showRate ? [{ key: 'rate', head: ['値上がり率'], texts: rows.map(x => '+' + x.rate.toFixed(1) + '%') }] : []),
+    ];
+    const pct = { 3: 12, 4: 10.5, 5: 10, 6: 11 }[defs.length] || 11; // 印刷の colgroup と同じ割合（数値列1本あたり %）
+    defs.forEach(d => { d.mm = Math.max(166 * pct / 100, xlFitMm([d.head[0], d.head[1] || ''], 8, true, 2.5), xlFitMm(d.texts, 9, true, 3)); });
+    const L = xlDocColumns(defs.map(d => d.mm));
+    const col = {}; defs.forEach((d, i) => { col[d.key] = L.firstNum + i; });
+    const nameEnd = L.firstNum - 1;
+    const book = createXlsxBook();
+    const ws = book.addSheet('価格改定', { margins: { l: 22, r: 22, t: 17, b: 15, h: 8, f: 8 } });
+    ws.setCols(L.cols);
+    const spanMm = (c1, c2) => L.cols.slice(c1, c2 + 1).reduce((s, w) => s + w, 0);
+    const F = xlMincho;
+    const BL = 'thin:' + XL_C.line, BL3 = 'thin:' + XL_C.line3;
+    const oi = officeInfo || {};
+    const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || '';
+    const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : '');
+    const title = (proposalTitle && proposalTitle.trim() && proposalTitle.trim() !== '御見積書') ? proposalTitle.trim() : '御見積り';
+    const leftW = spanMm(0, L.leftEnd);
+    let r = xlDocHeader(book, ws, L, {
+      title,
+      client: [{ t: (client || '　') + ' ', font: F({ sz: 15, color: XL_C.ink2 }) }, { t: '御中', font: F({ sz: 10.5, color: XL_C.blue3 }) }],
+      clientLines: xlLineCount((client || '　') + ' 御中', leftW, 15),
+      greeting: 'いつもお世話になっております。下記の通り、価格改定のご案内をお送りいたします。ご確認のほどよろしくお願いいたします。',
+      meta: [['発行日', dateStr || '—']],
+      terms: null,
+      issuer: { company: oi.companyName || '太陽シルバーサービス㈱', office: oi.officeName || '', postal: oi.postal || '', address: oi.address || '', phone: oi.phone || '', fax: oi.fax || '', invoice: oi.invoiceNumber || 'T1290001044462', manager: oi.manager || '', staff: oi.staffName || '' },
+    });
+    ws.height(r, 12); r++;
+    // 見出し（○○単価は2段：改定前／100ml単価）
+    const headRow = r;
+    const headFill = { old: 'E2E8F0', new: XL_C.head };
+    const headInk = { old: XL_C.slate, new: XL_C.navy2 };
+    const hb = (c) => ({ l: c === 0 ? BL : undefined, r: c === L.last ? BL : undefined, t: BL, b: 'thin:' + XL_C.blue4 });
+    ws.box(r, 0, r, nameEnd, '商品名', { font: F({ sz: 8, b: true, color: XL_C.navy2 }), fill: XL_C.head, border: hb(0), align: { v: 'center', indent: 1 } });
+    defs.forEach(d => {
+      const ink = headInk[d.kind] || XL_C.navy2;
+      const v = d.head[1] ? { rich: [{ t: d.head[0] + '\n', font: F({ sz: 8, b: true, color: ink }) }, { t: d.head[1], font: F({ sz: 6.5, color: XL_C.slate }) }] } : d.head[0];
+      ws.box(r, col[d.key], r, col[d.key], v, { font: F({ sz: 8, b: true, color: ink }), fill: headFill[d.kind] || XL_C.head, border: hb(col[d.key]), align: { h: 'right', v: 'center', wrap: !!d.head[1] } });
+    });
+    ws.height(r, showUnitCols ? 25 : 17); r++;
+    const first = r;
+    if (!rows.length) { ws.box(r, 0, r, L.last, '商品が入力されていません', { font: F({ sz: 10, color: '999999' }), border: { l: BL, r: BL, b: BL }, align: { h: 'center', v: 'center' } }); ws.height(r, 40); r++; }
+    rows.forEach(({ it, po, pn, vol, bScale, upo, upn, useUnitForDiff, baseOld, d, rate }, idx) => {
+      const lastRow = idx === rows.length - 1;
+      const zebra = idx % 2 === 1 ? XL_C.zebra : undefined;
+      const bd = (c) => ({ l: c === 0 ? BL : undefined, r: c === L.last ? BL : undefined, b: lastRow ? BL : BL3 });
+      const ref = (key) => xlRef(r, col[key]);
+      const put = (key, v, o) => ws.box(r, col[key], r, col[key], v, { font: F({ sz: o.sz || 8.5, b: !!o.b, color: o.color || XL_C.ink }), fill: o.fill || zebra, fmt: o.fmt, border: bd(col[key]), align: { h: 'right', v: 'center', shrink: true } });
+      const memo = it.memo ? String(it.memo).replace(/\s*\n\s*/g, ' ') : ''; // 印刷と同じく改行は空白に
+      const nameW = spanMm(0, nameEnd);
+      const nameFont = F({ sz: 9.5, color: XL_C.ink2 });
+      ws.box(r, 0, r, nameEnd, memo ? { rich: [{ t: String(it.name || ''), font: nameFont }, { t: '\n' + memo, font: F({ sz: 8.5, color: XL_C.navy2 }) }] } : String(it.name || ''), { font: nameFont, fill: zebra, border: bd(0), align: { v: 'center', wrap: true, indent: 1 } });
+      ws.height(r, Math.max(24, 11 + xlLineCount(it.name || '', nameW, 9.5) * 13.5 + (memo ? xlLineCount(memo, nameW, 8.5) * 12 : 0)));
+      put('po', po, { color: XL_C.slate, fmt: xlYenFmt(po, { decimals: 0, zero: '−' }) });
+      put('pn', pn, { b: true, color: XL_C.ink2, fill: XL_C.tint, fmt: xlYenFmt(pn, { decimals: 0, zero: '−' }) });
+      if (showUnitCols) {
+        const upF = (key) => (vol > 0 ? { f: `${ref(key)}/${vol}*${bScale}`, v: key === 'po' ? upo : upn } : 0);
+        put('upo', upF('po'), { sz: 9, color: XL_C.slate, fill: 'F8FAFC', fmt: xlYenFmt(upo, { decimals: xlDecimals(upo, 2), zero: '−' }) });
+        put('upn', upF('pn'), { sz: 9, b: true, color: XL_C.navy2, fill: XL_C.tint2, fmt: xlYenFmt(upn, { decimals: xlDecimals(upn, 2), zero: '−' }) });
+      }
+      const [oRef, nRef] = useUnitForDiff ? [ref('upo'), ref('upn')] : [ref('po'), ref('pn')];
+      put('d', { f: `${nRef}-${oRef}`, v: d }, { b: true, color: XL_C.ink, fmt: xlDiffFmt(useUnitForDiff ? xlDecimals(d, 2) : 0) });
+      if (showRate) put('rate', { f: `IF(${oRef}>0,(${nRef}-${oRef})/${oRef},"−")`, v: baseOld > 0 ? rate / 100 : '−' }, { b: true, color: XL_C.ink, fmt: '+0.0%;-0.0%;+0.0%' });
+      r++;
+    });
+    // 値上がり（赤）・値下がり（緑）：数値を直しても色が追従するよう条件付き書式で
+    if (rows.length) {
+      const c1 = col.d, c2 = showRate ? col.rate : col.d, tl = xlRef(first, c1);
+      ws.cf(xlRange(first, c1, r - 1, c2), [
+        { f: `AND(ISNUMBER(${tl}),${tl}>0)`, dxf: { font: { b: true, color: XL_C.up } } },
+        { f: `AND(ISNUMBER(${tl}),${tl}<0)`, dxf: { font: { b: true, color: XL_C.down } } },
+      ]);
+    }
+    if (bottomRemarks && bottomRemarks.trim()) {
+      ws.height(r, 12); r++;
+      ws.box(r, 0, r, L.last, '備考', { font: F({ sz: 8, b: true, color: XL_C.blue }), fill: XL_C.zebra, border: { l: BL, r: BL, t: BL }, align: { v: 'bottom', indent: 1 } });
+      ws.height(r, 17); r++;
+      ws.box(r, 0, r, L.last, bottomRemarks, { font: F({ sz: 9, color: XL_C.sub2 }), fill: XL_C.zebra, border: { l: BL, r: BL, b: BL }, align: { v: 'top', wrap: true, indent: 1 } });
+      ws.height(r, xlLineCount(bottomRemarks, spanMm(0, L.last) - 4, 9) * 14 + 8); r++;
+    }
+    ws.page.printArea = [0, 0, r - 1, L.last];
+    ws.page.printTitles = [headRow, headRow];
+    return { book, filename: xlFileName('価格改定_'), title };
+  };
+
+  // 社内用（handlePrintInternal と同じ内容：仕切り・利益まで全項目／価格改定は改定前後・差額・率。A4横）
+  const buildInternalXlsx = () => {
+    const isK = appMode === 'kaitei';
+    const book = createXlsxBook();
+    const ws = book.addSheet('社内用', { orientation: 'landscape', margins: { l: 8, r: 8, t: 8, b: 8, h: 4, f: 4 }, hCenter: false });
+    const F = xlMincho;
+    const G = 'thin:888888';
+    const items = [];
+    computedGroups.forEach(g => g.items.forEach(it => {
+      if (it.isHiddenFromPrint) return;
+      if (isK && !(it.name && String(it.name).trim())) return;
+      items.push({ g, it });
+    }));
+    const yenS = (n) => '¥' + (Number(n) || 0).toLocaleString();
+    const factorOf = (it) => appMode === 'proposal' ? (Number(it.packSize) || 0) : (Number(it.volume) || 0);
+    // 列定義：key・見出し・幅(mm)・黄色マーカー
+    const defs = isK
+      ? [['cat', 'カテゴリ', 39], ['name', '品目', 0], ['vol', '容量', 22], ['po', '改定前単価', 24, true], ['pn', '改定後単価', 24, true], ['upo', '改定前\n〇〇単価', 22], ['upn', '改定後\n〇〇単価', 22], ['d', '差額', 22], ['rate', '値上がり率', 21]]
+      : [['cat', 'カテゴリ', 39], ['name', '品目', 0], ...(appMode === 'proposal' ? [['cs', 'ケース\n入数', 15]] : []), ['vol', appMode === 'proposal' ? '内容量' : '数量', 18], ['cost', '仕入単価', 23, true], ['price', '販売単価', 24, true], ['amt', '販売額', 25, true], ['tax', '消費税', 20], ['tl', '税区分', 14], ['profit', '利益額', 21], ['margin', '利益率', 16]];
+    const widthOf = (key, base) => {
+      const vals = items.map(({ it }) => {
+        if (key === 'amt') return yenS(factorOf(it) * (Number(it.price) || 0));
+        if (key === 'cost') return yenS(it.cost); if (key === 'price') return yenS(it.price);
+        if (key === 'po') return yenS(it.priceOld); if (key === 'pn') return yenS(it.priceNew);
+        if (key === 'profit') return yenS(Math.round((Number(it.price) - (Number(it.cost) || 0)) * factorOf(it)));
+        return '';
+      });
+      return Math.max(base, xlFitMm(vals, key === 'cost' || key === 'price' || key === 'amt' || key === 'po' || key === 'pn' ? 11 : 10.5, true, 3));
+    };
+    const cols = defs.map(([key, , mm]) => (key === 'name' ? 0 : widthOf(key, mm)));
+    cols[1] = Math.max(50, 281 - cols.reduce((s, w) => s + w, 0));
+    ws.setCols(cols);
+    const col = {}; defs.forEach(([key], i) => { col[key] = i; });
+    const last = defs.length - 1;
+    let r = 0;
+    const docName = isK ? '価格改定比較' : appMode === 'proposal' ? '提案書' : '見積書';
+    ws.box(r, 0, r, last, `社内確認用 ${docName}（${isK ? '改定前後・差額・率' : '仕切り込み全項目'}）`, { font: F({ sz: 13, b: true, color: '000000' }), border: { b: 'medium:333333' }, align: { v: 'bottom' } });
+    ws.height(r, 24); r++;
+    ws.height(r, 6); r++;
+    const meta = [['宛先', `${clientName} ${clientName2} ${clientHonorific || ''}`], ['件名', proposalTitle], ['発行日', proposalDateText || proposalDate || ''], ['営業所', loginInfo?.office || ''], ['担当', loginInfo?.userName || ''], ['有効期限', validityPeriod || ''], ['納期', deliveryInfo || '']];
+    const metaRuns = [];
+    meta.forEach(([lb, v], i) => { metaRuns.push({ t: (i ? '　　' : '') + lb + ': ', font: F({ sz: 9.5, b: true, color: '444444' }) }); metaRuns.push({ t: String(v || '') || '　', font: F({ sz: 9.5, color: '000000' }) }); });
+    ws.box(r, 0, r, last, { rich: metaRuns }, { font: metaRuns[0].font, align: { v: 'center', wrap: true } });
+    ws.height(r, xlLineCount(metaRuns.map(x => x.t).join(''), 278, 9.5) * 14 + 5); r++;
+    ws.height(r, 8); r++;
+    // 見出し
+    const headRow = r;
+    defs.forEach(([key, label, , hl], i) => ws.box(r, i, r, i, label, { font: F({ sz: 9.5, b: true, color: '000000' }), fill: hl ? 'FDE047' : 'E5E7EB', border: { l: G, r: G, t: G, b: G }, align: { h: 'center', v: 'center', wrap: true } }));
+    ws.height(r, /\n/.test(defs.map(d => d[1]).join('')) ? 27 : 17); r++;
+    const first = r;
+    items.forEach(({ g, it }) => {
+      const ref = (key) => xlRef(r, col[key]);
+      const box = (key, v, o = {}) => ws.box(r, col[key], r, col[key], v, { font: F({ sz: o.sz || 10.5, b: !!o.b, i: !!o.i, color: o.color || '000000' }), fill: o.fill, fmt: o.fmt, border: { l: G, r: G, t: G, b: G }, align: { h: o.h || 'right', v: 'center', wrap: !!o.wrap, shrink: !o.wrap && (o.h || 'right') === 'right' } });
+      const hlo = (o) => Object.assign({ sz: 11, b: true, fill: 'FEF08A' }, o);
+      box('cat', g.title || '', { sz: 9, color: '444444', h: 'left', wrap: true });
+      const memo = it.memo ? String(it.memo).replace(/\s*\n\s*/g, ' ') : ''; // 印刷と同じく改行は空白に
+      const nameFont = F({ sz: 10, color: '000000' });
+      box('name', memo ? { rich: [{ t: String(it.name || ''), font: nameFont }, { t: '\n' + memo, font: F({ sz: 8, i: true, color: '555555' }) }] } : String(it.name || ''), { sz: 10, h: 'left', wrap: true });
+      const lines = Math.max(xlLineCount(it.name || '', cols[1], 10) + (memo ? xlLineCount(memo, cols[1], 8) * 0.8 : 0), xlLineCount(g.title || '', cols[0], 9));
+      ws.height(r, Math.max(19, lines * 13.5 + 6));
+      const unitDisp = String(it.unitOverride ?? g.unit ?? '').replace(/"/g, '');
+      const volNum = Number(it.volume);
+      const volVal = it.volume === '' || it.volume === null || it.volume === undefined ? null : (isFinite(volNum) ? volNum : String(it.volume));
+      const volFmt = (v) => (xlDecimals(v) ? '#,##0.' + '0'.repeat(xlDecimals(v)) : '#,##0') + (unitDisp ? `" ${unitDisp}"` : '');
+      if (isK) {
+        const po = Number(it.priceOld) || 0, pn = Number(it.priceNew) || 0;
+        const vol = Number(it.volume) || 0, bs = g.baseScale || 1;
+        const upo = vol > 0 ? (po / vol) * bs : 0, upn = vol > 0 ? (pn / vol) * bs : 0;
+        const d = pn - po, rate = po > 0 ? (d / po * 100) : 0;
+        box('vol', vol ? volVal : '−', { fmt: vol ? volFmt(volVal) : undefined });
+        box('po', po, hlo({ fmt: xlYenFmt(po, { zero: '−' }) }));
+        box('pn', pn, hlo({ fmt: xlYenFmt(pn, { zero: '−' }) }));
+        box('upo', vol > 0 ? { f: `${ref('po')}/${vol}*${bs}`, v: upo } : 0, { fmt: xlYenFmt(upo, { decimals: xlDecimals(upo, 2), zero: '−' }) });
+        box('upn', vol > 0 ? { f: `${ref('pn')}/${vol}*${bs}`, v: upn } : 0, { fmt: xlYenFmt(upn, { decimals: xlDecimals(upn, 2), zero: '−' }) });
+        box('d', { f: `${ref('pn')}-${ref('po')}`, v: d }, { b: true, color: '666666', fmt: xlDiffFmt(xlDecimals(d)) });
+        box('rate', { f: `IF(${ref('po')}>0,(${ref('pn')}-${ref('po')})/${ref('po')},"−")`, v: po > 0 ? rate / 100 : '−' }, { b: true, color: '666666', fmt: '+0.0%;-0.0%;+0.0%' });
+      } else {
+        const factor = factorOf(it), price = Number(it.price) || 0, cost = Number(it.cost) || 0;
+        const amt = factor * price;
+        const tm = it.taxMode || 'exclusive';
+        let taxAmt = 0;
+        if (amt > 0) { if (tm === 'inclusive') taxAmt = amt - Math.round(amt / 1.1); else if (tm === 'exclusive') taxAmt = Math.round(amt * 0.1); }
+        const profitAmt = Math.round((price - cost) * factor);
+        const margin = price > 0 ? Math.round((price - cost) / price * 1000) / 10 : 0;
+        const cs = appMode === 'proposal' ? (it.packSize === '' || it.packSize === null || it.packSize === undefined ? null : (isFinite(Number(it.packSize)) ? Number(it.packSize) : String(it.packSize))) : null;
+        if (appMode === 'proposal') box('cs', cs, { fmt: xlDecimals(cs) ? '#,##0.' + '0'.repeat(xlDecimals(cs)) : '#,##0' });
+        box('vol', volVal, { fmt: typeof volVal === 'number' ? volFmt(volVal) : undefined });
+        const fCell = appMode === 'proposal' ? { ref: ref('cs'), v: cs } : { ref: ref('vol'), v: volVal };
+        const fx = typeof fCell.v === 'string' ? `N(${fCell.ref})` : fCell.ref;
+        box('cost', cost, hlo({ fmt: xlYenFmt(cost) }));
+        box('price', price, hlo({ fmt: xlYenFmt(price) }));
+        box('amt', { f: `${fx}*${ref('price')}`, v: amt }, hlo({ fmt: xlYenFmt(amt) }));
+        const a = ref('amt');
+        box('tax', tm === 'nontax' ? 0 : { f: tm === 'inclusive' ? `IF(${a}>0,${a}-ROUND(${a}/1.1,0),0)` : `IF(${a}>0,ROUND(${a}*0.1,0),0)`, v: taxAmt }, { fmt: xlYenFmt(taxAmt) });
+        box('tl', tm === 'exclusive' ? '税抜' : tm === 'inclusive' ? '税込' : '非課税', { sz: 9, h: 'center' });
+        box('profit', { f: xlRoundF(`(${ref('price')}-${ref('cost')})*${fx}`, (price - cost) * factor), v: profitAmt }, { fmt: xlYenFmt(profitAmt) });
+        box('margin', { f: `IF(${ref('price')}>0,ROUND((${ref('price')}-${ref('cost')})/${ref('price')},3),0)`, v: margin / 100 }, { fmt: margin % 1 === 0 ? '0%' : '0.0%' });
+      }
+      r++;
+    });
+    if (isK && items.length) {
+      const tl = xlRef(first, col.d);
+      ws.cf(xlRange(first, col.d, r - 1, col.rate), [
+        { f: `AND(ISNUMBER(${tl}),${tl}>0)`, dxf: { font: { b: true, color: XL_C.up } } },
+        { f: `AND(ISNUMBER(${tl}),${tl}<0)`, dxf: { font: { b: true, color: XL_C.down } } },
+      ]);
+    }
+    ws.height(r, 8); r++;
+    ws.box(r, 0, r, last, isK ? '※ この資料は社内確認用です。価格改定前後の単価・差額・値上がり率を一覧できる形式です（印刷非表示の行は除外）。' : '※ この資料は社内確認用です。客先には渡しません。原価・仕入・利益を確認できる形式です（合計金額は非表示／印刷非表示の行は除外）。', { font: F({ sz: 8.5, color: '666666' }), align: { v: 'center' } });
+    ws.height(r, 15); r++;
+    ws.page.printArea = [0, 0, r - 1, last];
+    ws.page.printTitles = [headRow, headRow];
+    return { book, filename: xlFileName('社内用_'), title: `社内確認用 ${docName}` };
+  };
+
+  // 年間コスト試算書（buildEstimateDocHtml と同じ内容。グラフは Excel のグラフで、表の数値を参照）
+  const buildEstimateDocXlsx = () => {
+    const { rows, total, up, sumWord, top, client, dateStr, company, officeNm, addr, tel, fax, manager, staff } = prepareEstimateDocData();
+    const G = (o) => Object.assign({ name: XL_GOTHIC }, o);
+    const AC = '1B4D3E', INK = '262626', SUB = '6B7280', LINE = 'E8E8E8', POS = up ? 'B45309' : '1B4D3E';
+    const yenS = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
+    const cols = [44, 38,
+      Math.max(24, xlFitMm(rows.map(x => x.yq.toLocaleString('ja-JP')), 8, false)),
+      Math.max(22, xlFitMm(rows.map(x => yenS(x.oldP)), 8, false)),
+      Math.max(22, xlFitMm(rows.map(x => yenS(x.newP)), 8, false)),
+      Math.max(28, xlFitMm(rows.map(x => '+' + yenS(Math.abs(x.impact))), 8, true))];
+    cols[1] = Math.max(30, 178 - cols[0] - cols.slice(2).reduce((s, w) => s + w, 0));
+    const book = createXlsxBook();
+    const ws = book.addSheet('年間コスト試算書', { margins: { l: 16, r: 16, t: 16, b: 16, h: 8, f: 8 } });
+    ws.setCols([...cols, 6, 46, 24]); // G＝間隔、H・I＝グラフ用データ（印刷範囲の外）
+    const last = 5;
+    let r = 0;
+    ws.box(r, 0, r, last, `年間コスト${sumWord}額 試算書`, { font: G({ sz: 15, b: true, color: '1A1A1A' }), align: { h: 'center', v: 'center' } });
+    ws.height(r, 30); r++;
+    ws.height(r, 6); r++;
+    // 宛名（左）と発行元（右）
+    const comp = [company + (officeNm ? '　' + officeNm : ''), addr, (tel || fax) ? (tel ? 'TEL ' + tel : '') + (fax ? '　FAX ' + fax : '') : '', manager ? officeNm + '所長　：　' + manager : '', staff ? '担当　：　' + staff : ''].filter(Boolean);
+    const topRows = Math.max(2, comp.length);
+    ws.box(r, 0, r, 1, `法人名：${client}　御中`, { font: G({ sz: 9.75, b: true, color: INK }), align: { v: 'center', wrap: true } });
+    ws.box(r + 1, 0, r + 1, 1, `作成日　${dateStr}`, { font: G({ sz: 7.5, color: SUB }), align: { v: 'top' } });
+    comp.forEach((t, i) => ws.box(r + i, 3, r + i, last, t, { font: G({ sz: 7.5, color: '4B5563' }), align: { v: 'center' } }));
+    for (let i = 0; i < topRows; i++) ws.height(r + i, i === 0 ? Math.max(16, xlLineCount(`法人名：${client}　御中`, cols[0] + cols[1], 9.75) * 14 + 2) : 12.5);
+    r += topRows;
+    ws.height(r, 12); r++;
+    // 年間コスト増加額（試算）：式は表を書いたあとで入れる
+    const sumRow = r; ws.height(r, 34); r++;
+    ws.height(r, 14); r++;
+    // 表
+    const th = (c1, c2, t, h) => ws.box(r, c1, r, c2, t, { font: G({ sz: 7.5, color: SUB }), fill: 'F6F7F6', border: { b: 'thin:' + AC }, align: { h, v: 'center', indent: 1 } });
+    th(0, 1, '商品名'); th(2, 2, '年間使用数', 'right'); th(3, 3, '旧単価', 'right'); th(4, 4, '新単価', 'right'); th(5, 5, `年間${sumWord}額`, 'right');
+    ws.height(r, 20); r++;
+    const first = r;
+    const impactRef = [];
+    if (!rows.length) { ws.box(r, 0, r, last, '月間使用数・単価をご入力ください', { font: G({ sz: 8, color: '9CA3AF' }), align: { h: 'center', v: 'center' } }); ws.height(r, 24); r++; }
+    rows.forEach(x => {
+      const bd = { b: 'thin:EEEEEE' };
+      ws.box(r, 0, r, 1, x.name, { font: G({ sz: 8, color: INK }), border: bd, align: { v: 'center', wrap: true, indent: 1 } });
+      ws.height(r, Math.max(22, xlLineCount(x.name, cols[0] + cols[1], 8) * 12 + 10));
+      ws.box(r, 2, r, 2, x.yq, { font: G({ sz: 8, color: INK }), fmt: '#,##0', border: bd, align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+      ws.box(r, 3, r, 3, x.oldP, { font: G({ sz: 8, color: INK }), fmt: xlYenFmt(0, { decimals: 0, zero: '−' }), border: bd, align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+      ws.box(r, 4, r, 4, x.newP, { font: G({ sz: 8, color: INK }), fmt: xlYenFmt(0, { decimals: 0, zero: '−' }), border: bd, align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+      ws.box(r, 5, r, 5, { f: `${xlRef(r, 2)}*(${xlRef(r, 4)}-${xlRef(r, 3)})`, v: x.impact }, { font: G({ sz: 8, b: true, color: POS }), fmt: '"+¥"#,##0;"−¥"#,##0;"+¥"0', border: bd, align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+      impactRef.push({ ref: xlRef(r, 5), x });
+      r++;
+    });
+    const impactRange = rows.length ? xlRange(first, 5, r - 1, 5) : null;
+    ws.box(sumRow, 0, sumRow, 0, `年間コスト${sumWord}額（試算）`, { font: G({ sz: 9, b: true, color: INK }), fill: 'EEF3F1', border: { l: 'thick:' + POS, t: 'thin:' + LINE, b: 'thin:' + LINE }, align: { v: 'center', indent: 1 } });
+    ws.box(sumRow, 1, sumRow, 2, impactRange ? { f: `ABS(SUM(${impactRange}))`, v: Math.abs(total) } : Math.abs(total), { font: G({ sz: 16.5, b: true, color: POS }), fill: 'EEF3F1', fmt: '"約 ¥"#,##0', border: { r: 'thin:' + LINE, t: 'thin:' + LINE, b: 'thin:' + LINE }, align: { h: 'left', v: 'center', indent: 1, shrink: true } });
+    ws.height(r, 16); r++;
+    // グラフ（影響額の大きい順 上位8／構成比 上位5＋その他）。元データは印刷範囲外の H〜I 列
+    const bars = top.filter(x => Math.abs(x.impact) > 0).slice(0, 8);
+    const valid = top.filter(x => Math.abs(x.impact) > 0);
+    const refOf = (x) => impactRef.find(p => p.x === x).ref;
+    const sheetRef = xlQuoteSheet(ws.name) + '!';
+    let dr = 0;
+    ws.box(dr, 7, dr, 8, 'グラフ用データ（印刷されません）', { font: G({ sz: 8, b: true, color: SUB }), align: { v: 'center' } }); dr++;
+    const writeData = (title, list) => {
+      ws.box(dr, 7, dr, 7, title, { font: G({ sz: 8, b: true, color: INK }), border: { b: 'thin:' + LINE } });
+      ws.box(dr, 8, dr, 8, '金額', { font: G({ sz: 8, b: true, color: INK }), border: { b: 'thin:' + LINE }, align: { h: 'right' } });
+      dr++;
+      const s = dr;
+      list.forEach(([label, f, v]) => {
+        ws.box(dr, 7, dr, 7, label, { font: G({ sz: 8, color: INK }) });
+        ws.box(dr, 8, dr, 8, { f, v }, { font: G({ sz: 8, color: INK }), fmt: '#,##0' });
+        dr++;
+      });
+      dr++;
+      return { cat: sheetRef + xlRange(s, 7, dr - 2, 7, true), val: sheetRef + xlRange(s, 8, dr - 2, 8, true) };
+    };
+    const short = (s, n) => (s.length > n ? s.slice(0, n) + '…' : s);
+    const barList = bars.map(x => [short(x.name, 13), `ABS(${refOf(x)})`, Math.abs(x.impact)]);
+    const pieParts = valid.slice(0, 5).map(x => [short(x.name, 10), `ABS(${refOf(x)})`, Math.abs(x.impact)]);
+    const rest = valid.slice(5);
+    if (rest.length) pieParts.push(['その他', rest.map(x => `ABS(${refOf(x)})`).join('+'), rest.reduce((s, x) => s + Math.abs(x.impact), 0)]);
+    const barRefs = bars.length ? writeData(`${sumWord}額の大きい商品`, barList) : null;
+    const pieRefs = valid.length >= 2 ? writeData(`${sumWord}額の構成比`, pieParts) : null;
+    const chartTitle = (c1, c2, t) => ws.box(r, c1, r, c2, t, { font: G({ sz: 9, b: true, color: INK }), border: { b: 'medium:' + AC }, align: { v: 'bottom' } });
+    const barEnd = pieRefs ? 1 : last;
+    chartTitle(0, barEnd, `${sumWord}額の大きい商品`);
+    if (pieRefs) chartTitle(2, last, `${sumWord}額の構成比`);
+    ws.height(r, 19); r++;
+    const chartMm = Math.max(48, bars.length * 7.5 + 10);
+    const nRows = Math.ceil(chartMm * 72 / 25.4 / 15);
+    for (let i = 0; i < nRows; i++) ws.height(r + i, 15);
+    if (barRefs) {
+      ws.chart({ from: { c: 0, r }, to: { c: barEnd + 1, r: r + nRows }, name: `${sumWord}額の大きい商品`, xml: xlBarChartXml({ catF: barRefs.cat, valF: barRefs.val, cats: barList.map(b => b[0]), vals: barList.map(b => b[2]), colors: bars.map(x => (x.impact >= 0 ? 'B45309' : '1B4D3E')), labelFmts: bars.map(x => (x.impact >= 0 ? '"+¥"#,##0' : '"−¥"#,##0')), labelColors: bars.map(() => SUB), font: XL_GOTHIC }) });
+    } else {
+      ws.box(r, 0, r, barEnd, '月間使用数と単価を入力すると、ここに影響額グラフが表示されます。', { font: G({ sz: 8, color: '9CA3AF' }), align: { h: 'center', v: 'center' } });
+    }
+    if (pieRefs) ws.chart({ from: { c: 2, r }, to: { c: last + 1, r: r + nRows }, name: `${sumWord}額の構成比`, xml: xlPieChartXml({ catF: pieRefs.cat, valF: pieRefs.val, cats: pieParts.map(p => p[0]), vals: pieParts.map(p => p[2]), colors: ['1B4D3E', '3F7D62', '6AA588', '9AC3AE', 'C3DDD2', '9CA3AF'].slice(0, pieParts.length), font: XL_GOTHIC }) });
+    r += nRows;
+    ws.height(r, 16); r++;
+    if (estBiko && estBiko.trim()) {
+      const text = '【備考】\n' + estBiko;
+      ws.box(r, 0, r, last, { rich: [{ t: '【備考】\n', font: G({ sz: 8, b: true, color: INK }) }, { t: estBiko, font: G({ sz: 8, color: INK }) }] }, { font: G({ sz: 8, color: INK }), border: { l: 'thin:' + LINE, r: 'thin:' + LINE, t: 'thin:' + LINE, b: 'thin:' + LINE }, align: { v: 'center', wrap: true, indent: 1 } });
+      ws.height(r, xlLineCount(text, 172, 8) * 12.5 + 16); r++;
+      ws.height(r, 10); r++;
+    }
+    ws.box(r, 0, r, last, '※ 金額はすべて税抜です。年間使用数＝月間使用数×12で算出した概算であり、実際の数量・時期により変動します。', { font: G({ sz: 6.75, color: SUB }), border: { t: 'thin:' + LINE }, align: { v: 'center', wrap: true } });
+    ws.height(r, 16); r++;
+    ws.page.printArea = [0, 0, r - 1, last];
+    return { book, filename: xlFileName('年間コスト試算書_'), title: `年間コスト${sumWord}額 試算書` };
+  };
+
+  // kind: 'doc'＝客先向け帳票（見積書・提案書／価格改定）、'internal'＝社内用、'estimate'＝年間コスト試算書
+  const handleExcel = (kind = 'doc') => {
+    try {
+      const built = kind === 'internal' ? buildInternalXlsx() : kind === 'estimate' ? buildEstimateDocXlsx() : (appMode === 'kaitei' ? buildKaiteiXlsx() : buildQuoteXlsx());
+      const bytes = built.book.toBytes({ title: built.title, creator: (officeInfo && officeInfo.companyName) || '太陽シルバーサービス㈱' });
+      xlDownload(bytes, built.filename);
+      notify(`📗 Excelファイル「${built.filename}」を保存しました`, 'success');
+    } catch (err) {
+      console.error('excel export error', err);
+      notify('Excel作成エラー: ' + (err?.message || err), 'error');
+    }
+  };
+
+  // 管理画面の「Excel」：見積を読み込んでから Excel を保存
+  useEffect(() => {
+    if (pendingExcelProp && currentProposalId === pendingExcelProp) {
+      setPendingExcelProp(null);
+      setTimeout(() => handleExcel('doc'), 80);
+    }
+  }, [pendingExcelProp, currentProposalId]);
 
   if (!loginInfo) return <LoginScreen onLogin={handleLogin} />;
 
@@ -4684,6 +5763,7 @@ function App() {
               <button onClick={() => handlePrint('print')} title="印刷プレビューを表示（ブラウザの印刷ダイアログ）" className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 border border-slate-600 px-3 py-2 rounded-md shadow-sm text-[13px] font-bold transition"><Printer className="w-4 h-4" /> 印刷</button>
               <button onClick={() => handlePrintInternal()} title="社内確認用印刷 (仕切込み・全項目・小フォント)" className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 border border-slate-600 px-3 py-2 rounded-md shadow-sm text-[13px] font-bold transition"><Printer className="w-4 h-4" /> 印刷（社内用）</button>
               <button onClick={() => handlePrint('pdf')} title="PDFファイルを直接ダウンロードして保存" className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 border border-slate-600 px-3 py-2 rounded-md shadow-sm text-[13px] font-bold transition">📄 PDF保存</button>
+              <button onClick={() => handleExcel('doc')} title="印刷と同じ形の Excel ファイル（.xlsx）で保存。Excel からそのまま A4 で印刷でき、金額・合計は Excel の計算式なので直すと再計算されます" className="flex items-center gap-1 bg-slate-700 hover:bg-slate-600 text-slate-100 border border-slate-600 px-3 py-2 rounded-md shadow-sm text-[13px] font-bold transition">📗 Excel保存</button>
               <button onClick={openEstimateInput} title="月間使用個数を入力して、年間コスト試算書（棒グラフ・円グラフ付き）を作成します" className="flex items-center gap-1 bg-slate-700/60 hover:bg-slate-600 text-slate-300 border border-slate-600/60 px-3 py-2 rounded-md shadow-sm text-[13px] font-bold transition">📊 提案資料を作成</button>
               <span className="w-px h-6 bg-slate-500 mx-0.5" />
               {/* === 統合管理：見積もり・メーカー仕切り一覧 === */}
@@ -6129,6 +7209,7 @@ function App() {
                             </div>
                             <div className="flex gap-1.5 shrink-0">
                               <button onClick={() => { handleLoad(p); setPendingPrintProp(p.id); }} title="この見積を開いてPDF（印刷）プレビューを表示" className="px-3.5 py-2 bg-red-100 text-red-700 font-bold rounded-md text-sm hover:bg-red-200">📄 PDF</button>
+                              <button onClick={() => { handleLoad(p); setPendingExcelProp(p.id); }} title="この見積を開いて Excel ファイル（.xlsx）で保存" className="px-3.5 py-2 bg-emerald-100 text-emerald-700 font-bold rounded-md text-sm hover:bg-emerald-200">📗 Excel</button>
                               {!p._isShared && (
                                 <button onClick={async () => {
                                   if (!confirm(`「${p.name}」を営業所「${loginInfo?.officeCode||''}」全員で共有しますか？\n（同営業所の全員が閲覧・コピーできるようになります）`)) return;
@@ -6399,9 +7480,10 @@ function App() {
           <div onClick={e => e.stopPropagation()} className="bg-white rounded-lg shadow-2xl w-full max-w-[960px] h-[92vh] flex flex-col overflow-hidden">
             <div className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-emerald-700 to-emerald-600 text-white shrink-0">
               <span className="font-bold">📊 提案資料（自動作成）</span>
-              <span className="text-[11px] opacity-90 hidden sm:inline">現状品→提案品のコスト削減提案。印刷／PDFで配布できます</span>
+              <span className="text-[11px] opacity-90 hidden sm:inline">現状品→提案品のコスト削減提案。印刷／PDF／Excelで配布できます</span>
               <div className="ml-auto flex items-center gap-2">
                 <button onClick={() => { const f = document.getElementById('proposal-doc-frame'); try { f.contentWindow.focus(); f.contentWindow.print(); } catch (e) { notify('印刷に失敗しました', 'error'); } }} className="bg-white text-emerald-700 hover:bg-emerald-50 font-bold px-3 py-1.5 rounded text-sm">🖨 印刷 / PDF</button>
+                <button onClick={() => handleExcel('estimate')} title="試算書を Excel ファイル（.xlsx）で保存（グラフも Excel のグラフで入ります）" className="bg-white text-emerald-700 hover:bg-emerald-50 font-bold px-3 py-1.5 rounded text-sm">📗 Excel保存</button>
                 <button onClick={() => setProposalDocHtml(null)} className="text-white hover:bg-emerald-800 rounded px-2.5 py-1.5 text-sm font-bold">✕ 閉じる</button>
               </div>
             </div>
@@ -6956,18 +8038,20 @@ function App() {
                   <div><strong className="text-slate-700">⑤ 商品の入力</strong>（1行目は自動的に「現状品」、2行目以降が提案品）<br/>例：<br/>・1行目（現状品）：プラスチック手袋 100枚入　数量100　単価¥350<br/>・2行目（提案品）：ニトリル手袋 100枚入　数量100　単価¥280　原価¥210（利益率25%自動表示）</div>
                   <div><strong className="text-slate-700">⑥ 並び替え・マーカー</strong><br/>各行の⬆⬇で並び替え、🖍ボタンで黄色マーカー強調</div>
                   <div><strong className="text-slate-700">⑦ 保存</strong><br/>右上「保存」→ フォルダ「○○病院」を作成 → 名前「2026年5月分_通常品」で保存</div>
-                  <div><strong className="text-slate-700">⑧ 印刷／PDF</strong><br/>右上「印刷/PDF」 → A4縦のプレビュー表示 → ブラウザの印刷ダイアログで「PDFに保存」も選択可能</div>
+                  <div><strong className="text-slate-700">⑧ 印刷／PDF／Excel</strong><br/>右上「印刷/PDF」 → A4縦のプレビュー表示 → ブラウザの印刷ダイアログで「PDFに保存」も選択可能。「📗 Excel保存」で同じ形の Excel ファイルも作れます</div>
                 </div>
               </section>
 
               <section className="bg-white p-4 rounded border border-slate-200">
-                <h4 className="font-bold text-base mb-2 flex items-center gap-2 text-slate-800"><Printer className="w-5 h-5 text-red-500" /> 4. 印刷・PDF出力</h4>
+                <h4 className="font-bold text-base mb-2 flex items-center gap-2 text-slate-800"><Printer className="w-5 h-5 text-red-500" /> 4. 印刷・PDF・Excel出力</h4>
                 <ul className="list-disc pl-5 space-y-1 text-[13px]">
                   <li>右上「印刷/PDF」ボタン → 自動でプレビュー画面とブラウザ印刷ダイアログが開きます</li>
                   <li>用紙サイズはA4縦に最適化、余白12mm/10mm、印刷時にヘッダー・操作ボタンは自動で非表示</li>
                   <li><strong>Ctrl+P</strong>（Mac は <strong>Cmd+P</strong>）でも印刷できます</li>
                   <li>PDF保存：印刷ダイアログの「送信先」欄で「<strong>PDFに保存</strong>」を選択</li>
                   <li>ページ跨ぎ時はテーブルヘッダーが各ページに繰り返し表示されます</li>
+                  <li><strong>Excel保存</strong>：右上「📗 Excel保存」（印刷プレビュー・見積もり一覧の「📗 Excel」・提案資料の画面からも）で、印刷と同じ形の Excel ファイル（.xlsx）を保存します。A4・余白・横1ページに収める印刷設定が入っているので、Excel からそのまま印刷できます</li>
+                  <li>Excel の金額・小計・合計・消費税は計算式です。Excel で数量や単価を直すと自動で計算し直されます。書体は印刷と同じ「BIZ UDP明朝 Medium」（無いパソコンでは近い明朝体で表示）</li>
                 </ul>
               </section>
 
