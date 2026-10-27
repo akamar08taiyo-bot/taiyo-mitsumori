@@ -5008,8 +5008,12 @@ function App() {
   ${(() => {
     // 税込指定の行が1つでもあれば、税抜ラベルのまま生の合計を出すと実態と食い違うため、
     // 税込ベースの実額(taxTotalIncl)とラベル（税込）で表示する。
-    const printTotalSuffix = hasInclusive ? '（税込）' : getTotalSuffix();
-    const printTotalAmount = hasInclusive ? taxTotalIncl : printGrandTotal;
+    // 全体の税区分が「税込」で各行が「税抜」のときも、ラベルは（税込）・下の欄は
+    // 小計（税抜）＋消費税＝合計（税込）になる。以前はここだけ税抜の単純合計を出していて、
+    // 「御見積金額 合計（税込）」に税抜の金額が載っていた。下の「合計（税込）」の欄と同じ値にそろえる。
+    const totalIsTaxIncl = hasInclusive || showTaxBreakdown;
+    const printTotalSuffix = totalIsTaxIncl ? '（税込）' : getTotalSuffix();
+    const printTotalAmount = totalIsTaxIncl ? taxTotalIncl : printGrandTotal;
     if (!(showGrandTotal && printTotalAmount > 0)) return '';
     return `<div class="grand-total"><span class="label">御見積金額　合計${printTotalSuffix}</span><span class="amount"><span class="currency">¥</span>${(Number(printTotalAmount)||0).toLocaleString('ja-JP')}<span class="suffix">―</span></span></div>`;
   })()}
@@ -5186,7 +5190,9 @@ function App() {
     });
     ws.height(r, 14); r++;
     // --- 御見積金額（合計）の行：式は明細を書いたあとで入れる ---
-    const printTotalAmount = hasInclusive ? taxTotalIncl : printGrandTotal;
+    // 印刷と同じく、下に「合計（税込）」の欄が出るときは上の御見積金額もその税込の金額にする
+    const totalIsTaxIncl = hasInclusive || showTaxBreakdown;
+    const printTotalAmount = totalIsTaxIncl ? taxTotalIncl : printGrandTotal;
     const totalRow = (showGrandTotal && printTotalAmount > 0) ? r : -1;
     if (totalRow >= 0) { ws.height(r, 36); r++; ws.height(r, 12); r++; }
     // --- カテゴリごとの明細 ---
@@ -5300,15 +5306,15 @@ function App() {
       taxTotalRef = xlRef(totRow, vC);
       ws.height(r, 12); r++;
     }
-    // --- 御見積金額 合計（税込の行があれば税込の実額） ---
+    // --- 御見積金額 合計（税込の行があるか、下に合計（税込）の欄が出るときは税込の実額） ---
     if (totalRow >= 0) {
-      const totalSuffix = hasInclusive ? '（税込）' : getTotalSuffix();
+      const totalSuffix = totalIsTaxIncl ? '（税込）' : getTotalSuffix();
       let ac = L.last; while (ac > 1 && spanMm(ac, L.last) < 56) ac--;
       const BT = 'medium:' + XL_C.blue3;
       ws.box(totalRow, 0, totalRow, ac - 1, xlSpaced('御見積金額') + '　' + xlSpaced('合計' + totalSuffix), { font: F({ sz: 12, b: true, color: XL_C.navy }), fill: XL_C.tint2, border: { l: BT, t: BT, b: BT }, align: { v: 'center', indent: 1 } });
-      const v = hasInclusive ? taxTotalIncl : cachedAmtSum;
+      const v = totalIsTaxIncl ? taxTotalIncl : cachedAmtSum;
       const n = '#,##0' + (xlDecimals(v) ? '.' + '0'.repeat(xlDecimals(v)) : '');
-      ws.box(totalRow, ac, totalRow, L.last, { f: hasInclusive && taxTotalRef ? taxTotalRef : sumAmtF, v }, { font: F({ sz: 19, b: true, color: XL_C.navy }), fill: XL_C.tint2, fmt: `"¥"${n}"―";"¥"-${n}"―"`, border: { r: BT, t: BT, b: BT }, align: { h: 'right', v: 'center', indent: 1, shrink: true } });
+      ws.box(totalRow, ac, totalRow, L.last, { f: totalIsTaxIncl && taxTotalRef ? taxTotalRef : sumAmtF, v }, { font: F({ sz: 19, b: true, color: XL_C.navy }), fill: XL_C.tint2, fmt: `"¥"${n}"―";"¥"-${n}"―"`, border: { r: BT, t: BT, b: BT }, align: { h: 'right', v: 'center', indent: 1, shrink: true } });
     }
     // --- 備考 ---
     if (bottomRemarks) {
@@ -6388,7 +6394,8 @@ function App() {
         {appMode !== 'kaitei' && showGrandTotal && grandTotal > 0 && (
           <div className="bg-gradient-to-r from-slate-900 to-slate-700 text-white rounded-lg shadow-lg ring-1 ring-slate-700 px-6 py-4 flex items-center justify-between mb-3">
             <span className="text-base font-bold tracking-widest">御見積金額 合計{getTotalSuffix()}</span>
-            <span className="text-3xl font-extrabold tracking-tight">¥{(grandTotalTaxInfo.hasInclusive ? grandTotalTaxInfo.taxTotalIncl : grandTotal).toLocaleString()}<span className="text-base font-normal ml-2 opacity-60">—</span></span>
+            {/* 全体の税区分が「税込」のとき（各行が税抜でも）ラベルは（税込）なので、金額も税込の実額にする（印刷・Excel と同じ） */}
+            <span className="text-3xl font-extrabold tracking-tight">¥{((grandTotalTaxInfo.hasInclusive || taxMode === 'inclusive') ? grandTotalTaxInfo.taxTotalIncl : grandTotal).toLocaleString()}<span className="text-base font-normal ml-2 opacity-60">—</span></span>
           </div>
         )}
         {/* 価格改定モードでは合計金額の概念は持たない（個別の単価差・値上がり率のみで比較） */}
