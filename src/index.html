@@ -539,18 +539,40 @@ const inferFromProductName = (name) => {
   return { volume, unit, baseScale };
 };
 
+// 下の「備考」の自動文。mode は getAutoBottomKey の結果（明細の税区分と、御見積金額 合計が税込かどうか）
 const getAutoBottomText = (mode) => {
   switch (mode) {
     case 'inclusive': return '本見積書の記載金額は、税込金額となっております。';
     case 'nontax':    return '本見積書の記載商品は、非課税商品となっております。';
+    // 全体＝税込・各行＝税抜：明細は税抜、上の御見積金額 合計（税込）は消費税込み
+    case 'exclusiveTotalIncl': return '本見積書の単価・金額は税抜、御見積金額 合計は税込金額となっております。';
+    // 税込の行と税抜（・非課税）の行が混ざる：御見積金額 合計は税込
+    case 'mixedTotalIncl': return '本見積書の単価・金額は明細ごとの税区分に従い、御見積金額 合計は税込金額となっております。';
+    // 上と同じく混ざっているが、御見積金額 合計を出さないとき（提案書など）
+    case 'mixed':     return '本見積書の単価・金額は、明細ごとの税区分に従って記載しております。';
     default:          return '本見積書の記載金額には、消費税は含まれておりません。';
   }
 };
-const KNOWN_BOTTOM_TEXTS = [
-  '本見積書の記載金額には、消費税は含まれておりません。',
-  '本見積書の記載金額は、税込金額となっております。',
-  '本見積書の記載商品は、非課税商品となっております。',
-];
+const KNOWN_BOTTOM_TEXTS = ['exclusive', 'inclusive', 'nontax', 'exclusiveTotalIncl', 'mixedTotalIncl', 'mixed'].map(getAutoBottomText);
+// 備考の自動文をどれにするか。以前は全体の税区分だけで決めていたため、全体を「税込」にしたあとで
+// 足した行（税抜のまま入る）の見積書に「記載金額は、税込金額」と出て、税抜の単価・金額と食い違っていた。
+// 印刷される明細（印刷で隠す行・金額0の行を除く）の税区分と、御見積金額 合計が税込で出るか
+// （prepareQuotePrintData と同じ条件：全体＝税込 か 税込の行がある）から決める。
+const getAutoBottomKey = (groups, appMode, taxMode, showGrandTotal) => {
+  if (appMode === 'kaitei') return taxMode; // 価格改定は明細に税区分を使わないので、これまでどおり全体の設定で
+  const modes = new Set();
+  (groups || []).forEach(g => (g.items || []).forEach(i => {
+    if (!i || i.isHiddenFromPrint) return;
+    const factor = appMode === 'proposal' ? (Number(i.packSize) || 0) : (Number(i.volume) || 0);
+    if (!(factor * (Number(i.price) || 0))) return;
+    modes.add((i.taxMode && i.taxMode !== '') ? i.taxMode : taxMode);
+  }));
+  if (modes.size === 0) return taxMode;
+  const totalIncl = showGrandTotal && (taxMode === 'inclusive' || modes.has('inclusive'));
+  if (modes.has('inclusive')) return modes.size === 1 ? 'inclusive' : (totalIncl ? 'mixedTotalIncl' : 'mixed');
+  if (!modes.has('exclusive')) return 'nontax';
+  return totalIncl ? 'exclusiveTotalIncl' : 'exclusive';
+};
 const CLEAN_TITLE_REGEX = /\s*[（(].*?[)）]/g;
 const ITEMS_PER_PAGE = 10;
 
@@ -1395,11 +1417,9 @@ function App() {
     return taxMode === 'inclusive' ? '（税込）' : taxMode === 'nontax' ? '（非課税）' : '（税抜）';
   };
 
-  useEffect(() => {
-    setBottomRemarks(prev => (prev && !KNOWN_BOTTOM_TEXTS.includes(prev)) ? prev : getAutoBottomText(taxMode));
-  }, [taxMode]);
-
-  // taxMode が変わったら全商品の taxMode を自動で上書き
+  // taxMode が変わったら全商品の taxMode を自動で上書き（ユーザーが税区分デフォルトを変えたときだけ）。
+  // 下書きの復元・保存した見積の読込では prevTaxModeRef を読み込んだ値に合わせ、行ごとの税区分を守る
+  // （以前は 全体＝税込・各行＝税抜 の見積書を開き直す／再読込すると、全行が税込に変わって金額がずれていた）。
   const prevTaxModeRef = useRef(taxMode);
   useEffect(() => {
     if (prevTaxModeRef.current !== taxMode) {
@@ -1447,6 +1467,18 @@ function App() {
 
   const [groups, setGroups] = useState([{ id: 'g-1', title: '', catalogMemo: '', baseVolume: 100, baseQuantity: 1, unit: 'ml', baseScale: 100, items: [] }]);
   const [newItems, setNewItems] = useState({ 'g-1': getEmptyItem() });
+
+  // 下の「備考」が自動文（KNOWN_BOTTOM_TEXTS）のままなら、明細の税区分に合う自動文にそろえる。
+  // 行を足す・行の税区分を変える・古い自動文のまま保存した見積を開く、のどれでも直る。手で書いた備考は変えない。
+  // 空の備考に自動文を入れるのは、これまでどおり全体の税区分を変えたときだけ（消した備考がまた出てこないように）。
+  const autoBottomKey = useMemo(() => getAutoBottomKey(groups, appMode, taxMode, showGrandTotal), [groups, appMode, taxMode, showGrandTotal]);
+  const lastTaxModeForRemarksRef = useRef(taxMode);
+  useEffect(() => {
+    const taxModeChanged = lastTaxModeForRemarksRef.current !== taxMode;
+    lastTaxModeForRemarksRef.current = taxMode;
+    const auto = getAutoBottomText(autoBottomKey);
+    setBottomRemarks(prev => (KNOWN_BOTTOM_TEXTS.includes(prev) || (!prev && taxModeChanged)) ? auto : prev);
+  }, [autoBottomKey, bottomRemarks, taxMode]);
 
   useEffect(() => {
     const prev = prevAppModeRef.current;
@@ -2990,7 +3022,8 @@ function App() {
       if (draft.deliveryInfo !== undefined) setDeliveryInfo(draft.deliveryInfo);
       if (draft.remarks !== undefined) setRemarks(draft.remarks);
       if (draft.bottomRemarks !== undefined) setBottomRemarks(draft.bottomRemarks);
-      if (draft.taxMode !== undefined) setTaxMode(draft.taxMode);
+      // 復元した行の税区分を、全体の税区分の変更とみなして上書きしないように先に合わせる
+      if (draft.taxMode !== undefined) { prevTaxModeRef.current = draft.taxMode; setTaxMode(draft.taxMode); }
       if (draft.appMode !== undefined) setAppMode(draft.appMode);
       if (draft.showGrandTotal !== undefined) setShowGrandTotal(draft.showGrandTotal);
       // 他モード分のgroups/newItemsもrefに復元（モード切替時の消失を防止）
@@ -3598,7 +3631,8 @@ function App() {
       setProposalNumber(p.proposalNumber||'');
       setValidityPeriod(p.validityPeriod||'お見積日より30日間'); setPaymentTerms(p.paymentTerms||'月末締め翌月末払い');
       setDeliveryInfo(p.deliveryInfo||'ご注文後、通常2〜3営業日'); setRemarks(p.remarks||'');
-      setBottomRemarks(p.bottomRemarks||''); setTaxMode(p.taxMode||'exclusive');
+      // 読み込んだ行の税区分を、全体の税区分の変更とみなして上書きしないように先に合わせる
+      setBottomRemarks(p.bottomRemarks||''); prevTaxModeRef.current = p.taxMode||'exclusive'; setTaxMode(p.taxMode||'exclusive');
       setAppMode(p.appMode||'quote'); setShowGrandTotal(p.showGrandTotal !== undefined ? p.showGrandTotal : true);
       // === 旧データ互換：groups と items の必須フィールドを補完 ===
       const safeGroups = (Array.isArray(p.groups) ? p.groups : []).map(g => {
@@ -3625,7 +3659,8 @@ function App() {
             isHiddenFromPrint: !!it.isHiddenFromPrint,
             memoOpen: !!it.memoOpen,
             unitOverride: it.unitOverride,
-            taxMode: it.taxMode || 'exclusive',
+            // 行に税区分の無い古いデータは、見積全体の税区分に従う（印刷・合計の判定と同じ）
+            taxMode: it.taxMode || p.taxMode || 'exclusive',
           };
         }).filter(Boolean);
         return {
