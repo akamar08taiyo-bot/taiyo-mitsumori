@@ -1046,8 +1046,22 @@ const kaiteiClientFit = (names, suffix, colMm, opt = {}) => {
   const w = (s, pt) => xlTextEm(s) * 1.05 * pt * PT_MM;
   const suffixMm = (pt) => xlTextEm(suffix) * 1.05 * sfx(pt) * PT_MM + 2.2;
   const ns = names.filter(s => s && s.trim()).map(s => s.trim());
-  const lines = ns.length ? ns : ['　'];
-  const fits = (pt) => lines.every((t, i) => w(t, pt) + (i === lines.length - 1 ? suffixMm(pt) : 0) <= usable);
+  let lines = ns.length ? ns : ['　'];
+  const fitsLines = (ls, pt) => ls.every((t, i) => w(t, pt) + (i === ls.length - 1 ? suffixMm(pt) : 0) <= usable);
+  // 1つの欄に「介護付き有料老人ホーム　かんだんて」のように空白で区切って書いてあり、1段では最初の大きさに入らないときも、
+  // 空白のところで2段に分ける（全角の空白を先に。なければ半角の空白のうち、まん中に近いところ）
+  if (lines.length === 1 && !fitsLines(lines, base)) {
+    const t = lines[0];
+    const at = (ch) => [...t].map((c, i) => (c === ch && i > 0 && i < [...t].length - 1 ? i : -1)).filter(i => i >= 0);
+    const cand = at('　').length ? at('　') : at(' ');
+    if (cand.length) {
+      const mid = [...t].length / 2;
+      const i = cand.reduce((b, x) => (Math.abs(x - mid) < Math.abs(b - mid) ? x : b), cand[0]);
+      const cs = [...t];
+      lines = [cs.slice(0, i).join('').trim(), cs.slice(i + 1).join('').trim()];
+    }
+  }
+  const fits = (pt) => fitsLines(lines, pt);
   for (let pt = base; pt >= min; pt -= 0.5) {
     if (fits(pt)) return { pt, suffixPt: sfx(pt), lines, wrap: false };
   }
