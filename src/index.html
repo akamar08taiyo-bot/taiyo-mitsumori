@@ -1029,6 +1029,31 @@ const xlSpaced = (s) => {
 };
 // 帳票の題名：短い題名だけ字間をあける（「御 見 積 書」）
 const xlTitle = (s) => (([...String(s || '')].length <= 10) ? xlSpaced(s) : String(s || ''));
+// 価格改定の宛名（法人名・施設名＋御中）の字の大きさ(pt)と行の分け方。印刷と Excel で同じ結果を使う。
+// 以前は 15pt 固定で、「介護付有料老人ホーム　かんだんて」のような宛名が途中で2行に折り返していた。
+//  1) 法人名と施設名を「　」でつないで1行。15pt で入らなければ 0.5pt ずつ小さく（10pt まで）
+//  2) それでも入らない長い宛名（「社会福祉法人○○会　特別養護老人ホーム○○」など）は、見積書の印刷と同じく
+//     法人名／施設名＋御中 の2行に分ける（どちらの行も入る大きさ。10pt まで）
+//  3) それでも入らないときだけ、15pt のまま折り返す（前と同じ）
+// 幅の見積もりは xlLineCount と同じ（BIZ UDP明朝の実測の字幅、使える幅は (欄の幅−4mm)×0.93）。
+// 宛名の字間 0.05em、御中（10.5pt）と宛名のすき間 2.2mm も入れる。
+const kaiteiClientFit = (names, suffix, colMm) => {
+  const usable = Math.max(4, (colMm - 4) * 0.93);
+  const PT_MM = 25.4 / 72;
+  const w = (s, pt) => xlTextEm(s) * 1.05 * pt * PT_MM;
+  const suffixMm = xlTextEm(suffix) * 1.05 * 10.5 * PT_MM + 2.2;
+  const ns = names.filter(s => s && s.trim()).map(s => s.trim());
+  const one = ns.join('　') || '　';
+  for (let pt = 15; pt >= 10; pt -= 0.5) {
+    if (w(one, pt) + suffixMm <= usable) return { pt, lines: [one], wrap: false };
+  }
+  if (ns.length === 2) {
+    for (let pt = 15; pt >= 10; pt -= 0.5) {
+      if (w(ns[0], pt) <= usable && w(ns[1], pt) + suffixMm <= usable) return { pt, lines: ns, wrap: false };
+    }
+  }
+  return { pt: 15, lines: [one], wrap: true };
+};
 // 文字列が1行で収まる列幅(mm)（字下げ・余白込み）
 const xlFitMm = (texts, pt, bold, pad = 5.5) => texts.reduce((m, t) => Math.max(m, xlTextEm(t) * pt * 25.4 / 72 * (bold ? 1.06 : 1) + pad), 0);
 // 小数の桁数（max 桁まで）。表示形式の小数部を値に合わせるのに使う
@@ -4549,6 +4574,10 @@ function App() {
         + '</tr>';
     });
     const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || '';
+    // 敬称は画面の選択（御中・様 など）に合わせる（以前は「御中」で固定）。見積書の印刷と同じく空なら御中
+    const honor = clientHonorific || '御中';
+    // 宛名は左の欄（86mm）に1行で収める。長すぎるときは法人名／施設名の2行（kaiteiClientFit。Excel も同じ）
+    const clientFit = kaiteiClientFit([clientName, clientName2], honor, 86);
     const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : '');
     const oi = officeInfo || {};
     const nm = (s) => esc((s || '').toString());
@@ -4645,7 +4674,7 @@ function App() {
       + '<div class="doc-header">'
       + '<div class="left">'
       + '<h1 class="title" style="' + titleStyle + '">' + esc(titleText) + '</h1>'
-      + '<div class="client">' + (client || '　') + '<span class="suffix">御中</span></div>'
+      + '<div class="client" style="font-size:' + clientFit.pt + 'pt;white-space:' + (clientFit.wrap ? 'normal' : 'nowrap') + ';">' + clientFit.lines.map(esc).join('<br>') + '<span class="suffix">' + esc(honor) + '</span></div>'
       + '<div class="greeting">いつもお世話になっております。下記の通り、価格改定のご案内をお送りいたします。ご確認のほどよろしくお願いいたします。</div>'
       + '</div>'
       + '<div class="right"><div class="issuer">'
@@ -5447,10 +5476,15 @@ function App() {
     const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : '');
     const title = (proposalTitle && proposalTitle.trim() && proposalTitle.trim() !== '御見積書') ? proposalTitle.trim() : '御見積り';
     const leftW = spanMm(0, L.leftEnd);
+    // 宛名は印刷と同じ大きさ・同じ行の分け方で（kaiteiClientFit。欄が印刷の 86mm より狭いときはその幅で決める）。
+    // 敬称も印刷と同じく画面の選択（空なら御中）
+    const honor = clientHonorific || '御中';
+    const clientFit = kaiteiClientFit([clientName, clientName2], honor, Math.min(86, leftW));
+    const clientText = clientFit.lines.join('\n');
     let r = xlDocHeader(book, ws, L, {
       title,
-      client: [{ t: (client || '　') + ' ', font: F({ sz: 15, color: XL_C.ink2 }) }, { t: '御中', font: F({ sz: 10.5, color: XL_C.blue3 }) }],
-      clientLines: xlLineCount((client || '　') + ' 御中', leftW, 15),
+      client: [{ t: clientText + ' ', font: F({ sz: clientFit.pt, color: XL_C.ink2 }) }, { t: honor, font: F({ sz: 10.5, color: XL_C.blue3 }) }],
+      clientLines: xlLineCount(clientText + ' ' + honor, leftW, clientFit.pt),
       greeting: 'いつもお世話になっております。下記の通り、価格改定のご案内をお送りいたします。ご確認のほどよろしくお願いいたします。',
       meta: [['発行日', dateStr || '—']],
       terms: null,
