@@ -1030,30 +1030,41 @@ const xlSpaced = (s) => {
 // 帳票の題名：短い題名だけ字間をあける（「御 見 積 書」）
 const xlTitle = (s) => (([...String(s || '')].length <= 10) ? xlSpaced(s) : String(s || ''));
 // 価格改定の宛名（法人名・施設名＋御中）の字の大きさ(pt)と行の分け方。印刷と Excel で同じ結果を使う。
-// 以前は 15pt 固定で、「介護付有料老人ホーム　かんだんて」のような宛名が途中で2行に折り返していた。
-//  1) 法人名と施設名を「　」でつないで1行。15pt で入らなければ 0.5pt ずつ小さく（10pt まで）
-//  2) それでも入らない長い宛名（「社会福祉法人○○会　特別養護老人ホーム○○」など）は、見積書の印刷と同じく
-//     法人名／施設名＋御中 の2行に分ける（どちらの行も入る大きさ。10pt まで）
-//  3) それでも入らないときだけ、15pt のまま折り返す（前と同じ）
+// 利用者さんの指定で、法人名と施設名の両方があるときは、見積書の印刷と同じく2行に分ける：
+//   介護付有料老人ホーム
+//   かんだんて 御中
+// 片方だけのときは1行。どの行も左の欄（colMm）に入る大きさにする（base から 0.5pt ずつ小さく、min まで）。
+// min でも入らない長い行だけ、min の大きさで折り返す。
 // 幅の見積もりは xlLineCount と同じ（BIZ UDP明朝の実測の字幅、使える幅は (欄の幅−4mm)×0.93）。
-// 宛名の字間 0.05em、御中（10.5pt）と宛名のすき間 2.2mm も入れる。
-const kaiteiClientFit = (names, suffix, colMm) => {
+// 宛名の字間 0.05em、御中と宛名のすき間 2.2mm も入れる。
+// 御中（suffixPt）は宛名の 0.75 倍（9pt より小さくしない）。宛名を小さくしたときに御中だけ大きく見えないように
+const kaiteiClientFit = (names, suffix, colMm, opt = {}) => {
+  const { base = 15, min = 10 } = opt;
   const usable = Math.max(4, (colMm - 4) * 0.93);
   const PT_MM = 25.4 / 72;
+  const sfx = (pt) => Math.max(9, Math.round(pt * 0.75 * 2) / 2);
   const w = (s, pt) => xlTextEm(s) * 1.05 * pt * PT_MM;
-  const suffixMm = xlTextEm(suffix) * 1.05 * 10.5 * PT_MM + 2.2;
+  const suffixMm = (pt) => xlTextEm(suffix) * 1.05 * sfx(pt) * PT_MM + 2.2;
   const ns = names.filter(s => s && s.trim()).map(s => s.trim());
-  const one = ns.join('　') || '　';
-  for (let pt = 15; pt >= 10; pt -= 0.5) {
-    if (w(one, pt) + suffixMm <= usable) return { pt, lines: [one], wrap: false };
+  const lines = ns.length ? ns : ['　'];
+  const fits = (pt) => lines.every((t, i) => w(t, pt) + (i === lines.length - 1 ? suffixMm(pt) : 0) <= usable);
+  for (let pt = base; pt >= min; pt -= 0.5) {
+    if (fits(pt)) return { pt, suffixPt: sfx(pt), lines, wrap: false };
   }
-  if (ns.length === 2) {
-    for (let pt = 15; pt >= 10; pt -= 0.5) {
-      if (w(ns[0], pt) <= usable && w(ns[1], pt) + suffixMm <= usable) return { pt, lines: ns, wrap: false };
-    }
-  }
-  return { pt: 15, lines: [one], wrap: true };
+  return { pt: min, suffixPt: sfx(min), lines, wrap: true };
 };
+// 価格改定の帳票（印刷・PDF・Excel）の字の大きさの倍率と、左の欄（題名・宛名）の幅。
+// 「全体的に文字が小さすぎて下が空いてしまう」と言われたので、本文 8〜10pt だったのを全部 1.25 倍にし、
+// 左右の余白を 22mm → 19mm（本文の幅 166mm → 172mm）、左の欄と発行元のすき間を 10mm → 8mm にして字の入る幅を広げた。
+// 大きさを変えたいときは KAITEI_K だけを変えればよい（印刷の CSS の pt と Excel の字・行の高さが一緒に変わる）。
+const KAITEI_K = 1.25;
+const KAITEI_BODY_MM = 172;  // 本文の幅（A4 の 210mm − 左右の余白 19mm×2）
+const KAITEI_LEFT_MM = 94;   // 左の欄（本文 172mm − 発行元 70mm − すき間 8mm）
+// 宛名の大きさ（印刷と Excel で同じ）。もとの 15pt の KAITEI_K 倍から、入らなければ 10pt まで小さくする
+const kaiteiClientFitK = (names, suffix, colMm) => kaiteiClientFit(names, suffix, colMm, { base: Math.round(15 * KAITEI_K * 2) / 2, min: 10 });
+// 表の列幅（本文の幅に対する %）。字を大きくしたので、5字の見出し（改定前単価・値上がり率）が入る幅を数値列に取り、
+// 品名はその残り。印刷の colgroup と Excel の列幅の下限の両方に使う
+const KAITEI_COL_PCT = { po: 12.5, pn: 12.5, upo: 10.5, upn: 10.5, d: 11, rate: 12 };
 // 文字列が1行で収まる列幅(mm)（字下げ・余白込み）
 const xlFitMm = (texts, pt, bold, pad = 5.5) => texts.reduce((m, t) => Math.max(m, xlTextEm(t) * pt * 25.4 / 72 * (bold ? 1.06 : 1) + pad), 0);
 // 小数の桁数（max 桁まで）。表示形式の小数部を値に合わせるのに使う
@@ -1097,27 +1108,30 @@ const xlDocColumns = (numMm, totalMm = 166) => {
 const xlDocHeader = (book, ws, L, h) => {
   const mm = ws.colWidthsMm;
   const spanMm = (c1, c2) => mm.slice(c1, c2 + 1).reduce((s, w) => s + w, 0);
-  const F = (o) => Object.assign({ name: XL_MINCHO }, o);
+  // h.k：字の大きさと行の高さの倍率（価格改定は KAITEI_K。見積書・提案書は渡さないので 1 のまま＝前と同じ）
+  const k = h.k || 1;
+  const sz = (v) => (k === 1 ? v : Math.round(v * k * 2) / 2);
+  const F = (o) => Object.assign({ name: XL_MINCHO }, o, o.sz ? { sz: sz(o.sz) } : {});
   const BOX = 'thin:' + XL_C.line;
   const heights = [];
   const b0 = L.boxStart, b1 = L.last, boxW = spanMm(b0, b1);
   // --- 右：発行元ボックス（1行1項目） ---
   const right = [];
-  (h.meta || []).forEach(([lb, val]) => right.push({ kind: 'meta', lb, val, ht: 14 }));
+  (h.meta || []).forEach(([lb, val]) => right.push({ kind: 'meta', lb, val, ht: 14 * k }));
   const iss = h.issuer;
-  right.push({ kind: 'line', t: iss.company, font: F({ sz: 10, b: true, color: XL_C.navy }), ht: 15, top: 'thin:' + XL_C.blue4 });
-  if (iss.office) right.push({ kind: 'line', t: iss.office, font: F({ sz: 9, b: true, color: XL_C.navy2 }), ht: 13 });
+  right.push({ kind: 'line', t: iss.company, font: F({ sz: 10, b: true, color: XL_C.navy }), ht: 15 * k, top: 'thin:' + XL_C.blue4 });
+  if (iss.office) right.push({ kind: 'line', t: iss.office, font: F({ sz: 9, b: true, color: XL_C.navy2 }), ht: 13 * k });
   [iss.postal ? '〒' + iss.postal : '', iss.address, iss.phone ? 'TEL ' + iss.phone : '', iss.fax ? 'FAX ' + iss.fax : ''].forEach(t => {
-    if (t) right.push({ kind: 'line', t, font: F({ sz: 8, color: XL_C.sub }), ht: 11.5 * xlLineCount(t, boxW - 3, 8) + 0.5, wrap: true });
+    if (t) right.push({ kind: 'line', t, font: F({ sz: 8, color: XL_C.sub }), ht: 11.5 * k * xlLineCount(t, boxW - 3, sz(8)) + 0.5, wrap: true });
   });
-  right.push({ kind: 'line', t: '登録番号　' + iss.invoice, font: F({ sz: 7.5, b: true, color: XL_C.blue }), ht: 12 });
+  right.push({ kind: 'line', t: '登録番号　' + iss.invoice, font: F({ sz: 7.5, b: true, color: XL_C.blue }), ht: 12 * k });
   let firstStaff = true;
   [['所 長', iss.manager], ['担 当', iss.staff]].forEach(([lb, nm]) => {
     if (!nm) return;
-    right.push({ kind: 'line', t: lb + '　' + nm, font: F({ sz: 8.5, color: XL_C.sub }), ht: 13, top: firstStaff ? 'dashed:' + XL_C.line : undefined });
+    right.push({ kind: 'line', t: lb + '　' + nm, font: F({ sz: 8.5, color: XL_C.sub }), ht: 13 * k, top: firstStaff ? 'dashed:' + XL_C.line : undefined });
     firstStaff = false;
   });
-  right.push({ kind: 'stampLabel', ht: 12, top: 'thin:' + XL_C.line3 });
+  right.push({ kind: 'stampLabel', ht: 12 * k, top: 'thin:' + XL_C.line3 });
   right.forEach((it, i) => { it.r = i; heights[i] = it.ht; });
   const stampLabelRow = right.length - 1, stampTop = right.length;
   // --- 左：題名・宛名・挨拶・条件 ---
@@ -1132,21 +1146,21 @@ const xlDocHeader = (book, ws, L, h) => {
     return [s, lr - 1];
   };
   const L1 = L.leftEnd, leftW = spanMm(0, L1);
-  const tR = alloc(40);
+  const tR = alloc(40 * k);
   // 題名は字間をあけて入るならあけ、入らなければ詰める（それでも長ければ縮小）
   const spaced = xlTitle(h.title);
-  const title = xlTextEm(spaced) * 22 * 25.4 / 72 * 1.06 + 3 <= leftW ? spaced : h.title;
+  const title = xlTextEm(spaced) * sz(22) * 25.4 / 72 * 1.06 + 3 <= leftW ? spaced : h.title;
   ws.box(tR[0], 0, tR[1], L1, title, { font: F({ sz: 22, b: true, color: XL_C.navy }), border: { b: 'medium:' + XL_C.blue3 }, align: { v: 'bottom', shrink: true } });
-  const cR = alloc(h.clientLines * 20 + 9);
+  const cR = alloc((h.clientLines * 20 + 9) * k);
   ws.box(cR[0], 0, cR[1], L1, { rich: h.client }, { font: h.client[0].font, border: { b: 'thin:' + XL_C.blue4 }, align: { v: 'bottom', wrap: true } });
-  const gR = alloc(xlLineCount(h.greeting, leftW, 8.5) * 12.5 + 8);
+  const gR = alloc(xlLineCount(h.greeting, leftW, sz(8.5)) * 12.5 * k + 8);
   ws.box(gR[0], 0, gR[1], L1, h.greeting, { font: F({ sz: 8.5, color: XL_C.sub }), align: { v: 'center', wrap: true } });
   if (h.terms && h.terms.length) {
-    alloc(13); // 挨拶との間
+    alloc(13 * k); // 挨拶との間
     const valW = spanMm(1, L1);
     h.terms.forEach(([lb, val], i) => {
       const r = lr++;
-      heights[r] = Math.max(heights[r] || 0, Math.max(13, xlLineCount(val, valW, 7.5) * 10.5 + 4));
+      heights[r] = Math.max(heights[r] || 0, Math.max(13 * k, xlLineCount(val, valW, sz(7.5)) * 10.5 * k + 4));
       const t = i === 0 ? BOX : undefined, b = i === h.terms.length - 1 ? BOX : 'thin:' + XL_C.line3;
       ws.box(r, 0, r, 0, lb, { font: F({ sz: 7, b: true, color: XL_C.blue }), fill: XL_C.tint, border: { l: BOX, t, b }, align: { v: 'center' } });
       ws.box(r, 1, r, L1, val, { font: F({ sz: 7.5, color: XL_C.sub2 }), border: { r: BOX, t, b }, align: { v: 'center', wrap: true } });
@@ -1178,7 +1192,7 @@ const xlDocHeader = (book, ws, L, h) => {
   const boxRight = spanMm(0, b1), sq = 15;
   [['所長印', boxRight - 2.2 - sq - 4 - sq], ['担当印', boxRight - 2.2 - sq]].forEach(([label, x]) => {
     const p = colAt(x);
-    ws.rect({ c: p.c, r: stampLabelRow, dx: p.dx, dy: 0.5, w: sq, h: Math.max(2.5, heights[stampLabelRow] * 25.4 / 72 - 1), text: label, textSize: 7, textBold: true, textColor: XL_C.blue3, name: label });
+    ws.rect({ c: p.c, r: stampLabelRow, dx: p.dx, dy: 0.5, w: sq, h: Math.max(2.5, heights[stampLabelRow] * 25.4 / 72 - 1), text: label, textSize: sz(7), textBold: true, textColor: XL_C.blue3, name: label });
     ws.rect({ c: p.c, r: stampTop, dx: p.dx, dy: 0.8, w: sq, h: sq, line: XL_C.blue4, fill: 'FFFFFF', name: label + 'の枠' });
   });
   heights.forEach((ht, r) => ws.height(r, ht));
@@ -4576,8 +4590,8 @@ function App() {
     const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || '';
     // 敬称は画面の選択（御中・様 など）に合わせる（以前は「御中」で固定）。見積書の印刷と同じく空なら御中
     const honor = clientHonorific || '御中';
-    // 宛名は左の欄（86mm）に1行で収める。長すぎるときは法人名／施設名の2行（kaiteiClientFit。Excel も同じ）
-    const clientFit = kaiteiClientFit([clientName, clientName2], honor, 86);
+    // 宛名は左の欄に1行で収める。長すぎるときは法人名／施設名の2行（kaiteiClientFitK。Excel も同じ）
+    const clientFit = kaiteiClientFitK([clientName, clientName2], honor, KAITEI_LEFT_MM);
     const dateStr = proposalDateText || (proposalDate ? String(proposalDate).replace(/-/g, '/') : '');
     const oi = officeInfo || {};
     const nm = (s) => esc((s || '').toString());
@@ -4602,26 +4616,31 @@ function App() {
     // （BIZ UDP明朝はかなが1em より狭いので、実際はこれより短い）。14pt でも入らない題名は折り返す。
     const titleText = (proposalTitle && proposalTitle.trim() && proposalTitle.trim() !== '御見積書') ? proposalTitle.trim() : '御見積り';
     const titleStyle = (() => {
-      const AVAIL_MM = 79;          // 86mm から字体の違い・太字の分の余裕を引いた幅
+      const AVAIL_MM = KAITEI_LEFT_MM - 7;  // 左の欄から字体の違い・太字の分の余裕を引いた幅
       const PT_MM = 25.4 / 72;
       const chars = Array.from(titleText);
       const em = chars.reduce((s, ch) => s + (/[ -~｡-ﾟ]/.test(ch) ? 0.55 : 1), 0);
-      let pt = 22;
+      let pt = 22 * KAITEI_K;
       // 幅 ＝ 字の幅の合計 ＋ 字間×字数（各字の後ろ）＋ 字下げ（字間と同じ）
       let ls = Math.min(0.5, (AVAIL_MM / (pt * PT_MM) - em) / (chars.length + 1));
       if (ls < 0.05) { ls = 0.05; pt = AVAIL_MM / ((em + ls * (chars.length + 1)) * PT_MM); }
-      const wrap = pt < 14;
-      if (wrap) pt = 14;
+      const wrap = pt < 14 * KAITEI_K;
+      if (wrap) pt = 14 * KAITEI_K;
       return 'font-size:' + pt.toFixed(1) + 'pt;letter-spacing:' + ls.toFixed(3) + 'em;text-indent:' + ls.toFixed(3) + 'em;white-space:' + (wrap ? 'normal' : 'nowrap') + ';';
     })();
     // 提案書モードと統一感のあるスタイル（明朝・ネイビー・ブルー基調）
-    return '<style>'
-      + '@page{size:A4 portrait;margin:12mm 10mm;}'
+    // 字の大きさ（pt）は下に書いた値の KAITEI_K 倍にする（kScale）。mm・px の幅や余白はそのまま
+    const kScale = (css) => css.replace(/(\d+(?:\.\d+)?)pt\b/g, (m, n) => (Math.round(Number(n) * KAITEI_K * 100) / 100) + 'pt');
+    // @page：上下 12mm は用紙の設定で取る（2ページ目からも同じ余白になり、下の余白が白紙の次のページに出ない）。
+    // 左右は帳票の中（.kaitei-doc と .page）で取るので 0。以前は 12mm 10mm で、帳票の中の余白と足し算になり、
+    // 印刷すると左右が約 28mm も空いていた
+    return '<style>' + kScale(''
+      + '@page{size:A4 portrait;margin:12mm 0;}'
       + '#print-content-holder,#print-content-holder *{box-sizing:border-box;}'
       + '#print-content-holder{font-family:"BIZ UDPMincho","BIZ UDMincho","Yu Mincho","YuMincho","Hiragino Mincho ProN","Hiragino Mincho Pro",serif;font-weight:500;color:#1f2937;background:#fff;-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important;-webkit-font-smoothing:antialiased;letter-spacing:0.02em;}'
       + '#print-content-holder .kaitei-doc{width:210mm;min-height:297mm;margin:0 auto;background:#fff;padding:12mm 10mm;box-sizing:border-box;font-size:9.5pt;line-height:1.6;overflow:hidden;}'
-      + '#print-content-holder .page{max-width:180mm;margin:0 auto;padding:5mm 7mm;}'
-      + '#print-content-holder .doc-header{display:flex;justify-content:space-between;gap:10mm;margin-bottom:5mm;align-items:flex-start;page-break-inside:avoid;}'
+      + '#print-content-holder .page{max-width:180mm;margin:0 auto;padding:5mm 4mm;}'
+      + '#print-content-holder .doc-header{display:flex;justify-content:space-between;gap:8mm;margin-bottom:5mm;align-items:flex-start;page-break-inside:avoid;}'
       + '#print-content-holder .doc-header .left{flex:1;min-width:0;}'
       + '#print-content-holder .doc-header .right{width:70mm;flex-shrink:0;}'
       + '#print-content-holder .title{font-family:"BIZ UDPMincho","BIZ UDMincho","Yu Mincho","YuMincho","Hiragino Mincho ProN",serif;font-size:22pt;font-weight:600;letter-spacing:0.5em;color:#1e3a8a;padding:0 0 6px 0;margin:0 0 10px 0;text-indent:0.5em;border-bottom:1.5px solid #3b82f6;}'
@@ -4640,7 +4659,7 @@ function App() {
       + '#print-content-holder .issuer-info .addr.invoice-no{font-size:7.5pt;color:#2563eb;font-weight:600;margin-top:1px;}'
       + '#print-content-holder .issuer-info .staff{font-size:8.5pt;margin-top:2px;padding-top:2px;color:#4b5563;display:flex;align-items:baseline;}'
       + '#print-content-holder .issuer-info .staff:first-of-type{margin-top:3px;padding-top:3px;border-top:0.5px dashed #bfdbfe;}'
-      + '#print-content-holder .issuer-info .staff .staff-label{display:inline-block;width:30px;color:#4b5563;font-size:8pt;letter-spacing:0.3em;flex-shrink:0;}'
+      + '#print-content-holder .issuer-info .staff .staff-label{display:inline-block;width:2.9em;color:#4b5563;font-size:8pt;letter-spacing:0.3em;flex-shrink:0;}'
       + '#print-content-holder .issuer-info .staff strong{color:#4b5563;font-weight:normal;}'
       + '#print-content-holder .stamps{display:flex;justify-content:flex-end;gap:4mm;margin-top:4px;padding-top:4px;border-top:1px solid #dbeafe;}'
       + '#print-content-holder .stamp-box{text-align:center;}'
@@ -4669,12 +4688,12 @@ function App() {
       + '#print-content-holder .bottom-remarks{margin-top:4mm;padding:8px 12px;border:1px solid #bfdbfe;background:#f8fbff;page-break-inside:avoid;}'
       + '#print-content-holder .bottom-remarks .label{font-size:8pt;font-weight:600;color:#2563eb;margin-bottom:3px;}'
       + '#print-content-holder .bottom-remarks .text{font-size:9pt;color:#374151;line-height:1.55;}'
-      + '</style>'
+      ) + '</style>'
       + '<div class="kaitei-doc"><div class="page">'
       + '<div class="doc-header">'
       + '<div class="left">'
       + '<h1 class="title" style="' + titleStyle + '">' + esc(titleText) + '</h1>'
-      + '<div class="client" style="font-size:' + clientFit.pt + 'pt;white-space:' + (clientFit.wrap ? 'normal' : 'nowrap') + ';">' + clientFit.lines.map(esc).join('<br>') + '<span class="suffix">' + esc(honor) + '</span></div>'
+      + '<div class="client" style="font-size:' + clientFit.pt + 'pt;white-space:' + (clientFit.wrap ? 'normal' : 'nowrap') + ';">' + clientFit.lines.map(esc).join('<br>') + '<span class="suffix" style="font-size:' + clientFit.suffixPt + 'pt;">' + esc(honor) + '</span></div>'
       + '<div class="greeting">いつもお世話になっております。下記の通り、価格改定のご案内をお送りいたします。ご確認のほどよろしくお願いいたします。</div>'
       + '</div>'
       + '<div class="right"><div class="issuer">'
@@ -4688,20 +4707,18 @@ function App() {
           // 各列は { main, sub? } で2行ヘッダーに整形
           const cols = [{ main: '商品名' }, { main: '改定前単価' }, { main: '改定後単価' }];
           const classes = ['','oldh r','newh r'];
+          const keys = ['po', 'pn'];
           if (showUnitCols) {
             cols.push({ main: '改定前', sub: unitLabel });
             cols.push({ main: '改定後', sub: unitLabel });
-            classes.push('oldh r','newh r');
+            classes.push('oldh r','newh r'); keys.push('upo', 'upn');
           }
-          cols.push({ main: '差額' }); classes.push('r');
-          if (showRate) { cols.push({ main: '値上がり率' }); classes.push('r'); }
+          cols.push({ main: '差額' }); classes.push('r'); keys.push('d');
+          if (showRate) { cols.push({ main: '値上がり率' }); classes.push('r'); keys.push('rate'); }
           const totalCols = cols.length;
-          // 列幅（合計100%）— 商品名は名前が切れないよう広めに確保
-          let widths = [];
-          if (totalCols === 4) widths = [64,12,12,12];
-          else if (totalCols === 5) widths = [58,10.5,10.5,10.5,10.5];
-          else if (totalCols === 6) widths = [50,10,10,10,10,10];
-          else widths = [34,11,11,11,11,11,11]; // 7列（数値列を広く確保してヘッダーはみ出し防止）
+          // 列幅（合計100%）。数値列は KAITEI_COL_PCT（Excel と同じ）、商品名はその残り
+          const numW = keys.map(k => KAITEI_COL_PCT[k]);
+          const widths = [100 - numW.reduce((a, b) => a + b, 0), ...numW];
           const colgroup = '<colgroup>' + widths.map(w => `<col style="width:${w}%">`).join('') + '</colgroup>';
           const thead = '<thead><tr>' + cols.map((c, i) => `<th class="${classes[i]}"><div class="th-main">${esc(c.main)}</div>${c.sub ? `<div class="th-sub">${esc(c.sub)}</div>` : ''}</th>`).join('') + '</tr></thead>';
           const emptyRow = `<tr><td colspan="${totalCols}" style="text-align:center;color:#999;padding:20px;">商品が入力されていません</td></tr>`;
@@ -4830,7 +4847,8 @@ function App() {
             const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
             const pw = 210, ph = 297, iw = pw, ih = canvas.height * iw / canvas.width, data = canvas.toDataURL('image/jpeg', 0.92);
             let hl = ih, pos = 0; pdf.addImage(data, 'JPEG', 0, pos, iw, ih, undefined, 'FAST'); hl -= ph;
-            while (hl > 0) { pos -= ph; pdf.addPage(); pdf.addImage(data, 'JPEG', 0, pos, iw, ih, undefined, 'FAST'); hl -= ph; }
+            // 丸めで 1mm 未満はみ出しただけなら次のページを足さない（白紙の2ページ目になっていた）
+            while (hl > 1) { pos -= ph; pdf.addPage(); pdf.addImage(data, 'JPEG', 0, pos, iw, ih, undefined, 'FAST'); hl -= ph; }
             pdf.save(fname); try { holder.remove(); } catch {} notify('PDFを保存しました', 'success');
           }).catch(err => { try { holder.remove(); } catch {} notify('PDF生成エラー: ' + (err?.message || err), 'error'); });
         }, 80));
@@ -4843,12 +4861,17 @@ function App() {
           #print-content-holder { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #f1f5f9; z-index: 99999; overflow: auto; padding: 12mm 8px; }
           #print-content-holder .kaitei-doc { box-shadow: 0 0 20px rgba(0,0,0,0.15); }
           @media print {
-            @page { size: A4 portrait; margin: 0; }
+            @page { size: A4 portrait; margin: 12mm 0; }
             html, body { margin: 0 !important; padding: 0 !important; width: 210mm !important; }
             body * { visibility: hidden !important; }
+            /* 見えなくした本体の画面が高さを取り、印刷が白紙の2枚目まで出ていた。見積書の印刷と同じく本体は外す */
+            body > *:not(#print-content-holder) { display: none !important; }
             #print-content-holder, #print-content-holder * { visibility: visible !important; }
             #print-content-holder { position: absolute !important; top: 0 !important; left: 0 !important; right: auto !important; width: 210mm !important; margin: 0 !important; padding: 0 !important; background: #fff !important; overflow: visible !important; }
-            #print-content-holder .kaitei-doc { box-shadow: none !important; width: 210mm !important; min-height: 297mm !important; padding: 14mm 12mm !important; margin: 0 !important; }
+            /* 高さは中身にまかせる。以前は用紙ちょうどの min-height:297mm で、わずかなはみ出しから白紙の2枚目が出ていた。
+               上下の余白は @page（12mm）＋ .page の上 5mm。左右は 12mm ＋ .page の左右（3mm＋4mm）＝ 19mm（Excel と同じ） */
+            #print-content-holder .kaitei-doc { box-shadow: none !important; width: 210mm !important; min-height: 0 !important; padding: 0 12mm !important; margin: 0 !important; }
+            #print-content-holder .page { padding-bottom: 0 !important; }
             #print-toolbar { display: none !important; }
           }
           ${a4PreviewToolbarCss('#d97706')}
@@ -5460,16 +5483,20 @@ function App() {
       { key: 'd', head: ['差額'], texts: rows.map(x => '+' + yen2S(Math.abs(x.d))) },
       ...(showRate ? [{ key: 'rate', head: ['値上がり率'], texts: rows.map(x => '+' + x.rate.toFixed(1) + '%') }] : []),
     ];
-    const pct = { 3: 12, 4: 10.5, 5: 10, 6: 11 }[defs.length] || 11; // 印刷の colgroup と同じ割合（数値列1本あたり %）
-    defs.forEach(d => { d.mm = Math.max(166 * pct / 100, xlFitMm([d.head[0], d.head[1] || ''], 8, true, 2.5), xlFitMm(d.texts, 9, true, 3)); });
-    const L = xlDocColumns(defs.map(d => d.mm));
+    // 字の大きさは印刷と同じく KAITEI_K 倍（kz）。行の高さも同じ倍率で高くする。本文の幅・余白も印刷と同じ（172mm・左右19mm）
+    const K = KAITEI_K;
+    const kz = (v) => Math.round(v * K * 2) / 2;
+    // 数値列の幅は印刷の colgroup と同じ割合（KAITEI_COL_PCT）。中身が入らなければ広げる
+    defs.forEach(d => { d.mm = Math.max(KAITEI_BODY_MM * KAITEI_COL_PCT[d.key] / 100, xlFitMm([d.head[0], d.head[1] || ''], kz(8), true, 2.5), xlFitMm(d.texts, kz(9), true, 3)); });
+    const L = xlDocColumns(defs.map(d => d.mm), KAITEI_BODY_MM);
     const col = {}; defs.forEach((d, i) => { col[d.key] = L.firstNum + i; });
     const nameEnd = L.firstNum - 1;
     const book = createXlsxBook();
-    const ws = book.addSheet('価格改定', { margins: { l: 22, r: 22, t: 17, b: 15, h: 8, f: 8 } });
+    const ws = book.addSheet('価格改定', { margins: { l: (210 - KAITEI_BODY_MM) / 2, r: (210 - KAITEI_BODY_MM) / 2, t: 17, b: 15, h: 8, f: 8 } });
     ws.setCols(L.cols);
     const spanMm = (c1, c2) => L.cols.slice(c1, c2 + 1).reduce((s, w) => s + w, 0);
-    const F = xlMincho;
+    // 字の大きさを KAITEI_K 倍にして書く（宛名だけは kaiteiClientFitK で決めた大きさをそのまま使うので xlMincho で）
+    const F = (o) => xlMincho(o && o.sz ? Object.assign({}, o, { sz: kz(o.sz) }) : o);
     const BL = 'thin:' + XL_C.line, BL3 = 'thin:' + XL_C.line3;
     const oi = officeInfo || {};
     const client = [clientName, clientName2].filter(s => s && s.trim()).join('　') || '';
@@ -5479,18 +5506,19 @@ function App() {
     // 宛名は印刷と同じ大きさ・同じ行の分け方で（kaiteiClientFit。欄が印刷の 86mm より狭いときはその幅で決める）。
     // 敬称も印刷と同じく画面の選択（空なら御中）
     const honor = clientHonorific || '御中';
-    const clientFit = kaiteiClientFit([clientName, clientName2], honor, Math.min(86, leftW));
+    const clientFit = kaiteiClientFitK([clientName, clientName2], honor, Math.min(KAITEI_LEFT_MM, leftW));
     const clientText = clientFit.lines.join('\n');
     let r = xlDocHeader(book, ws, L, {
       title,
-      client: [{ t: clientText + ' ', font: F({ sz: clientFit.pt, color: XL_C.ink2 }) }, { t: honor, font: F({ sz: 10.5, color: XL_C.blue3 }) }],
+      k: K,
+      client: [{ t: clientText + ' ', font: xlMincho({ sz: clientFit.pt, color: XL_C.ink2 }) }, { t: honor, font: xlMincho({ sz: clientFit.suffixPt, color: XL_C.blue3 }) }],
       clientLines: xlLineCount(clientText + ' ' + honor, leftW, clientFit.pt),
       greeting: 'いつもお世話になっております。下記の通り、価格改定のご案内をお送りいたします。ご確認のほどよろしくお願いいたします。',
       meta: [['発行日', dateStr || '—']],
       terms: null,
       issuer: { company: oi.companyName || '太陽シルバーサービス㈱', office: oi.officeName || '', postal: oi.postal || '', address: oi.address || '', phone: oi.phone || '', fax: oi.fax || '', invoice: oi.invoiceNumber || 'T1290001044462', manager: oi.manager || '', staff: oi.staffName || '' },
     });
-    ws.height(r, 12); r++;
+    ws.height(r, 12 * K); r++;
     // 見出し（○○単価は2段：改定前／100ml単価）
     const headRow = r;
     const headFill = { old: 'E2E8F0', new: XL_C.head };
@@ -5502,9 +5530,9 @@ function App() {
       const v = d.head[1] ? { rich: [{ t: d.head[0] + '\n', font: F({ sz: 8, b: true, color: ink }) }, { t: d.head[1], font: F({ sz: 6.5, color: XL_C.slate }) }] } : d.head[0];
       ws.box(r, col[d.key], r, col[d.key], v, { font: F({ sz: 8, b: true, color: ink }), fill: headFill[d.kind] || XL_C.head, border: hb(col[d.key]), align: { h: 'right', v: 'center', wrap: !!d.head[1] } });
     });
-    ws.height(r, showUnitCols ? 25 : 17); r++;
+    ws.height(r, (showUnitCols ? 25 : 17) * K); r++;
     const first = r;
-    if (!rows.length) { ws.box(r, 0, r, L.last, '商品が入力されていません', { font: F({ sz: 10, color: '999999' }), border: { l: BL, r: BL, b: BL }, align: { h: 'center', v: 'center' } }); ws.height(r, 40); r++; }
+    if (!rows.length) { ws.box(r, 0, r, L.last, '商品が入力されていません', { font: F({ sz: 10, color: '999999' }), border: { l: BL, r: BL, b: BL }, align: { h: 'center', v: 'center' } }); ws.height(r, 40 * K); r++; }
     rows.forEach(({ it, po, pn, vol, bScale, upo, upn, useUnitForDiff, baseOld, d, rate }, idx) => {
       const lastRow = idx === rows.length - 1;
       const zebra = idx % 2 === 1 ? XL_C.zebra : undefined;
@@ -5515,7 +5543,7 @@ function App() {
       const nameW = spanMm(0, nameEnd);
       const nameFont = F({ sz: 9.5, color: XL_C.ink2 });
       ws.box(r, 0, r, nameEnd, memo ? { rich: [{ t: String(it.name || ''), font: nameFont }, { t: '\n' + memo, font: F({ sz: 8.5, color: XL_C.navy2 }) }] } : String(it.name || ''), { font: nameFont, fill: zebra, border: bd(0), align: { v: 'center', wrap: true, indent: 1 } });
-      ws.height(r, Math.max(24, 11 + xlLineCount(it.name || '', nameW, 9.5) * 13.5 + (memo ? xlLineCount(memo, nameW, 8.5) * 12 : 0)));
+      ws.height(r, Math.max(24 * K, 11 * K + xlLineCount(it.name || '', nameW, kz(9.5)) * 13.5 * K + (memo ? xlLineCount(memo, nameW, kz(8.5)) * 12 * K : 0)));
       put('po', po, { color: XL_C.slate, fmt: xlYenFmt(po, { decimals: 0, zero: '−' }) });
       put('pn', pn, { b: true, color: XL_C.ink2, fill: XL_C.tint, fmt: xlYenFmt(pn, { decimals: 0, zero: '−' }) });
       if (showUnitCols) {
@@ -5537,11 +5565,11 @@ function App() {
       ]);
     }
     if (bottomRemarks && bottomRemarks.trim()) {
-      ws.height(r, 12); r++;
+      ws.height(r, 12 * K); r++;
       ws.box(r, 0, r, L.last, '備考', { font: F({ sz: 8, b: true, color: XL_C.blue }), fill: XL_C.zebra, border: { l: BL, r: BL, t: BL }, align: { v: 'bottom', indent: 1 } });
-      ws.height(r, 17); r++;
+      ws.height(r, 17 * K); r++;
       ws.box(r, 0, r, L.last, bottomRemarks, { font: F({ sz: 9, color: XL_C.sub2 }), fill: XL_C.zebra, border: { l: BL, r: BL, b: BL }, align: { v: 'top', wrap: true, indent: 1 } });
-      ws.height(r, xlLineCount(bottomRemarks, spanMm(0, L.last) - 4, 9) * 14 + 8); r++;
+      ws.height(r, xlLineCount(bottomRemarks, spanMm(0, L.last) - 4, kz(9)) * 14 * K + 8); r++;
     }
     ws.page.printArea = [0, 0, r - 1, L.last];
     ws.page.printTitles = [headRow, headRow];
