@@ -1068,10 +1068,10 @@ const kaiteiClientFit = (names, suffix, colMm, opt = {}) => {
   return { pt: min, suffixPt: sfx(min), lines, wrap: true };
 };
 // 価格改定の帳票（印刷・PDF・Excel）の字の大きさの倍率と、左の欄（題名・宛名）の幅。
-// 「全体的に文字が小さすぎて下が空いてしまう」と言われたので、本文 8〜10pt だったのを全部 1.25 倍にし、
+// 「全体的に文字が小さすぎて下が空いてしまう」と言われて 1.25 倍にしたあと、「もう少しだけ小さく」で 1.15 倍にした（本文 8〜10pt が元）。
 // 左右の余白を 22mm → 19mm（本文の幅 166mm → 172mm）、左の欄と発行元のすき間を 10mm → 8mm にして字の入る幅を広げた。
 // 大きさを変えたいときは KAITEI_K だけを変えればよい（印刷の CSS の pt と Excel の字・行の高さが一緒に変わる）。
-const KAITEI_K = 1.25;
+const KAITEI_K = 1.15;
 const KAITEI_BODY_MM = 172;  // 本文の幅（A4 の 210mm − 左右の余白 19mm×2）
 const KAITEI_LEFT_MM = 94;   // 左の欄（本文 172mm − 発行元 70mm − すき間 8mm）
 // 宛名の大きさ（印刷と Excel で同じ）。もとの 15pt の KAITEI_K 倍から、入らなければ 10pt まで小さくする
