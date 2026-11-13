@@ -4129,6 +4129,30 @@ function App() {
       + sections
       + '</div>';
   };
+  // A4 縦の印刷プレビュー（価格改定・比較資料）のボタン。
+  // 画面の右上の角に小さく出ていて遠く押しにくかったので、用紙（幅 210mm・まん中寄せ）のすぐ右、題名の高さに
+  // 大きく縦に並べる。用紙の右に入らない幅（1280px 未満・スマホ）では、用紙の上のまん中に横に並べ、
+  // そのぶん用紙を下げてボタンが用紙にかからないようにする。印刷のときは各プレビューの @media print で消える。
+  const a4PreviewToolbarCss = (printBg) => `
+        #print-toolbar { position: fixed; z-index: 100000; top: calc(12mm + 17mm); left: calc(50% + 105mm + 20px); display: flex; flex-direction: column; gap: 10px; width: 190px; }
+        #print-toolbar button { display: block; width: 100%; padding: 12px 14px; border: none; border-radius: 8px; font-family: inherit; font-weight: bold; font-size: 17px; line-height: 1.3; cursor: pointer; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,0.2); }
+        #print-toolbar button:hover { filter: brightness(0.92); }
+        #print-toolbar .print-btn { background: ${printBg}; color: #fff; }
+        #print-toolbar .excel-btn { background: #15803d; color: #fff; }
+        #print-toolbar .close-btn { background: #475569; color: #fff; margin-top: 8px; }
+        @media screen and (max-width: 1279px) {
+          #print-toolbar { top: 10px; left: 50%; transform: translateX(-50%); flex-direction: row; flex-wrap: wrap; justify-content: center; width: max-content; max-width: calc(100vw - 16px); }
+          #print-toolbar button { width: auto; padding: 10px 18px; }
+          #print-toolbar .close-btn { margin-top: 0; }
+          #print-content-holder { padding-top: 76px; }
+        }
+        /* スマホ：本体の画面が端末の幅より広い（390px の端末で 496px）ため、50% のまん中寄せだと
+           右にずれて「閉じる」が画面の外に出る。左の端から並べて、3つとも必ず見えるようにする。 */
+        @media screen and (max-width: 640px) {
+          #print-toolbar { left: 8px; transform: none; justify-content: flex-start; gap: 6px; }
+          #print-toolbar button { padding: 9px 12px; font-size: 15px; }
+        }
+  `;
   const handleGraphsPrint = () => {
     if (document.getElementById('print-content-holder')) return;
     const html = buildGraphsHtml();
@@ -4148,10 +4172,7 @@ function App() {
           #print-content-holder .graphs-doc { box-shadow: none !important; width: 210mm !important; min-height: 297mm !important; padding: 14mm 12mm !important; margin: 0 !important; }
           #print-toolbar { display: none !important; }
         }
-        #print-toolbar { position: fixed; top: 10px; right: 10px; z-index: 100000; display: flex; gap: 8px; }
-        #print-toolbar button { padding: 8px 16px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
-        #print-toolbar .print-btn { background: #2563eb; color: #fff; }
-        #print-toolbar .close-btn { background: #475569; color: #fff; }
+        ${a4PreviewToolbarCss('#2563eb')}
       `;
       document.head.appendChild(styleEl);
       document.body.appendChild(holder);
@@ -4545,6 +4566,25 @@ function App() {
     ].filter(Boolean).join('');
     const stampsHtml = '<div class="stamps"><div class="stamp-box"><div class="stamp-label">所長印</div><div class="stamp-square"></div></div><div class="stamp-box"><div class="stamp-label">担当印</div><div class="stamp-square"></div></div></div>';
     const biko = (bottomRemarks && bottomRemarks.trim()) ? '<div class="biko"><span class="bt">備考</span>' + esc(bottomRemarks).replace(/\n/g, '<br>') + '</div>' : '';
+    // 題名は左の欄（本文 166mm − 発行元 70mm − すき間 10mm ＝ 86mm）に1行で収める。
+    // 以前は 22pt・字間 0.5em 固定で、「価格改定のご案内」（8字）が約97mm になり「内」だけ2行目に落ちていた。
+    // Excel の題名（xlTitle：字間をあけ、入らなければ詰めて縮小）と同じ考え方で、まず字間を詰め、
+    // それでも入らない長い題名だけ字を小さくする。幅は全角1字＝1em・半角＝0.55em で多めに見積もる
+    // （BIZ UDP明朝はかなが1em より狭いので、実際はこれより短い）。14pt でも入らない題名は折り返す。
+    const titleText = (proposalTitle && proposalTitle.trim() && proposalTitle.trim() !== '御見積書') ? proposalTitle.trim() : '御見積り';
+    const titleStyle = (() => {
+      const AVAIL_MM = 79;          // 86mm から字体の違い・太字の分の余裕を引いた幅
+      const PT_MM = 25.4 / 72;
+      const chars = Array.from(titleText);
+      const em = chars.reduce((s, ch) => s + (/[ -~｡-ﾟ]/.test(ch) ? 0.55 : 1), 0);
+      let pt = 22;
+      // 幅 ＝ 字の幅の合計 ＋ 字間×字数（各字の後ろ）＋ 字下げ（字間と同じ）
+      let ls = Math.min(0.5, (AVAIL_MM / (pt * PT_MM) - em) / (chars.length + 1));
+      if (ls < 0.05) { ls = 0.05; pt = AVAIL_MM / ((em + ls * (chars.length + 1)) * PT_MM); }
+      const wrap = pt < 14;
+      if (wrap) pt = 14;
+      return 'font-size:' + pt.toFixed(1) + 'pt;letter-spacing:' + ls.toFixed(3) + 'em;text-indent:' + ls.toFixed(3) + 'em;white-space:' + (wrap ? 'normal' : 'nowrap') + ';';
+    })();
     // 提案書モードと統一感のあるスタイル（明朝・ネイビー・ブルー基調）
     return '<style>'
       + '@page{size:A4 portrait;margin:12mm 10mm;}'
@@ -4604,7 +4644,7 @@ function App() {
       + '<div class="kaitei-doc"><div class="page">'
       + '<div class="doc-header">'
       + '<div class="left">'
-      + '<h1 class="title">' + esc((proposalTitle && proposalTitle.trim() && proposalTitle.trim() !== '御見積書') ? proposalTitle.trim() : '御見積り') + '</h1>'
+      + '<h1 class="title" style="' + titleStyle + '">' + esc(titleText) + '</h1>'
       + '<div class="client">' + (client || '　') + '<span class="suffix">御中</span></div>'
       + '<div class="greeting">いつもお世話になっております。下記の通り、価格改定のご案内をお送りいたします。ご確認のほどよろしくお願いいたします。</div>'
       + '</div>'
@@ -4782,11 +4822,7 @@ function App() {
             #print-content-holder .kaitei-doc { box-shadow: none !important; width: 210mm !important; min-height: 297mm !important; padding: 14mm 12mm !important; margin: 0 !important; }
             #print-toolbar { display: none !important; }
           }
-          #print-toolbar { position: fixed; top: 10px; right: 10px; z-index: 100000; display: flex; gap: 8px; }
-          #print-toolbar button { padding: 8px 16px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
-          #print-toolbar .print-btn { background: #d97706; color: #fff; }
-          #print-toolbar .excel-btn { background: #15803d; color: #fff; }
-          #print-toolbar .close-btn { background: #475569; color: #fff; }
+          ${a4PreviewToolbarCss('#d97706')}
         `;
         document.head.appendChild(styleEl);
         document.body.appendChild(holder);
